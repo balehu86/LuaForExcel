@@ -1,0 +1,438 @@
+' ============================================
+' Excel-Lua 5.4 集成模块
+' 使用纯 DLL 调用方式
+' ============================================
+
+Option Explicit
+
+' ===== Lua 5.4 DLL 声明 =====
+#If VBA7 Then
+    Private Declare PtrSafe Function luaL_newstate Lib "lua54.dll" () As LongPtr
+    Private Declare PtrSafe Sub luaL_openlibs Lib "lua54.dll" (ByVal L As LongPtr)
+    Private Declare PtrSafe Sub lua_close Lib "lua54.dll" (ByVal L As LongPtr)
+    Private Declare PtrSafe Function luaL_loadstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As String) As Long
+    Private Declare PtrSafe Function lua_pcallk Lib "lua54.dll" (ByVal L As LongPtr, ByVal nargs As Long, ByVal nResults As Long, ByVal msgh As Long, ByVal ctx As LongPtr, ByVal k As LongPtr) As Long
+    Private Declare PtrSafe Function lua_tonumberx Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal isnum As LongPtr) As Double
+    Private Declare PtrSafe Function lua_tolstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal leng As LongPtr) As LongPtr
+    Private Declare PtrSafe Function lua_toboolean Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
+    Private Declare PtrSafe Function lua_type Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
+    Private Declare PtrSafe Sub lua_pushnil Lib "lua54.dll" (ByVal L As LongPtr)
+    Private Declare PtrSafe Sub lua_pushnumber Lib "lua54.dll" (ByVal L As LongPtr, ByVal n As Double)
+    Private Declare PtrSafe Sub lua_pushstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As String)
+    Private Declare PtrSafe Sub lua_pushboolean Lib "lua54.dll" (ByVal L As LongPtr, ByVal b As Long)
+    Private Declare PtrSafe Function lua_gettop Lib "lua54.dll" (ByVal L As LongPtr) As Long
+    Private Declare PtrSafe Sub lua_settop Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
+    Private Declare PtrSafe Function lua_getglobal Lib "lua54.dll" (ByVal L As LongPtr, ByVal name As String) As Long
+    Private Declare PtrSafe Sub lua_createtable Lib "lua54.dll" (ByVal L As LongPtr, ByVal narr As Long, ByVal nrec As Long)
+    Private Declare PtrSafe Sub lua_rawseti Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal n As LongPtr)
+    Private Declare PtrSafe Function lua_rawgeti Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal n As LongPtr) As Long
+    Private Declare PtrSafe Function lua_rawlen Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As LongPtr
+    Private Declare PtrSafe Function luaL_loadfilex Lib "lua54.dll" (ByVal L As LongPtr, ByVal filename As String, ByVal mode As LongPtr) As Long
+    Private Declare PtrSafe Sub lua_setglobal Lib "lua54.dll" (ByVal L As LongPtr, ByVal name As String)
+    Private Declare PtrSafe Function lua_next Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
+    
+    Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
+    Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
+    
+    Private Type LuaState
+        L As LongPtr
+        functionsPath As String
+        lastModified As Date
+    End Type
+#Else
+    ' 32位版本
+    Private Declare Function luaL_newstate Lib "lua54.dll" () As Long
+    ' ... 其他32位声明
+    Private Type LuaState
+        L As Long
+        functionsPath As String
+        lastModified As Date
+    End Type
+#End If
+
+' ===== Lua 类型常量 =====
+Private Const LUA_TNIL = 0
+Private Const LUA_TBOOLEAN = 1
+Private Const LUA_TNUMBER = 3
+Private Const LUA_TSTRING = 4
+Private Const LUA_TTABLE = 5
+
+' ===== 全局变量 =====
+Private g_LuaState As LuaState
+Private g_Initialized As Boolean
+
+' ============================================
+' 初始化 Lua 状态机
+' ============================================
+Private Function InitLuaState() As Boolean
+    On Error GoTo ErrorHandler
+    
+    If g_Initialized Then
+        InitLuaState = True
+        Exit Function
+    End If
+    
+    ' 创建新的 Lua 状态机
+    g_LuaState.L = luaL_newstate()
+    If g_LuaState.L = 0 Then
+        MsgBox "无法创建 Lua 状态机！请确保 lua54.dll 在系统路径中。", vbCritical
+        InitLuaState = False
+        Exit Function
+    End If
+    
+    ' 加载标准库
+    luaL_openlibs g_LuaState.L
+    
+    ' 设置 functions.lua 路径（与 Excel 文件同目录）
+    g_LuaState.functionsPath = ThisWorkbook.Path & "\functions.lua"
+    g_LuaState.lastModified = #1/1/1900#
+    
+    g_Initialized = True
+    InitLuaState = True
+    Exit Function
+    
+ErrorHandler:
+    MsgBox "初始化 Lua 失败: " & Err.Description, vbCritical
+    InitLuaState = False
+End Function
+
+' ============================================
+' 检查并重载 functions.lua
+' ============================================
+Private Function CheckAndReloadFunctions() As Boolean
+    On Error Resume Next
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    If Not fso.FileExists(g_LuaState.functionsPath) Then
+        CheckAndReloadFunctions = True ' 文件不存在也继续
+        Exit Function
+    End If
+    
+    Dim currentModified As Date
+    currentModified = FileDateTime(g_LuaState.functionsPath)
+    
+    ' 检查是否需要重载
+    If currentModified <> g_LuaState.lastModified Then
+        Dim result As Long
+        result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
+        
+        If result = 0 Then
+    result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
+            If result = 0 Then
+                g_LuaState.lastModified = currentModified
+                CheckAndReloadFunctions = True
+                Exit Function
+            End If
+        End If
+        
+        ' 加载失败，获取错误信息
+        Dim errMsg As String
+        errMsg = LuaToString(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, 0
+        MsgBox "加载 functions.lua 失败: " & errMsg, vbExclamation
+        CheckAndReloadFunctions = False
+        Exit Function
+    End If
+    
+    CheckAndReloadFunctions = True
+End Function
+
+' ============================================
+' 将 VBA 值推入 Lua 栈
+' ============================================
+Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
+    If IsEmpty(value) Or IsNull(value) Then
+        lua_pushnil L
+    ElseIf IsNumeric(value) Then
+        lua_pushnumber L, CDbl(value)
+    ElseIf VarType(value) = vbBoolean Then
+        lua_pushboolean L, IIf(value, 1, 0)
+    ElseIf isArray(value) Then
+        PushArray L, value
+    Else
+        lua_pushstring L, CStr(value)
+    End If
+End Sub
+
+' ============================================
+' 将二维数组推入 Lua（作为 table）
+' ============================================
+Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
+    Dim i As Long, j As Long
+    Dim rows As Long, cols As Long
+    
+    rows = UBound(arr, 1) - LBound(arr, 1) + 1
+    cols = UBound(arr, 2) - LBound(arr, 2) + 1
+    
+    ' 创建主表
+    lua_createtable L, rows, 0
+    
+    For i = LBound(arr, 1) To UBound(arr, 1)
+        ' 创建行表
+        lua_createtable L, cols, 0
+        
+        For j = LBound(arr, 2) To UBound(arr, 2)
+            PushValue L, arr(i, j)
+            lua_rawseti L, -2, j - LBound(arr, 2) + 1
+        Next j
+        
+        lua_rawseti L, -2, i - LBound(arr, 1) + 1
+    Next i
+End Sub
+
+' ============================================
+' 从 Lua 栈获取字符串
+' ============================================
+Private Function LuaToString(ByVal L As LongPtr, ByVal idx As Long) As String
+    Dim ptr As LongPtr
+    Dim length As Long
+    Dim buffer() As Byte
+    
+    ptr = lua_tolstring(L, idx, 0)
+    If ptr = 0 Then
+        LuaToString = ""
+        Exit Function
+    End If
+    
+    length = lstrlenA(ptr)
+    If length > 0 Then
+        ReDim buffer(0 To length - 1)
+        CopyMemory buffer(0), ByVal ptr, length
+        LuaToString = StrConv(buffer, vbUnicode)
+    Else
+        LuaToString = ""
+    End If
+End Function
+
+' ============================================
+' 从 Lua 栈获取值
+' ============================================
+Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
+    Dim luaType As Long
+    luaType = lua_type(L, idx)
+    
+    Select Case luaType
+        Case LUA_TNIL
+            GetValue = Empty
+        Case LUA_TBOOLEAN
+            GetValue = (lua_toboolean(L, idx) <> 0)
+        Case LUA_TNUMBER
+            GetValue = lua_tonumberx(L, idx, 0)
+        Case LUA_TSTRING
+            GetValue = LuaToString(L, idx)
+        Case LUA_TTABLE
+            GetValue = TableToArray(L, idx)
+        Case Else
+            GetValue = "#LUA_TYPE_" & luaType
+    End Select
+End Function
+
+' ============================================
+' 将 Lua table 转换为二维数组
+' ============================================
+Private Function TableToArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
+    Dim rows As LongPtr, cols As LongPtr
+    Dim i As Long, j As Long
+    Dim arr() As Variant
+    Dim isArray As Boolean
+    
+    ' 获取表长度
+    rows = lua_rawlen(L, idx)
+    
+    If rows = 0 Then
+        TableToArray = Empty
+        Exit Function
+    End If
+    
+    ' 检查第一个元素是否是表（判断是否为二维）
+    lua_rawgeti L, idx, 1
+    isArray = (lua_type(L, -1) = LUA_TTABLE)
+    
+    If isArray Then
+        ' 二维数组
+        cols = lua_rawlen(L, -1)
+        lua_settop L, -2 ' 弹出测试元素
+        
+        ReDim arr(1 To CLng(rows), 1 To CLng(cols))
+        
+        For i = 1 To CLng(rows)
+            lua_rawgeti L, idx, CLng(i)
+            For j = 1 To CLng(cols)
+                lua_rawgeti L, -1, CLng(j)
+                arr(i, j) = GetValue(L, -1)
+                lua_settop L, -2
+            Next j
+            lua_settop L, -2
+        Next i
+    Else
+        ' 一维数组（转为单行二维数组）
+        lua_settop L, -2
+        ReDim arr(1 To 1, 1 To CLng(rows))
+        
+        For i = 1 To CLng(rows)
+            lua_rawgeti L, idx, CLng(i)
+            arr(1, i) = GetValue(L, -1)
+            lua_settop L, -2
+        Next i
+    End If
+    
+    TableToArray = arr
+End Function
+
+' ============================================
+' 公开函数：LuaEval - 执行 Lua 表达式
+' ============================================
+Public Function LuaEval(expression As String) As Variant
+    On Error GoTo ErrorHandler
+    
+    If Not InitLuaState() Then
+        LuaEval = CVErr(xlErrValue)
+        Exit Function
+    End If
+    
+    CheckAndReloadFunctions
+    
+    Dim fullCode As String
+    fullCode = "return " & expression
+    
+    ' 加载并执行代码
+    Dim result As Long
+    result = luaL_loadstring(g_LuaState.L, fullCode)
+    
+    If result <> 0 Then
+        Dim errMsg As String
+        errMsg = LuaToString(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, 0
+        LuaEval = "错误: " & errMsg
+        Exit Function
+    End If
+    
+    result = lua_pcallk(g_LuaState.L, 0, 1, 0, 0, 0)
+    
+    If result <> 0 Then
+        errMsg = LuaToString(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, 0
+        LuaEval = "运行错误: " & errMsg
+        Exit Function
+    End If
+    
+    ' 获取返回值
+    LuaEval = GetValue(g_LuaState.L, -1)
+    lua_settop g_LuaState.L, 0
+    
+    Exit Function
+    
+ErrorHandler:
+    LuaEval = "VBA错误: " & Err.Description
+    If g_Initialized Then lua_settop g_LuaState.L, 0
+End Function
+
+' ============================================
+' 公开函数：LuaCall - 调用 functions.lua 中的函数
+' ============================================
+Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
+    On Error GoTo ErrorHandler
+    
+    If Not InitLuaState() Then
+        LuaCall = CVErr(xlErrValue)
+        Exit Function
+    End If
+    
+    CheckAndReloadFunctions
+    
+    ' 获取函数
+    lua_getglobal g_LuaState.L, funcName
+    
+    If lua_type(g_LuaState.L, -1) <> 6 Then ' 6 = function
+        lua_settop g_LuaState.L, 0
+        LuaCall = "错误: 函数 '" & funcName & "' 不存在"
+        Exit Function
+    End If
+    
+    ' 推入参数
+    Dim i As Long
+    Dim argCount As Long
+    argCount = 0
+    
+    For i = LBound(args) To UBound(args)
+        If TypeName(args(i)) = "Range" Then
+            ' 处理单元格区域
+            Dim rng As Range
+            Set rng = args(i)
+            
+            If rng.Cells.Count = 1 Then
+                ' 单个单元格
+                PushValue g_LuaState.L, rng.value
+                argCount = argCount + 1
+            Else
+                ' 多个单元格，转为二维数组
+                Dim arr As Variant
+                arr = rng.value
+                PushArray g_LuaState.L, arr
+                argCount = argCount + 1
+            End If
+        Else
+            ' 普通值
+            PushValue g_LuaState.L, args(i)
+            argCount = argCount + 1
+        End If
+    Next i
+    
+    ' 调用函数（支持多返回值）
+    Dim result As Long
+    result = lua_pcallk(g_LuaState.L, argCount, -1, 0, 0, 0)
+    
+    If result <> 0 Then
+        Dim errMsg As String
+        errMsg = LuaToString(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, 0
+        LuaCall = "运行错误: " & errMsg
+        Exit Function
+    End If
+    
+    ' 获取返回值数量
+    Dim nResults As Long
+    nResults = lua_gettop(g_LuaState.L)
+    
+    If nResults = 0 Then
+        LuaCall = Empty
+    ElseIf nResults = 1 Then
+        LuaCall = GetValue(g_LuaState.L, -1)
+    Else
+        ' 多返回值，转为数组（用于溢出）
+        Dim results() As Variant
+        ReDim results(1 To 1, 1 To nResults)
+        
+        For i = 1 To nResults
+            results(1, i) = GetValue(g_LuaState.L, i)
+        Next i
+        
+        LuaCall = results
+    End If
+    
+    lua_settop g_LuaState.L, 0
+    Exit Function
+    
+ErrorHandler:
+    LuaCall = "VBA错误: " & Err.Description
+    If g_Initialized Then lua_settop g_LuaState.L, 0
+End Function
+
+' ============================================
+' 清理函数（可选，在关闭工作簿时调用）
+' ============================================
+Public Sub CleanupLua()
+    If g_Initialized Then
+        lua_close g_LuaState.L
+        g_Initialized = False
+    End If
+End Sub
+
+' ============================================
+' 自动清理（工作簿关闭时）
+' ============================================
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    CleanupLua
+End Sub
