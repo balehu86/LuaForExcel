@@ -1,4 +1,4 @@
-' ============================================
+检查LuaToString函数栈，是否能够精简？' ============================================
 ' Excel-Lua 5.4 集成模块
 ' 使用纯 DLL 调用方式
 ' ============================================
@@ -67,13 +67,13 @@ Private Function LuaToStringFromState(ByVal L As LongPtr, ByVal idx As Long) As 
     Dim length As Long
     Dim buffer() As Byte
     
-    ptr = lua_tolstring(L, idx, 0)
+    ' 使用 lua_tolstring 获取字符串指针和长度
+    ptr = lua_tolstring(L, idx, VarPtr(length))
     If ptr = 0 Then
         LuaToStringFromState = ""
         Exit Function
     End If
     
-    length = lstrlenA(ptr)
     If length > 0 Then
         ReDim buffer(0 To length - 1)
         CopyMemory buffer(0), ByVal ptr, length
@@ -81,6 +81,11 @@ Private Function LuaToStringFromState(ByVal L As LongPtr, ByVal idx As Long) As 
     Else
         LuaToStringFromState = ""
     End If
+End Function
+
+' 直接使用上面的函数，无需额外包装
+Private Function LuaToString(ByVal L As LongPtr, ByVal idx As Long) As String
+    LuaToString = LuaToStringFromState(L, idx)
 End Function
 
 ' ============================================
@@ -248,13 +253,6 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
         lua_rawseti L, -2, i - LBound(arr, 1) + 1
     Next i
 End Sub
-
-' ============================================
-' 从 Lua 栈获取字符串
-' ============================================
-Private Function LuaToString(ByVal L As LongPtr, ByVal idx As Long) As String
-    LuaToString = LuaToStringFromState(L, idx)
-End Function
 
 ' ============================================
 ' 从 Lua 栈获取值
@@ -486,3 +484,6 @@ End Sub
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     CleanupLua
 End Sub
+
+
+
