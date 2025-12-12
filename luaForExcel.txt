@@ -1,5 +1,5 @@
-检查LuaToString函数栈，是否能够精简？' ============================================
-' Excel-Lua 5.4 集成模块
+' ============================================
+' Excel-Lua 5.4 集成模块（优化版）
 ' 使用纯 DLL 调用方式
 ' ============================================
 
@@ -11,7 +11,7 @@ Option Explicit
     Private Declare PtrSafe Sub luaL_openlibs Lib "lua54.dll" (ByVal L As LongPtr)
     Private Declare PtrSafe Sub lua_close Lib "lua54.dll" (ByVal L As LongPtr)
     Private Declare PtrSafe Function luaL_loadstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As String) As Long
-    Private Declare PtrSafe Function lua_pcallk Lib "lua54.dll" (ByVal L As LongPtr, ByVal nargs As Long, ByVal nresults As Long, ByVal msgh As Long, ByVal ctx As LongPtr, ByVal k As LongPtr) As Long
+    Private Declare PtrSafe Function lua_pcallk Lib "lua54.dll" (ByVal L As LongPtr, ByVal nargs As Long, ByVal nResults As Long, ByVal msgh As Long, ByVal ctx As LongPtr, ByVal k As LongPtr) As Long
     Private Declare PtrSafe Function lua_tonumberx Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal isnum As LongPtr) As Double
     Private Declare PtrSafe Function lua_tolstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal leng As LongPtr) As LongPtr
     Private Declare PtrSafe Function lua_toboolean Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
@@ -30,8 +30,7 @@ Option Explicit
     Private Declare PtrSafe Function luaL_loadfilex Lib "lua54.dll" (ByVal L As LongPtr, ByVal filename As String, ByVal mode As LongPtr) As Long
     Private Declare PtrSafe Sub lua_setglobal Lib "lua54.dll" (ByVal L As LongPtr, ByVal name As String)
     Private Declare PtrSafe Function lua_next Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
-    
-    Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal Length As LongPtr)
+    Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
     
     Private Type LuaState
@@ -40,9 +39,7 @@ Option Explicit
         lastModified As Date
     End Type
 #Else
-    ' 32位版本
-    Private Declare Function luaL_newstate Lib "lua54.dll" () As Long
-    ' ... 其他32位声明
+    ' 32位版本声明（略）
     Private Type LuaState
         L As Long
         functionsPath As String
@@ -60,40 +57,21 @@ Private Const LUA_TTABLE = 5
 ' ===== 全局变量 =====
 Private g_LuaState As LuaState
 Private g_Initialized As Boolean
+Private g_HotReloadEnabled As Boolean
 
-' 通用版 LuaToString，接受任意 L
-Private Function LuaToStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
-    Dim ptr As LongPtr
-    Dim length As Long
-    Dim buffer() As Byte
-    
-    ' 使用 lua_tolstring 获取字符串指针和长度
-    ptr = lua_tolstring(L, idx, VarPtr(length))
-    If ptr = 0 Then
-        LuaToStringFromState = ""
-        Exit Function
-    End If
-    
-    If length > 0 Then
-        ReDim buffer(0 To length - 1)
-        CopyMemory buffer(0), ByVal ptr, length
-        LuaToStringFromState = StrConv(buffer, vbUnicode)
-    Else
-        LuaToStringFromState = ""
-    End If
-End Function
+' ===== 配置常量 =====
+Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 
-' 直接使用上面的函数，无需额外包装
-Private Function LuaToString(ByVal L As LongPtr, ByVal idx As Long) As String
-    LuaToString = LuaToStringFromState(L, idx)
-End Function
 
 ' ============================================
-' 初始化 Lua 状态机
+' 第一部分：核心初始化和清理
 ' ============================================
+
+' 主初始化函数：创建空白 Lua 状态机
 Private Function InitLuaState() As Boolean
     On Error GoTo ErrorHandler
     
+    ' 如果已初始化，直接返回成功
     If g_Initialized Then
         InitLuaState = True
         Exit Function
@@ -102,118 +80,372 @@ Private Function InitLuaState() As Boolean
     ' 创建新的 Lua 状态机
     g_LuaState.L = luaL_newstate()
     If g_LuaState.L = 0 Then
-        MsgBox "无法创建 Lua 状态机！请确保 lua54.dll 在系统路径中。", vbCritical
+        MsgBox "❌ 无法创建 Lua 状态机。" & vbCrLf & _
+               "请确保 lua54.dll 在系统路径中。", vbCritical, "初始化失败"
         InitLuaState = False
         Exit Function
     End If
     
-    ' 加载标准库
+    ' 加载 Lua 标准库
     luaL_openlibs g_LuaState.L
     
-    ' 设置 functions.lua 路径（与 Excel 文件同目录）
+    ' 设置 functions.lua 路径
     g_LuaState.functionsPath = ThisWorkbook.Path & "\functions.lua"
     g_LuaState.lastModified = #1/1/1900#
     
+    ' 标记为已初始化
     g_Initialized = True
+    g_HotReloadEnabled = DEFAULT_HOT_RELOAD_ENABLED
+    
+    ' 尝试首次加载 functions.lua（失败不影响继续）
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    If fso.FileExists(g_LuaState.functionsPath) Then
+        If TryLoadFunctionsFile() Then
+            ' 加载成功，静默处理
+        Else
+            MsgBox "⚠️ functions.lua 加载失败。" & vbCrLf & _
+                   "Lua 引擎已启动，但自定义函数不可用。" & vbCrLf & _
+                   "请检查文件语法后手动重载。", vbExclamation, "初始化警告"
+        End If
+    End If
+    
     InitLuaState = True
     Exit Function
-    
+
 ErrorHandler:
-    MsgBox "初始化 Lua 失败: " & Err.Description, vbCritical
+    MsgBox "❌ 初始化 Lua 失败: " & Err.Description, vbCritical, "严重错误"
     InitLuaState = False
 End Function
+
+' 清理 Lua 状态机
+Public Sub CleanupLua()
+    If g_Initialized Then
+        lua_close g_LuaState.L
+        g_LuaState.L = 0
+        g_Initialized = False
+    End If
+End Sub
+
+' 工作簿关闭时自动清理
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    CleanupLua
+End Sub
+
+
 ' ============================================
-' 安全、原子的热重载 functions.lua
-' 仅当新文件可成功加载并执行时，才在主状态中重载
+' 第二部分：functions.lua 加载和热重载
 ' ============================================
-Private Function CheckAndReloadFunctions() As Boolean
+
+' 在临时状态中验证 functions.lua 语法
+Private Function ValidateFunctionsFile() As Boolean
     On Error GoTo ErrorHandler
+    
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     
     If Not fso.FileExists(g_LuaState.functionsPath) Then
-        ' 文件不存在，视为无需重载（保留旧状态）
-        CheckAndReloadFunctions = True
+        ValidateFunctionsFile = False
         Exit Function
     End If
     
-    Dim currentModified As Date
-    currentModified = FileDateTime(g_LuaState.functionsPath)
-    
-    ' 无需重载
-    If currentModified = g_LuaState.lastModified Then
-        CheckAndReloadFunctions = True
-        Exit Function
-    End If
-    
-    ' === 第一步：在临时状态中验证 functions.lua ===
+    ' 创建临时 Lua 状态
     Dim tempL As LongPtr
     tempL = luaL_newstate()
     If tempL = 0 Then
-        MsgBox "无法创建临时 Lua 状态用于验证 functions.lua", vbCritical
-        CheckAndReloadFunctions = False
+        ValidateFunctionsFile = False
         Exit Function
     End If
     
-    ' 加载标准库（确保与主状态一致）
     luaL_openlibs tempL
     
+    ' 尝试加载和执行
     Dim result As Long
     result = luaL_loadfilex(tempL, g_LuaState.functionsPath, 0)
-    If result = 0 Then
-        result = lua_pcallk(tempL, 0, 0, 0, 0, 0)
-    End If
+    If result = 0 Then result = lua_pcallk(tempL, 0, 0, 0, 0, 0)
     
-    Dim errMsg As String
+    ' 检查结果
     If result <> 0 Then
-        ' 获取错误信息
-        errMsg = LuaToStringFromState(tempL, -1)
+        Dim errMsg As String
+        errMsg = GetStringFromState(tempL, -1)
         lua_close tempL
         
-        MsgBox "functions.lua 存在错误，跳过热重载：" & vbCrLf & errMsg, vbExclamation
-        CheckAndReloadFunctions = False
+        MsgBox "❌ functions.lua 存在语法错误：" & vbCrLf & vbCrLf & _
+               errMsg, vbCritical, "文件验证失败"
+        ValidateFunctionsFile = False
         Exit Function
     End If
     
-    ' 验证成功，关闭临时状态
     lua_close tempL
-    
-    ' === 第二步：在主状态中安全重载 ===
-    ' 注意：此时我们知道文件是合法的，可以安全执行
-    Dim topBefore As Long
-    topBefore = lua_gettop(g_LuaState.L) ' 记录栈顶，用于恢复
-    
-    result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
-    If result = 0 Then
-        result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
-    End If
-    
-    ' 无论成功与否，恢复栈（但理论上应成功）
-    lua_settop g_LuaState.L, topBefore
-    
-    If result <> 0 Then
-        ' 极端情况：主状态执行失败（如内存不足），但临时状态成功？不太可能
-        errMsg = LuaToString(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, topBefore
-        MsgBox "主状态加载 functions.lua 异常（罕见）：" & errMsg, vbCritical
-        CheckAndReloadFunctions = False
-    Else
-        ' 成功更新
-        g_LuaState.lastModified = currentModified
-        CheckAndReloadFunctions = True
-    End If
-    
+    ValidateFunctionsFile = True
     Exit Function
 
 ErrorHandler:
     If tempL <> 0 Then lua_close tempL
-    MsgBox "热重载 functions.lua 时发生 VBA 错误: " & Err.Description, vbCritical
-    CheckAndReloadFunctions = False
+    ValidateFunctionsFile = False
 End Function
 
+' 在主状态中加载 functions.lua
+Private Function LoadFunctionsIntoMainState() As Boolean
+    On Error GoTo ErrorHandler
+    
+    Dim topBefore As Long
+    topBefore = lua_gettop(g_LuaState.L)
+    
+    Dim result As Long
+    result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
+    If result = 0 Then result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
+    
+    ' 恢复栈
+    lua_settop g_LuaState.L, topBefore
+    
+    If result <> 0 Then
+        Dim errMsg As String
+        errMsg = GetStringFromState(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, topBefore
+        
+        MsgBox "❌ 主状态加载 functions.lua 失败：" & vbCrLf & vbCrLf & _
+               errMsg, vbCritical, "加载失败"
+        LoadFunctionsIntoMainState = False
+        Exit Function
+    End If
+    
+    ' 更新时间戳
+    g_LuaState.lastModified = FileDateTime(g_LuaState.functionsPath)
+    LoadFunctionsIntoMainState = True
+    Exit Function
+
+ErrorHandler:
+    MsgBox "❌ 加载过程发生 VBA 错误: " & Err.Description, vbCritical, "严重错误"
+    LoadFunctionsIntoMainState = False
+End Function
+
+' 尝试加载 functions.lua（先验证，再加载）
+Private Function TryLoadFunctionsFile() As Boolean
+    ' 第一步：验证语法
+    If Not ValidateFunctionsFile() Then
+        TryLoadFunctionsFile = False
+        Exit Function
+    End If
+    
+    ' 第二步：加载到主状态
+    TryLoadFunctionsFile = LoadFunctionsIntoMainState()
+End Function
+
+' 检查文件是否需要重载
+Private Function NeedsReload() As Boolean
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    ' 文件不存在，无需重载
+    If Not fso.FileExists(g_LuaState.functionsPath) Then
+        NeedsReload = False
+        Exit Function
+    End If
+    
+    ' 比较修改时间
+    Dim currentModified As Date
+    currentModified = FileDateTime(g_LuaState.functionsPath)
+    NeedsReload = (currentModified <> g_LuaState.lastModified)
+End Function
+
+' 自动热重载检查（如果启用）
+Private Sub CheckAutoReload()
+    ' 未启用热重载，直接返回
+    If Not g_HotReloadEnabled Then Exit Sub
+    
+    ' 不需要重载，直接返回
+    If Not NeedsReload() Then Exit Sub
+    
+    ' 执行重载（失败也不影响继续使用旧状态）
+    If TryLoadFunctionsFile() Then
+        ' 成功，静默处理
+    Else
+        ' 失败时已有弹窗提示，这里不再处理
+    End If
+End Sub
+
+
 ' ============================================
-' 将 VBA 值推入 Lua 栈
+' 第三部分：公共接口（用户可调用的函数）
 ' ============================================
+
+' 执行 Lua 表达式
+Public Function LuaEval(expression As String) As Variant
+    On Error GoTo ErrorHandler
+    
+    ' 确保初始化
+    If Not InitLuaState() Then
+        LuaEval = CVErr(xlErrValue)
+        Exit Function
+    End If
+    
+    ' 检查热重载
+    CheckAutoReload
+    
+    ' 构造代码
+    Dim fullCode As String
+    fullCode = "return " & expression
+    
+    ' 加载代码
+    Dim result As Long
+    result = luaL_loadstring(g_LuaState.L, fullCode)
+    If result <> 0 Then
+        LuaEval = "语法错误: " & GetStringFromState(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, 0
+        Exit Function
+    End If
+    
+    ' 执行代码
+    result = lua_pcallk(g_LuaState.L, 0, 1, 0, 0, 0)
+    If result <> 0 Then
+        LuaEval = "运行错误: " & GetStringFromState(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, 0
+        Exit Function
+    End If
+    
+    ' 获取结果
+    LuaEval = GetValue(g_LuaState.L, -1)
+    lua_settop g_LuaState.L, 0
+    Exit Function
+
+ErrorHandler:
+    LuaEval = "VBA错误: " & Err.Description
+    If g_Initialized Then lua_settop g_LuaState.L, 0
+End Function
+
+' 调用 functions.lua 中的函数
+Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
+    On Error GoTo ErrorHandler
+    
+    ' 确保初始化
+    If Not InitLuaState() Then
+        LuaCall = CVErr(xlErrValue)
+        Exit Function
+    End If
+    
+    ' 检查热重载
+    CheckAutoReload
+    
+    ' 获取函数
+    lua_getglobal g_LuaState.L, funcName
+    If lua_type(g_LuaState.L, -1) <> 6 Then ' 6 = function
+        lua_settop g_LuaState.L, 0
+        LuaCall = "错误: 函数 '" & funcName & "' 不存在"
+        Exit Function
+    End If
+    
+    ' 推入参数
+    Dim i As Long, argCount As Long
+    argCount = 0
+    For i = LBound(args) To UBound(args)
+        If TypeName(args(i)) = "Range" Then
+            PushRangeValue args(i)
+        Else
+            PushValue g_LuaState.L, args(i)
+        End If
+        argCount = argCount + 1
+    Next i
+    
+    ' 调用函数
+    Dim result As Long
+    result = lua_pcallk(g_LuaState.L, argCount, -1, 0, 0, 0)
+    If result <> 0 Then
+        LuaCall = "运行错误: " & GetStringFromState(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, 0
+        Exit Function
+    End If
+    
+    ' 处理返回值
+    Dim nResults As Long
+    nResults = lua_gettop(g_LuaState.L)
+    
+    If nResults = 0 Then
+        LuaCall = Empty
+    ElseIf nResults = 1 Then
+        LuaCall = GetValue(g_LuaState.L, -1)
+    Else
+        ' 多个返回值
+        Dim results() As Variant
+        ReDim results(1 To 1, 1 To nResults)
+        For i = 1 To nResults
+            results(1, i) = GetValue(g_LuaState.L, i)
+        Next i
+        LuaCall = results
+    End If
+    
+    lua_settop g_LuaState.L, 0
+    Exit Function
+
+ErrorHandler:
+    LuaCall = "VBA错误: " & Err.Description
+    If g_Initialized Then lua_settop g_LuaState.L, 0
+End Function
+
+' 手动重载 functions.lua
+Public Function ReloadFunctions() As Boolean
+    If Not g_Initialized Then
+        If Not InitLuaState() Then
+            MsgBox "❌ 无法初始化 Lua 引擎。", vbCritical, "重载失败"
+            ReloadFunctions = False
+            Exit Function
+        End If
+    End If
+    
+    If TryLoadFunctionsFile() Then
+        MsgBox "✅ functions.lua 已成功重载！", vbInformation, "重载成功"
+        ReloadFunctions = True
+    Else
+        MsgBox "❌ functions.lua 重载失败。" & vbCrLf & _
+               "请检查文件语法。", vbCritical, "重载失败"
+        ReloadFunctions = False
+    End If
+End Function
+
+' 启用热重载（可在 VBA 或 Excel 宏列表中调用）
+Public Sub EnableHotReload()
+    g_HotReloadEnabled = True
+    MsgBox "✅ Lua 自动热重载已启用。" & vbCrLf & _
+           "当 functions.lua 修改后，系统将自动重新加载。", _
+           vbInformation, "热重载已启用"
+End Sub
+
+' 禁用热重载（可在 VBA 或 Excel 宏列表中调用）
+Public Sub DisableHotReload()
+    g_HotReloadEnabled = False
+    MsgBox "⚠️ Lua 自动热重载已禁用。" & vbCrLf & _
+           "如需更新 functions.lua，请手动运行 ""ReloadFunctions""。", _
+           vbExclamation, "热重载已禁用"
+End Sub
+
+
+' ============================================
+' 第四部分：辅助函数（内部使用）
+' ============================================
+
+' 从 Lua 栈获取字符串
+Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
+    Dim ptr As LongPtr
+    Dim length As Long
+    Dim buffer() As Byte
+    
+    ptr = lua_tolstring(L, idx, VarPtr(length))
+    If ptr = 0 Then
+        GetStringFromState = ""
+        Exit Function
+    End If
+    
+    If length > 0 Then
+        ReDim buffer(0 To length - 1)
+        CopyMemory buffer(0), ByVal ptr, length
+        GetStringFromState = StrConv(buffer, vbUnicode)
+    Else
+        GetStringFromState = ""
+    End If
+End Function
+
+' 推入单个值到 Lua 栈
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
     If IsEmpty(value) Or IsNull(value) Then
         lua_pushnil L
@@ -228,9 +460,18 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
     End If
 End Sub
 
-' ============================================
-' 将二维数组推入 Lua（作为 table）
-' ============================================
+' 推入 Range 对象
+Private Sub PushRangeValue(ByVal rng As Range)
+    If rng.Cells.Count = 1 Then
+        PushValue g_LuaState.L, rng.value
+    Else
+        Dim arr As Variant
+        arr = rng.value
+        PushArray g_LuaState.L, arr
+    End If
+End Sub
+
+' 推入二维数组为 Lua table
 Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
     Dim i As Long, j As Long
     Dim rows As Long, cols As Long
@@ -254,9 +495,7 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
     Next i
 End Sub
 
-' ============================================
 ' 从 Lua 栈获取值
-' ============================================
 Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
     Dim luaType As Long
     luaType = lua_type(L, idx)
@@ -269,7 +508,7 @@ Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
         Case LUA_TNUMBER
             GetValue = lua_tonumberx(L, idx, 0)
         Case LUA_TSTRING
-            GetValue = LuaToString(L, idx)
+            GetValue = GetStringFromState(L, idx)
         Case LUA_TTABLE
             GetValue = TableToArray(L, idx)
         Case Else
@@ -277,16 +516,13 @@ Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
     End Select
 End Function
 
-' ============================================
 ' 将 Lua table 转换为二维数组
-' ============================================
 Private Function TableToArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
     Dim rows As LongPtr, cols As LongPtr
     Dim i As Long, j As Long
     Dim arr() As Variant
     Dim isArray As Boolean
     
-    ' 获取表长度
     rows = lua_rawlen(L, idx)
     
     If rows = 0 Then
@@ -294,14 +530,14 @@ Private Function TableToArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
         Exit Function
     End If
     
-    ' 检查第一个元素是否是表（判断是否为二维）
+    ' 检查第一个元素是否是表
     lua_rawgeti L, idx, 1
     isArray = (lua_type(L, -1) = LUA_TTABLE)
     
     If isArray Then
         ' 二维数组
         cols = lua_rawlen(L, -1)
-        lua_settop L, -2 ' 弹出测试元素
+        lua_settop L, -2
         
         ReDim arr(1 To CLng(rows), 1 To CLng(cols))
         
@@ -328,162 +564,3 @@ Private Function TableToArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
     
     TableToArray = arr
 End Function
-
-' ============================================
-' 公开函数：LuaEval - 执行 Lua 表达式
-' ============================================
-Public Function LuaEval(expression As String) As Variant
-    On Error GoTo ErrorHandler
-    
-    If Not InitLuaState() Then
-        LuaEval = CVErr(xlErrValue)
-        Exit Function
-    End If
-    
-    CheckAndReloadFunctions
-    
-    Dim fullCode As String
-    fullCode = "return " & expression
-    
-    ' 加载并执行代码
-    Dim result As Long
-    result = luaL_loadstring(g_LuaState.L, fullCode)
-    
-    If result <> 0 Then
-        Dim errMsg As String
-        errMsg = LuaToString(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
-        LuaEval = "错误: " & errMsg
-        Exit Function
-    End If
-    
-    result = lua_pcallk(g_LuaState.L, 0, 1, 0, 0, 0)
-    
-    If result <> 0 Then
-        errMsg = LuaToString(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
-        LuaEval = "运行错误: " & errMsg
-        Exit Function
-    End If
-    
-    ' 获取返回值
-    LuaEval = GetValue(g_LuaState.L, -1)
-    lua_settop g_LuaState.L, 0
-    
-    Exit Function
-    
-ErrorHandler:
-    LuaEval = "VBA错误: " & Err.Description
-    If g_Initialized Then lua_settop g_LuaState.L, 0
-End Function
-
-' ============================================
-' 公开函数：LuaCall - 调用 functions.lua 中的函数
-' ============================================
-Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
-    On Error GoTo ErrorHandler
-    
-    If Not InitLuaState() Then
-        LuaCall = CVErr(xlErrValue)
-        Exit Function
-    End If
-    
-    CheckAndReloadFunctions
-    
-    ' 获取函数
-    lua_getglobal g_LuaState.L, funcName
-    
-    If lua_type(g_LuaState.L, -1) <> 6 Then ' 6 = function
-        lua_settop g_LuaState.L, 0
-        LuaCall = "错误: 函数 '" & funcName & "' 不存在"
-        Exit Function
-    End If
-    
-    ' 推入参数
-    Dim i As Long
-    Dim argCount As Long
-    argCount = 0
-    
-    For i = LBound(args) To UBound(args)
-        If TypeName(args(i)) = "Range" Then
-            ' 处理单元格区域
-            Dim rng As Range
-            Set rng = args(i)
-            
-            If rng.Cells.Count = 1 Then
-                ' 单个单元格
-                PushValue g_LuaState.L, rng.value
-                argCount = argCount + 1
-            Else
-                ' 多个单元格，转为二维数组
-                Dim arr As Variant
-                arr = rng.value
-                PushArray g_LuaState.L, arr
-                argCount = argCount + 1
-            End If
-        Else
-            ' 普通值
-            PushValue g_LuaState.L, args(i)
-            argCount = argCount + 1
-        End If
-    Next i
-    
-    ' 调用函数（支持多返回值）
-    Dim result As Long
-    result = lua_pcallk(g_LuaState.L, argCount, -1, 0, 0, 0)
-    
-    If result <> 0 Then
-        Dim errMsg As String
-        errMsg = LuaToString(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
-        LuaCall = "运行错误: " & errMsg
-        Exit Function
-    End If
-    
-    ' 获取返回值数量
-    Dim nResults As Long
-    nResults = lua_gettop(g_LuaState.L)
-    
-    If nResults = 0 Then
-        LuaCall = Empty
-    ElseIf nResults = 1 Then
-        LuaCall = GetValue(g_LuaState.L, -1)
-    Else
-        ' 多返回值，转为数组（用于溢出）
-        Dim results() As Variant
-        ReDim results(1 To 1, 1 To nResults)
-        
-        For i = 1 To nResults
-            results(1, i) = GetValue(g_LuaState.L, i)
-        Next i
-        
-        LuaCall = results
-    End If
-    
-    lua_settop g_LuaState.L, 0
-    Exit Function
-    
-ErrorHandler:
-    LuaCall = "VBA错误: " & Err.Description
-    If g_Initialized Then lua_settop g_LuaState.L, 0
-End Function
-
-' ============================================
-' 清理函数（可选，在关闭工作簿时调用）
-' ============================================
-Public Sub CleanupLua()
-    If g_Initialized Then
-        lua_close g_LuaState.L
-        g_Initialized = False
-    End If
-End Sub
-
-' ============================================
-' 自动清理（工作簿关闭时）
-' ============================================
-Private Sub Workbook_BeforeClose(Cancel As Boolean)
-    CleanupLua
-End Sub
-
-
-
