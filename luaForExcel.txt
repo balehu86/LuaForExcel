@@ -1,5 +1,5 @@
 ' ============================================
-' Excel-Lua 5.4 集成模块
+' Excel-Lua 5.4 集成模块 - 支持热重载功能
 ' 使用纯 DLL 调用方式
 ' ============================================
 
@@ -38,6 +38,7 @@ Option Explicit
         L As LongPtr
         functionsPath As String
         lastModified As Date
+        reloadTimer As Date
     End Type
 #Else
     ' 32位版本
@@ -47,6 +48,7 @@ Option Explicit
         L As Long
         functionsPath As String
         lastModified As Date
+        reloadTimer As Date
     End Type
 #End If
 
@@ -60,6 +62,43 @@ Private Const LUA_TTABLE = 5
 ' ===== 全局变量 =====
 Private g_LuaState As LuaState
 Private g_Initialized As Boolean
+Private g_HotReloadEnabled As Boolean
+Private g_LastCheckTime As Date
+
+' ============================================
+' 启用/禁用热重载功能
+' ============================================
+Public Function EnableHotReload(Optional enabled As Boolean = True) As Boolean
+    g_HotReloadEnabled = enabled
+    EnableHotReload = g_HotReloadEnabled
+End Function
+
+' ============================================
+' 获取热重载状态
+' ============================================
+Public Function GetHotReloadStatus() As Boolean
+    GetHotReloadStatus = g_HotReloadEnabled
+End Function
+
+' ============================================
+' 手动触发重载
+' ============================================
+Public Function ForceReload() As Boolean
+    On Error GoTo ErrorHandler
+    
+    If Not g_Initialized Then
+        ForceReload = False
+        Exit Function
+    End If
+    
+    Dim result As Boolean
+    result = ReloadLuaFile()
+    ForceReload = result
+    Exit Function
+    
+ErrorHandler:
+    ForceReload = False
+End Function
 
 ' ============================================
 ' 初始化 Lua 状态机
@@ -86,6 +125,9 @@ Private Function InitLuaState() As Boolean
     ' 设置 functions.lua 路径（与 Excel 文件同目录）
     g_LuaState.functionsPath = ThisWorkbook.Path & "\functions.lua"
     g_LuaState.lastModified = #1/1/1900#
+    g_LuaState.reloadTimer = Now
+    g_HotReloadEnabled = True ' 默认启用热重载
+    g_LastCheckTime = Now
     
     g_Initialized = True
     InitLuaState = True
@@ -102,6 +144,20 @@ End Function
 Private Function CheckAndReloadFunctions() As Boolean
     On Error Resume Next
     
+    ' 检查是否启用了热重载
+    If Not g_HotReloadEnabled Then
+        CheckAndReloadFunctions = True
+        Exit Function
+    End If
+    
+    ' 控制检查频率，避免过度检查文件
+    If DateDiff("s", g_LastCheckTime, Now) < 1 Then
+        CheckAndReloadFunctions = True
+        Exit Function
+    End If
+    
+    g_LastCheckTime = Now
+    
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     
@@ -114,29 +170,52 @@ Private Function CheckAndReloadFunctions() As Boolean
     currentModified = FileDateTime(g_LuaState.functionsPath)
     
     ' 检查是否需要重载
-    If currentModified <> g_LuaState.lastModified Then
-        Dim result As Long
-        result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
-        
-        If result = 0 Then
-    result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
-            If result = 0 Then
-                g_LuaState.lastModified = currentModified
-                CheckAndReloadFunctions = True
-                Exit Function
-            End If
-        End If
-        
-        ' 加载失败，获取错误信息
-        Dim errMsg As String
-        errMsg = LuaToString(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
-        MsgBox "加载 functions.lua 失败: " & errMsg, vbExclamation
-        CheckAndReloadFunctions = False
+    If currentModified > g_LuaState.lastModified Then
+        Dim result As Boolean
+        result = ReloadLuaFile()
+        CheckAndReloadFunctions = result
         Exit Function
     End If
     
     CheckAndReloadFunctions = True
+End Function
+
+' ============================================
+' 重新加载Lua文件
+' ============================================
+Private Function ReloadLuaFile() As Boolean
+    On Error GoTo ErrorHandler
+    
+    Dim result As Long
+    result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
+    
+    If result = 0 Then
+        result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
+        If result = 0 Then
+            Dim currentModified As Date
+            currentModified = FileDateTime(g_LuaState.functionsPath)
+            g_LuaState.lastModified = currentModified
+            
+            ' 更新全局变量以反映重载成功
+            lua_pushstring g_LuaState.L, "HOT_RELOAD_TIMESTAMP"
+            lua_pushstring g_LuaState.L, Format(Now, "yyyy-mm-dd hh:mm:ss")
+            lua_setglobal g_LuaState.L, "HOT_RELOAD_TIMESTAMP"
+            
+            ReloadLuaFile = True
+            Exit Function
+        End If
+    End If
+    
+    ' 加载失败，获取错误信息
+    Dim errMsg As String
+    errMsg = LuaToString(g_LuaState.L, -1)
+    lua_settop g_LuaState.L, 0
+    MsgBox "加载 functions.lua 失败: " & vbCrLf & errMsg, vbExclamation
+    ReloadLuaFile = False
+    Exit Function
+    
+ErrorHandler:
+    ReloadLuaFile = False
 End Function
 
 ' ============================================
@@ -149,7 +228,7 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
         lua_pushnumber L, CDbl(value)
     ElseIf VarType(value) = vbBoolean Then
         lua_pushboolean L, IIf(value, 1, 0)
-    ElseIf isArray(value) Then
+    ElseIf IsArray(value) Then
         PushArray L, value
     Else
         lua_pushstring L, CStr(value)
@@ -364,12 +443,12 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
             
             If rng.Cells.Count = 1 Then
                 ' 单个单元格
-                PushValue g_LuaState.L, rng.value
+                PushValue g_LuaState.L, rng.Value
                 argCount = argCount + 1
             Else
                 ' 多个单元格，转为二维数组
                 Dim arr As Variant
-                arr = rng.value
+                arr = rng.Value
                 PushArray g_LuaState.L, arr
                 argCount = argCount + 1
             End If
@@ -418,6 +497,17 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
 ErrorHandler:
     LuaCall = "VBA错误: " & Err.Description
     If g_Initialized Then lua_settop g_LuaState.L, 0
+End Function
+
+' ============================================
+' 获取最后重载时间戳
+' ============================================
+Public Function GetLastReloadTime() As String
+    If g_LuaState.lastModified = #1/1/1900# Then
+        GetLastReloadTime = "从未重载"
+    Else
+        GetLastReloadTime = Format(g_LuaState.lastModified, "yyyy-mm-dd hh:mm:ss")
+    End If
 End Function
 
 ' ============================================
