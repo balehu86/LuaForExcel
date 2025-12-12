@@ -61,6 +61,28 @@ Private Const LUA_TTABLE = 5
 Private g_LuaState As LuaState
 Private g_Initialized As Boolean
 
+' 通用版 LuaToString，接受任意 L
+Private Function LuaToStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
+    Dim ptr As LongPtr
+    Dim length As Long
+    Dim buffer() As Byte
+    
+    ptr = lua_tolstring(L, idx, 0)
+    If ptr = 0 Then
+        LuaToStringFromState = ""
+        Exit Function
+    End If
+    
+    length = lstrlenA(ptr)
+    If length > 0 Then
+        ReDim buffer(0 To length - 1)
+        CopyMemory buffer(0), ByVal ptr, length
+        LuaToStringFromState = StrConv(buffer, vbUnicode)
+    Else
+        LuaToStringFromState = ""
+    End If
+End Function
+
 ' ============================================
 ' 初始化 Lua 状态机
 ' ============================================
@@ -95,48 +117,93 @@ ErrorHandler:
     MsgBox "初始化 Lua 失败: " & Err.Description, vbCritical
     InitLuaState = False
 End Function
-
 ' ============================================
-' 检查并重载 functions.lua
+' 安全、原子的热重载 functions.lua
+' 仅当新文件可成功加载并执行时，才在主状态中重载
 ' ============================================
 Private Function CheckAndReloadFunctions() As Boolean
-    On Error Resume Next
-    
+    On Error GoTo ErrorHandler
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     
     If Not fso.FileExists(g_LuaState.functionsPath) Then
-        CheckAndReloadFunctions = True ' 文件不存在也继续
+        ' 文件不存在，视为无需重载（保留旧状态）
+        CheckAndReloadFunctions = True
         Exit Function
     End If
     
     Dim currentModified As Date
     currentModified = FileDateTime(g_LuaState.functionsPath)
     
-    ' 检查是否需要重载
-    If currentModified <> g_LuaState.lastModified Then
-        Dim result As Long
-        result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
-        
-        If result = 0 Then
-    result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
-            If result = 0 Then
-                g_LuaState.lastModified = currentModified
-                CheckAndReloadFunctions = True
-                Exit Function
-            End If
-        End If
-        
-        ' 加载失败，获取错误信息
-        Dim errMsg As String
-        errMsg = LuaToString(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
-        MsgBox "加载 functions.lua 失败: " & errMsg, vbExclamation
+    ' 无需重载
+    If currentModified = g_LuaState.lastModified Then
+        CheckAndReloadFunctions = True
+        Exit Function
+    End If
+    
+    ' === 第一步：在临时状态中验证 functions.lua ===
+    Dim tempL As LongPtr
+    tempL = luaL_newstate()
+    If tempL = 0 Then
+        MsgBox "无法创建临时 Lua 状态用于验证 functions.lua", vbCritical
         CheckAndReloadFunctions = False
         Exit Function
     End If
     
-    CheckAndReloadFunctions = True
+    ' 加载标准库（确保与主状态一致）
+    luaL_openlibs tempL
+    
+    Dim result As Long
+    result = luaL_loadfilex(tempL, g_LuaState.functionsPath, 0)
+    If result = 0 Then
+        result = lua_pcallk(tempL, 0, 0, 0, 0, 0)
+    End If
+    
+    Dim errMsg As String
+    If result <> 0 Then
+        ' 获取错误信息
+        errMsg = LuaToStringFromState(tempL, -1)
+        lua_close tempL
+        
+        MsgBox "functions.lua 存在错误，跳过热重载：" & vbCrLf & errMsg, vbExclamation
+        CheckAndReloadFunctions = False
+        Exit Function
+    End If
+    
+    ' 验证成功，关闭临时状态
+    lua_close tempL
+    
+    ' === 第二步：在主状态中安全重载 ===
+    ' 注意：此时我们知道文件是合法的，可以安全执行
+    Dim topBefore As Long
+    topBefore = lua_gettop(g_LuaState.L) ' 记录栈顶，用于恢复
+    
+    result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
+    If result = 0 Then
+        result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
+    End If
+    
+    ' 无论成功与否，恢复栈（但理论上应成功）
+    lua_settop g_LuaState.L, topBefore
+    
+    If result <> 0 Then
+        ' 极端情况：主状态执行失败（如内存不足），但临时状态成功？不太可能
+        errMsg = LuaToString(g_LuaState.L, -1)
+        lua_settop g_LuaState.L, topBefore
+        MsgBox "主状态加载 functions.lua 异常（罕见）：" & errMsg, vbCritical
+        CheckAndReloadFunctions = False
+    Else
+        ' 成功更新
+        g_LuaState.lastModified = currentModified
+        CheckAndReloadFunctions = True
+    End If
+    
+    Exit Function
+
+ErrorHandler:
+    If tempL <> 0 Then lua_close tempL
+    MsgBox "热重载 functions.lua 时发生 VBA 错误: " & Err.Description, vbCritical
+    CheckAndReloadFunctions = False
 End Function
 
 ' ============================================
@@ -186,24 +253,7 @@ End Sub
 ' 从 Lua 栈获取字符串
 ' ============================================
 Private Function LuaToString(ByVal L As LongPtr, ByVal idx As Long) As String
-    Dim ptr As LongPtr
-    Dim length As Long
-    Dim buffer() As Byte
-    
-    ptr = lua_tolstring(L, idx, 0)
-    If ptr = 0 Then
-        LuaToString = ""
-        Exit Function
-    End If
-    
-    length = lstrlenA(ptr)
-    If length > 0 Then
-        ReDim buffer(0 To length - 1)
-        CopyMemory buffer(0), ByVal ptr, length
-        LuaToString = StrConv(buffer, vbUnicode)
-    Else
-        LuaToString = ""
-    End If
+    LuaToString = LuaToStringFromState(L, idx)
 End Function
 
 ' ============================================
