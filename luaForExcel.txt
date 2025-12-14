@@ -576,7 +576,7 @@ Public Sub ShowAllTasks()
         msg = msg & "  ID: " & CStr(taskId) & vbCrLf
         msg = msg & "  函数: " & g_TaskFunc(CStr(taskId)) & vbCrLf
         msg = msg & "  单元格: " & g_TaskCell(CStr(taskId)) & vbCrLf
-        msg = msg & "  状态: " & GetStatusIcon(g_TaskStatus(CStr(taskId))) & " " & g_TaskStatus(CStr(taskId)) & vbCrLf
+        msg = msg & "  状态: " & g_TaskStatus(CStr(taskId)) & vbCrLf
         msg = msg & "  进度: " & Format(g_TaskProgress(CStr(taskId)), "0.0") & "%" & vbCrLf
         
         ' 显示消息
@@ -610,18 +610,6 @@ ErrorHandler:
     MsgBox "显示任务信息时出错: " & Err.Description, vbCritical, "错误"
 End Sub
 
-' 辅助函数：根据状态返回图标
-Private Function GetStatusIcon(status As String) As String
-    Select Case LCase(status)
-        Case "defined": GetStatusIcon = "defined"
-        Case "running": GetStatusIcon = "running"
-        Case "yielded": GetStatusIcon = "yielded"
-        Case "done": GetStatusIcon = "done"
-        Case "error": GetStatusIcon = "error"
-        Case Else: GetStatusIcon = "Else"
-    End Select
-End Function
-
 ' 显示单个任务的详细信息
 Public Sub ShowTaskDetail(taskId As String)
     On Error GoTo ErrorHandler
@@ -643,7 +631,7 @@ Public Sub ShowTaskDetail(taskId As String)
     msg = msg & "任务ID: " & taskId & vbCrLf
     msg = msg & "函数名: " & g_TaskFunc(taskId) & vbCrLf
     msg = msg & "单元格: " & g_TaskCell(taskId) & vbCrLf
-    msg = msg & "状态: " & GetStatusIcon(g_TaskStatus(taskId)) & " " & g_TaskStatus(taskId) & vbCrLf
+    msg = msg & "状态: " & g_TaskStatus(taskId) & vbCrLf
     msg = msg & "进度: " & Format(g_TaskProgress(taskId), "0.00") & "%" & vbCrLf
     msg = msg & "消息: " & CStr(g_TaskMessage(taskId)) & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
