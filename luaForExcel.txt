@@ -548,7 +548,7 @@ Public Sub ShowAllTasks()
     
     msg = msg & "任务总数: " & g_TaskFunc.Count & vbCrLf
     msg = msg & "活跃队列: " & g_TaskQueue.Count & vbCrLf
-    msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中 ✓", "已停止 ✗") & vbCrLf
+    msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
     
     ' 统计各状态任务数
@@ -613,12 +613,12 @@ End Sub
 ' 辅助函数：根据状态返回图标
 Private Function GetStatusIcon(status As String) As String
     Select Case LCase(status)
-        Case "defined": GetStatusIcon = "📋"
-        Case "running": GetStatusIcon = "▶️"
-        Case "yielded": GetStatusIcon = "⏸️"
-        Case "done": GetStatusIcon = "✅"
-        Case "error": GetStatusIcon = "❌"
-        Case Else: GetStatusIcon = "❓"
+        Case "defined": GetStatusIcon = "defined"
+        Case "running": GetStatusIcon = "running"
+        Case "yielded": GetStatusIcon = "yielded"
+        Case "done": GetStatusIcon = "done"
+        Case "error": GetStatusIcon = "error"
+        Case Else: GetStatusIcon = "Else"
     End Select
 End Function
 
@@ -719,7 +719,7 @@ Public Sub ShowTaskDetail(taskId As String)
     
     ' 调度信息
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
-    msg = msg & "在活跃队列中: " & IIf(g_TaskQueue.Exists(taskId), "是 ✓", "否 ✗") & vbCrLf
+    msg = msg & "在活跃队列中: " & IIf(g_TaskQueue.Exists(taskId), "是", "否") & vbCrLf
     msg = msg & "协程线程: " & IIf(g_TaskCoThread(taskId) = 0, "未创建", "0x" & Hex(g_TaskCoThread(taskId))) & vbCrLf
     
     MsgBox msg, vbInformation, "任务详情 - " & taskId
