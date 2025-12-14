@@ -1713,6 +1713,40 @@ Private Function FindTaskByCell(taskCell As String) As String
     FindTaskByCell = ""
 End Function
 
+' 右键菜单
+
+Public Sub TerminateAndDeleteTask(taskId As String)
+    On Error Resume Next
+    If g_TaskFunc Is Nothing Then Exit Sub
+    If taskId = "" Then Exit Sub
+    If Not g_TaskFunc.Exists(taskId) Then Exit Sub
+
+    ' 从队列移除（安全检查）
+    If Not g_TaskQueue Is Nothing Then
+        If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
+    End If
+
+    ' 标记终止状态
+    g_TaskStatus(taskId) = "terminated"
+
+    ' 删除所有字典条目
+    If g_TaskFunc.Exists(taskId) Then g_TaskFunc.Remove taskId
+    If g_TaskStartArgs.Exists(taskId) Then g_TaskStartArgs.Remove taskId
+    If g_TaskResumeSpec.Exists(taskId) Then g_TaskResumeSpec.Remove taskId
+    If g_TaskDynamicTargets.Exists(taskId) Then g_TaskDynamicTargets.Remove taskId
+    If g_TaskWriteTargets.Exists(taskId) Then g_TaskWriteTargets.Remove taskId
+    If g_TaskCell.Exists(taskId) Then g_TaskCell.Remove taskId
+    If g_TaskStatus.Exists(taskId) Then g_TaskStatus.Remove taskId
+    If g_TaskProgress.Exists(taskId) Then g_TaskProgress.Remove taskId
+    If g_TaskMessage.Exists(taskId) Then g_TaskMessage.Remove taskId
+    If g_TaskValue.Exists(taskId) Then g_TaskValue.Remove taskId
+    If g_TaskError.Exists(taskId) Then g_TaskError.Remove taskId
+    If g_TaskCoThread.Exists(taskId) Then g_TaskCoThread.Remove taskId
+
+    MsgBox "任务已终止并删除: " & taskId, vbInformation
+End Sub
+
+
 ' 根据单元格地址获取任务ID
 Private Function GetTaskIdFromSelection() As String
     Dim cellAddr As String
@@ -1785,7 +1819,14 @@ End Sub
 Public Sub LuaMenu_PauseTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
-    If taskId = "" Then MsgBox "无任务可挂起", vbExclamation: Exit Sub
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务已不存在。", vbExclamation
+        Exit Sub
+    End If
     PauseTask taskId
 End Sub
 
@@ -1793,22 +1834,40 @@ End Sub
 Public Sub LuaMenu_ResumeTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
-    If taskId = "" Then MsgBox "无任务可恢复", vbExclamation: Exit Sub
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务已不存在。", vbExclamation
+        Exit Sub
+    End If
     ResumeTask taskId
 End Sub
 
 ' ===== 终止任务 =====
-Public Sub LuaMenu_TerminateTask()
+Public Sub LuaMenu_terminateTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
-    If taskId = "" Then MsgBox "无任务可终止", vbExclamation: Exit Sub
+    If taskId = "" Or Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务不存在或已删除", vbExclamation
+        Exit Sub
+    End If
     TerminateAndDeleteTask taskId
 End Sub
+
 
 ' ===== 查看任务详情 =====
 Public Sub LuaMenu_ShowDetail()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
-    If taskId = "" Then MsgBox "无任务可查看", vbExclamation: Exit Sub
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务已不存在。", vbExclamation
+        Exit Sub
+    End If
     ShowTaskDetail taskId
 End Sub
