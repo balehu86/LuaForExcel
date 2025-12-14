@@ -934,51 +934,61 @@ End Sub
 ' 任务定义函数
 Public Function LuaTask(ParamArray params() As Variant) As String
     On Error GoTo ErrorHandler
-    
-    ' 确保初始化
+
     If Not InitLuaState() Then
         LuaTask = "#ERROR: Lua未初始化"
         Exit Function
     End If
-    
-    ' 解析参数
-    Dim funcName As String
-    Dim startArgs As Variant
-    Dim resumeSpec As Variant
-    Dim dynamicTargets As Variant
-    Dim writeTargets As Variant
-    Dim i As Long, phase As Long
-    
+
     If UBound(params) < 0 Then
         LuaTask = "#ERROR: 需要函数名"
         Exit Function
     End If
-    
+
+    ' === 获取调用单元格地址（幂等锚点）===
+    Dim taskCell As String
+    taskCell = Application.Caller.Address(External:=True)
+
+    ' === 幂等检查：该单元格是否已有任务 ===
+    Dim existingTaskId As String
+    existingTaskId = FindTaskByCell(taskCell)
+
+    If existingTaskId <> "" Then
+        ' 已存在任务，直接返回，不做任何副作用
+        LuaTask = existingTaskId
+        Exit Function
+    End If
+
+    ' ===== 以下逻辑：只会执行一次 =====
+
+    Dim funcName As String
     funcName = CStr(params(0))
+
+    Dim startArgs As Variant, resumeSpec As Variant
+    Dim dynamicTargets As Variant, writeTargets As Variant
     startArgs = Array()
     resumeSpec = Array()
     dynamicTargets = Array()
     writeTargets = Array()
-    
-    ' 解析参数：phase 0=start, 1=resume, 2=dynamic, 3=write
+
+    Dim phase As Long
     phase = 0
-    Dim startList As Object, resumeList As Object, dynamicList As Object, writeList As Object
+
+    Dim startList As Object, resumeList As Object
+    Dim dynamicList As Object, writeList As Object
     Set startList = CreateObject("System.Collections.ArrayList")
     Set resumeList = CreateObject("System.Collections.ArrayList")
     Set dynamicList = CreateObject("System.Collections.ArrayList")
     Set writeList = CreateObject("System.Collections.ArrayList")
-    
+
+    Dim i As Long
     For i = 1 To UBound(params)
         If VarType(params(i)) = vbString Then
             Select Case params(i)
-                Case "|"
-                    phase = 1
-                Case ">>"
-                    phase = 2
-                Case "->"
-                    phase = 3
+                Case "|": phase = 1
+                Case ">>": phase = 2
+                Case "->": phase = 3
                 Case Else
-                    ' 字符串参数
                     Select Case phase
                         Case 0: startList.Add params(i)
                         Case 1: resumeList.Add params(i)
@@ -987,7 +997,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
                     End Select
             End Select
         Else
-            ' 非字符串参数
             Select Case phase
                 Case 0: startList.Add params(i)
                 Case 1: resumeList.Add params(i)
@@ -996,25 +1005,17 @@ Public Function LuaTask(ParamArray params() As Variant) As String
             End Select
         End If
     Next i
-    
-    ' 转换为数组
+
     If startList.Count > 0 Then startArgs = startList.ToArray()
     If resumeList.Count > 0 Then resumeSpec = resumeList.ToArray()
     If dynamicList.Count > 0 Then dynamicTargets = dynamicList.ToArray()
     If writeList.Count > 0 Then writeTargets = writeList.ToArray()
-    
-    ' 生成 taskId
+
+    ' === 创建新任务（仅此一次）===
     Dim taskId As String
     taskId = "TASK_" & g_NextTaskId
     g_NextTaskId = g_NextTaskId + 1
-    
-    ' 获取调用单元格地址
-    Dim taskCell As String
-    On Error Resume Next
-    taskCell = Application.Caller.Address(External:=True)
-    On Error GoTo ErrorHandler
-    
-    ' 保存任务状态到各个 Dictionary
+
     g_TaskFunc(taskId) = funcName
     g_TaskStartArgs(taskId) = startArgs
     g_TaskResumeSpec(taskId) = resumeSpec
@@ -1027,7 +1028,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     g_TaskValue(taskId) = Empty
     g_TaskError(taskId) = ""
     g_TaskCoThread(taskId) = 0
-    
+
     LuaTask = taskId
     Exit Function
 
@@ -1159,67 +1160,62 @@ End Sub
 
 ' 启动调度器
 Private Sub StartSchedulerIfNeeded()
-    If Not g_SchedulerRunning And g_TaskQueue.Count > 0 Then
-        g_SchedulerRunning = True
-        Application.OnTime Now + TimeValue("00:00:01") * SCHEDULER_INTERVAL_SEC, "SchedulerTick"
-    End If
+    If g_SchedulerRunning Then Exit Sub
+    If g_TaskQueue Is Nothing Then Exit Sub
+    If g_TaskQueue.Count = 0 Then Exit Sub
+
+    g_SchedulerRunning = True
+    Application.OnTime _
+        Now + TimeSerial(0, 0, SCHEDULER_INTERVAL_SEC), _
+        "SchedulerTick"
 End Sub
+
 
 ' 调度器心跳
 Public Sub SchedulerTick()
     On Error Resume Next
-    
-    ' 禁用屏幕更新和自动计算，提升性能
-    Application.ScreenUpdating = False
-    Application.Calculation = xlCalculationManual
-    Application.EnableEvents = False
-    
-    If g_TaskQueue.Count = 0 Then
+
+    If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
-        ' 恢复 Excel 设置
-        Application.Calculation = xlCalculationAutomatic
-        Application.ScreenUpdating = True
-        Application.EnableEvents = True
         Exit Sub
     End If
-    
-    ' 轮流调度所有活跃任务（限制每次迭代数）
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+
     Dim taskId As Variant
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
+
     Dim iterCount As Long
-    
+
     For Each taskId In g_TaskQueue.Keys
-        ' 限制每次调度的迭代次数
         If iterCount >= MAX_ITERATIONS_PER_TICK Then Exit For
-        
-        If g_TaskFunc.Exists(CStr(taskId)) Then
-            ResumeCoroutine CStr(taskId)
-            iterCount = iterCount + 1
-            
-            ' 移除已完成或错误的任务
-            If g_TaskStatus(CStr(taskId)) = "done" Or g_TaskStatus(CStr(taskId)) = "error" Then
-                tasksToRemove.Add taskId
-            End If
-        Else
+
+        ResumeCoroutine CStr(taskId)
+        iterCount = iterCount + 1
+
+        If g_TaskStatus(taskId) = "done" _
+        Or g_TaskStatus(taskId) = "error" Then
             tasksToRemove.Add taskId
         End If
-    Next taskId
-    
-    ' 清理队列
+    Next
+
     Dim i As Long
     For i = 0 To tasksToRemove.Count - 1
         g_TaskQueue.Remove tasksToRemove(i)
-    Next i
-    
-    ' 恢复 Excel 设置
+    Next
+
     Application.Calculation = xlCalculationAutomatic
-    Application.ScreenUpdating = True
     Application.EnableEvents = True
-    
-    ' 继续调度
+    Application.ScreenUpdating = True
+
+    ' === 是否继续 ===
     If g_TaskQueue.Count > 0 Then
-        Application.OnTime Now + TimeValue("00:00:01") * SCHEDULER_INTERVAL_SEC, "SchedulerTick"
+        Application.OnTime _
+            Now + TimeSerial(0, 0, SCHEDULER_INTERVAL_SEC), _
+            "SchedulerTick"
     Else
         g_SchedulerRunning = False
     End If
@@ -1700,4 +1696,19 @@ Private Function TableToArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
     End If
     
     TableToArray = arr
+End Function
+
+' 根据调用单元格地址查找已存在的任务
+Private Function FindTaskByCell(taskCell As String) As String
+    Dim tid As Variant
+    If g_TaskCell Is Nothing Then Exit Function
+
+    For Each tid In g_TaskCell.Keys
+        If g_TaskCell(tid) = taskCell Then
+            FindTaskByCell = CStr(tid)
+            Exit Function
+        End If
+    Next
+
+    FindTaskByCell = ""
 End Function
