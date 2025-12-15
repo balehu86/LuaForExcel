@@ -4,7 +4,7 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
 End Sub
 
 ' 工作簿打开时自动运行
-Private Sub Workbook_BeforeClose(Cancel As Boolean)
+Private Sub Workbook_Open(Cancel As Boolean)
     EnableLuaTaskMenu
 End Sub
 
