@@ -944,7 +944,7 @@ End Function
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
     
-    ' 重新启用 Volatile，确保每次计算周期都会刷新
+    ' 标记为 volatile，每次计算都会刷新
     Application.Volatile True
     
     If g_TaskFunc Is Nothing Then
@@ -1096,8 +1096,7 @@ Public Sub SchedulerTick()
 
     Application.ScreenUpdating = False
     Application.EnableEvents = False
-    ' 注意：不要设置为 Manual，这会阻止 Volatile 函数刷新
-    ' Application.Calculation = xlCalculationManual  ' 删除这行
+    Application.Calculation = xlCalculationManual
 
     ' 复制任务列表，避免遍历时修改
     Dim taskIds() As Variant
@@ -1141,12 +1140,7 @@ Public Sub SchedulerTick()
         End If
     Next
 
-    ' 删除：不再需要手动设置回 Automatic
-    ' Application.Calculation = xlCalculationAutomatic
-    
-    ' 新增：强制刷新所有活动任务的单元格
-    Application.Calculate
-    
+    Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
 
@@ -1246,9 +1240,6 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
                 End If
             End If
             
-            ' 新增：触发重算
-            TriggerRecalculation taskId
-            
         Case LUA_YIELD
             If nres > 0 Then
                 Dim yieldDict As Variant
@@ -1261,9 +1252,6 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
             
             g_TaskStatus(taskId) = "yielded"
             
-            ' 新增：触发重算
-            TriggerRecalculation taskId
-            
         Case Else
             g_TaskStatus(taskId) = "error"
             If nres > 0 Then
@@ -1271,9 +1259,6 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
             Else
                 g_TaskError(taskId) = "协程错误: 代码 " & result
             End If
-            
-            ' 新增：触发重算
-            TriggerRecalculation taskId
     End Select
     
     Exit Sub
@@ -1287,53 +1272,30 @@ End Sub
 Private Sub ParseYieldReturn(taskId As String, dict As Variant, isFinal As Boolean)
     On Error Resume Next
     
-    ' dict 现在期望是一个字典对象（从 Lua table 转换而来）
-    ' 我们需要遍历字典的键值对
+    ' dict 是二维数组，第一维是行（键值对），第二维是列（key, value）
     If Not IsArray(dict) Then Exit Sub
     
-    ' dict 是二维数组，但现在我们需要它像字典一样工作
-    ' 需要修改 TableToArray 来返回字典格式，或者在这里重新解析
-    
-    ' 临时方案：重新从 coThread 栈顶读取 table
-    Dim coThread As LongPtr
-    coThread = g_TaskCoThread(taskId)
-    
-    ' 假设 table 仍在栈顶（idx = -1）
-    ' 我们需要遍历 table 的所有字段
-    
-    ' 推入 nil 作为第一个键
-    lua_pushnil coThread
-    
-    ' 遍历 table
-    Do While lua_next(coThread, -2) <> 0
-        ' 现在栈顶是 value（-1），下面是 key（-2）
+    Dim i As Long
+    For i = LBound(dict, 1) To UBound(dict, 1)
         Dim key As String
         Dim value As Variant
         
-        ' 获取键（必须是字符串）
-        If lua_type(coThread, -2) = LUA_TSTRING Then
-            key = GetStringFromState(coThread, -2)
-            value = GetValue(coThread, -1)
-            
-            ' 根据键设置对应的任务属性
-            Select Case LCase(key)
-                Case "status"
-                    If Not isFinal Then g_TaskStatus(taskId) = CStr(value)
-                Case "progress"
-                    g_TaskProgress(taskId) = CDbl(value)
-                Case "message"
-                    g_TaskMessage(taskId) = value
-                Case "value"
-                    g_TaskValue(taskId) = value
-            End Select
-        End If
+        key = dict(i, 1)
+        value = dict(i, 2)
         
-        ' 弹出 value，保留 key 供下次 lua_next 使用
-        lua_settop coThread, -2
-    Loop
-    
-    ' 清理栈
-    lua_settop coThread, -2
+        Select Case LCase(key)
+            Case "status"
+                If Not isFinal Then g_TaskStatus(taskId) = CStr(value)
+            Case "progress"
+                g_TaskProgress(taskId) = CDbl(value)
+            Case "message"
+                g_TaskMessage(taskId) = value
+            Case "value"
+                g_TaskValue(taskId) = value
+            Case "write"
+                ' 动态写入目标会在写入函数中处理
+        End Select
+    Next i
 End Sub
 
 ' ============================================
@@ -1545,27 +1507,3 @@ Private Function FindTaskByCell(taskCell As String) As String
 
     FindTaskByCell = ""
 End Function
-
-' 触发工作表重新计算（强制刷新 LuaGet）
-Private Sub TriggerRecalculation(taskId As String)
-    On Error Resume Next
-    
-    ' 方法1：使用 Calculate 强制重算
-    Application.Calculate
-    
-    ' 方法2（备选）：如果知道任务单元格，可以只重算相关区域
-    ' Dim taskCell As String
-    ' taskCell = g_TaskCell(taskId)
-    ' If taskCell <> "" Then
-    '     Dim ws As Worksheet, addr As String
-    '     Dim sheetName As String, cellAddr As String
-    '     
-    '     ' 解析 taskCell (格式: [Book1]Sheet1!$A$1)
-    '     ' 这里简化处理，实际可能需要更复杂的解析
-    '     On Error Resume Next
-    '     Set ws = Range(taskCell).Worksheet
-    '     If Not ws Is Nothing Then
-    '         ws.Calculate
-    '     End If
-    ' End If
-End Sub
