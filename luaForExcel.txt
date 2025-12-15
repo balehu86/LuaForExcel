@@ -33,13 +33,17 @@ Option Explicit
     Private Declare PtrSafe Function lua_next Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
     Private Declare PtrSafe Sub lua_pushvalue Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
     Private Declare PtrSafe Function lua_getfield Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal k As String) As Long
-    
+
     ' 协程 API
     Private Declare PtrSafe Function lua_newthread Lib "lua54.dll" (ByVal L As LongPtr) As LongPtr
     Private Declare PtrSafe Function lua_resume Lib "lua54.dll" (ByVal L As LongPtr, ByVal from As LongPtr, ByVal narg As Long, ByVal nres As LongPtr) As Long
     Private Declare PtrSafe Function lua_status Lib "lua54.dll" (ByVal L As LongPtr) As Long
     Private Declare PtrSafe Sub lua_xmove Lib "lua54.dll" (ByVal fromL As LongPtr, ByVal toL As LongPtr, ByVal n As Long)
-    
+
+    ' 调度器辅助状态
+    Private g_SchedulerCursor As Long   ' Round-Robin 游标
+    Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
+
     ' 系统 API
     Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
@@ -54,26 +58,6 @@ Option Explicit
     ' 每个 Dictionary 的 key 都是 taskId
 #Else
     ' 32位版本声明（暂不提供）
-    Private Type LuaState
-        L As Long
-        functionsPath As String
-        lastModified As Date
-    End Type
-    
-    Private Type TaskState
-        taskId As String
-        func As String
-        startArgs As Variant
-        resumeSpec As Variant
-        taskCell As String
-        status As String
-        progress As Double
-        message As Variant
-        value As Variant
-        errMsg As String
-        coThread As Long
-        lastResumeTime As Double
-    End Type
 #End If
 
 ' ===== Lua 类型常量 =====
@@ -107,14 +91,13 @@ Private g_TaskError As Object          ' taskId -> error message
 Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 Private g_SchedulerRunning As Boolean
-Private g_TimeSliceMs As Long
 Private g_NextTaskId As Long
+Private g_MaxIterationsPerTick As Long   ' 每次调度迭代次数
 
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
-Private Const DEFAULT_TIME_SLICE_MS As Long = 100
-Private Const SCHEDULER_INTERVAL_SEC As Double = 1  ' 改为1秒，减少频率
-Private Const MAX_ITERATIONS_PER_TICK As Long = 1   ' 每次调度只执行1次迭代
+Private Const SCHEDULER_INTERVAL_SEC As Double = 1  ' 调度间隔，默认1
+Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代次数，默认1
 
 ' ============================================
 ' 第一部分：核心初始化和清理
@@ -152,6 +135,7 @@ Private Function InitLuaState() As Boolean
     
     ' 初始化协程系统
     InitCoroutineSystem
+    g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
     
     ' 尝试首次加载 functions.lua（失败不影响继续）
     Dim fso As Object
@@ -191,8 +175,10 @@ Private Sub InitCoroutineSystem()
         Set g_TaskQueue = CreateObject("Scripting.Dictionary")
     End If
     
-    g_TimeSliceMs = DEFAULT_TIME_SLICE_MS
     g_NextTaskId = 1
+    g_SchedulerCursor = 0
+    g_StateDirty = False
+
 End Sub
 
 ' 清理 Lua 状态机
@@ -1098,9 +1084,10 @@ Public Sub SchedulerTick()
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
 
-    ' 复制任务列表，避免遍历时修改
+    ' ---- 复制当前任务列表（快照）----
     Dim taskIds() As Variant
     ReDim taskIds(0 To g_TaskQueue.Count - 1)
+
     Dim idx As Long
     Dim taskId As Variant
     idx = 0
@@ -1109,41 +1096,63 @@ Public Sub SchedulerTick()
         idx = idx + 1
     Next
 
+    Dim total As Long
+    total = UBound(taskIds) + 1
+    If total = 0 Then GoTo ExitTick
+
+    ' ---- Round-Robin 调度 ----
+    Dim executed As Long
+    executed = 0
+
+    Dim cur As Long
+    cur = g_SchedulerCursor Mod total
+
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-    Dim iterCount As Long
 
-    For idx = 0 To UBound(taskIds)
-        If iterCount >= MAX_ITERATIONS_PER_TICK Then Exit For
-        
-        taskId = taskIds(idx)
-        
-        ' 二次检查任务是否仍存在
+    Do While executed < g_MaxIterationsPerTick And executed < total
+        taskId = taskIds(cur)
+
         If g_TaskFunc.Exists(CStr(taskId)) Then
             ResumeCoroutine CStr(taskId)
-            iterCount = iterCount + 1
+            executed = executed + 1
 
             If g_TaskStatus(CStr(taskId)) = "done" _
             Or g_TaskStatus(CStr(taskId)) = "error" Then
                 tasksToRemove.Add taskId
             End If
         Else
-            ' 任务已被删除，从队列移除
             tasksToRemove.Add taskId
         End If
-    Next
 
+        cur = (cur + 1) Mod total
+    Loop
+
+    ' ---- 更新游标 ----
+    g_SchedulerCursor = cur
+
+    ' ---- 清理完成 / 错误任务 ----
     Dim i As Long
     For i = 0 To tasksToRemove.Count - 1
         If g_TaskQueue.Exists(tasksToRemove(i)) Then
             g_TaskQueue.Remove tasksToRemove(i)
         End If
-    Next
+    Next i
 
+ExitTick:
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
 
+    ' 关键：一个 tick 只刷新一次
+    If g_StateDirty Then
+        g_StateDirty = False
+        ActiveSheet.Calculate ' 只刷新活动单元表
+        ' Application.Calculate '刷新整个工作簿
+
+    End If
+
+    ' 继续或停止调度
     If g_TaskQueue.Count > 0 Then
         Application.OnTime _
             Now + TimeSerial(0, 0, SCHEDULER_INTERVAL_SEC), _
@@ -1152,6 +1161,7 @@ Public Sub SchedulerTick()
         g_SchedulerRunning = False
     End If
 End Sub
+
 
 ' Resume 协程
 Private Sub ResumeCoroutine(taskId As String)
@@ -1227,6 +1237,7 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
     Select Case result
         Case LUA_OK
             g_TaskStatus(taskId) = "done"
+            g_StateDirty = True
             g_TaskProgress(taskId) = 100
             
             If nres > 0 Then
@@ -1251,9 +1262,13 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
             End If
             
             g_TaskStatus(taskId) = "yielded"
+            g_StateDirty = True
+
             
         Case Else
             g_TaskStatus(taskId) = "error"
+            g_StateDirty = True
+
             If nres > 0 Then
                 g_TaskError(taskId) = GetStringFromState(coThread, -1)
             Else

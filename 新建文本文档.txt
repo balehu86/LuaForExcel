@@ -15,6 +15,30 @@ Public Sub ReloadFunctions()
     End If
 End Sub
 
+Public Sub SetSchedulerBatchSize()
+    If Application.CalculationState <> xlDone Then
+        MsgBox "当前处于计算中，无法弹出输入窗口。", vbExclamation
+        Exit Sub
+    End If
+
+    Dim v As Variant
+    v = Application.InputBox( _
+            "请输入每次调度的最大任务数（>=1）", _
+            "调度参数", _
+            g_MaxIterationsPerTick, _
+            Type:=1 _
+        )
+
+    If v = False Then Exit Sub
+    If v < 1 Or v <> CLng(v) Then
+        MsgBox "请输入 >=1 的整数", vbExclamation
+        Exit Sub
+    End If
+
+    g_MaxIterationsPerTick = CLng(v)
+End Sub
+
+
 ' ============================================
 ' 第七部分：可视化操作函数
 ' ============================================
