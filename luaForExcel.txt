@@ -115,9 +115,8 @@ Private g_NextTaskId As Long
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const DEFAULT_TIME_SLICE_MS As Long = 100
-Private Const SCHEDULER_INTERVAL_SEC As Double = 0.5  ' 改为2秒，减少频率
+Private Const SCHEDULER_INTERVAL_SEC As Double = 1  ' 改为1秒，减少频率
 Private Const MAX_ITERATIONS_PER_TICK As Long = 1   ' 每次调度只执行1次迭代
-
 
 ' ============================================
 ' 第一部分：核心初始化和清理
@@ -227,7 +226,6 @@ End Sub
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     CleanupLua
 End Sub
-
 
 ' ============================================
 ' 第二部分：functions.lua 加载和热重载
@@ -880,7 +878,6 @@ Public Sub ClearAllTasks()
     
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
 End Sub
-
 
 ' ============================================
 ' 第四部分：协程 UDF 接口
