@@ -416,11 +416,7 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
     Dim i As Long, argCount As Long
     argCount = 0
     For i = LBound(args) To UBound(args)
-        If TypeName(args(i)) = "Range" Then
-            PushRangeValue g_LuaState.L, args(i)
-        Else
-            PushValue g_LuaState.L, args(i)
-        End If
+        PushValue g_LuaState.L, args(i)
         argCount = argCount + 1
     Next i
     
@@ -1021,11 +1017,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     
     If IsArray(startArgs) Then
         For i = LBound(startArgs) To UBound(startArgs)
-            If TypeName(startArgs(i)) = "Range" Then
-                PushRangeValueToThread coThread, startArgs(i)
-            Else
-                PushValueToThread coThread, startArgs(i)
-            End If
+            PushValue coThread, startArgs(i)  ' 或 PushValueToThread coThread, startArgs(i)
         Next i
     End If
     
@@ -1162,7 +1154,6 @@ ExitTick:
     End If
 End Sub
 
-
 ' Resume 协程
 Private Sub ResumeCoroutine(taskId As String)
     On Error GoTo ErrorHandler
@@ -1187,21 +1178,19 @@ Private Sub ResumeCoroutine(taskId As String)
             
             ' 如果是字符串，尝试解析为单元格引用
             If VarType(param) = vbString Then
+                ' 尝试解析为单元格引用
                 On Error Resume Next
                 Dim rng As Range
                 Set rng = Range(param)
-                If Not rng Is Nothing Then
-                    PushRangeValueToThread coThread, rng
-                Else
-                    PushValueToThread coThread, param
-                End If
                 On Error GoTo ErrorHandler
-            Else
-                If TypeName(param) = "Range" Then
-                    PushRangeValueToThread coThread, param
+                
+                If Not rng Is Nothing Then
+                    PushValue coThread, rng  ' 或 PushValueToThread
                 Else
-                    PushValueToThread coThread, param
+                    PushValue coThread, param  ' 或 PushValueToThread
                 End If
+            Else
+                PushValue coThread, param  ' 或 PushValueToThread
             End If
         Next i
     End If
@@ -1316,6 +1305,78 @@ End Sub
 ' ============================================
 ' 第六部分：辅助函数（内部使用）
 ' ============================================
+' 统一压栈函数 - 支持主状态机和协程线程
+' L: 可以是 g_LuaState.L 或 coThread
+Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
+    ' 处理 Range 对象
+    If TypeName(value) = "Range" Then
+        Dim rng As Range
+        Set rng = value
+        If rng.Cells.Count = 1 Then
+            ' 单个单元格，递归调用处理其值
+            PushValue L, rng.value
+        Else
+            ' 多个单元格，获取数组后递归调用
+            PushValue L, rng.value
+        End If
+        Exit Sub
+    End If
+    
+    ' 处理数组
+    If IsArray(value) Then
+        PushArray L, value
+        Exit Sub
+    End If
+    
+    ' 处理基本类型
+    If IsEmpty(value) Or IsNull(value) Then
+        lua_pushnil L
+    ElseIf IsNumeric(value) Then
+        lua_pushnumber L, CDbl(value)
+    ElseIf VarType(value) = vbBoolean Then
+        lua_pushboolean L, IIf(value, 1, 0)
+    Else
+        lua_pushstring L, CStr(value)
+    End If
+End Sub
+
+' 统一数组压栈函数 - 支持主状态机和协程线程
+' L: 可以是 g_LuaState.L 或 coThread
+Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
+    Dim i As Long, j As Long
+    Dim rows As Long, cols As Long
+    
+    ' 处理一维数组
+    On Error Resume Next
+    rows = UBound(arr, 1) - LBound(arr, 1) + 1
+    cols = UBound(arr, 2) - LBound(arr, 2) + 1
+    
+    If Err.Number <> 0 Then
+        ' 一维数组
+        Err.Clear
+        On Error GoTo 0
+        rows = UBound(arr) - LBound(arr) + 1
+        
+        lua_createtable L, rows, 0
+        For i = LBound(arr) To UBound(arr)
+            PushValue L, arr(i)  ' 递归调用 PushValue
+            lua_rawseti L, -2, i - LBound(arr) + 1
+        Next i
+        Exit Sub
+    End If
+    On Error GoTo 0
+    
+    ' 二维数组
+    lua_createtable L, rows, 0
+    For i = LBound(arr, 1) To UBound(arr, 1)
+        lua_createtable L, cols, 0
+        For j = LBound(arr, 2) To UBound(arr, 2)
+            PushValue L, arr(i, j)  ' 递归调用 PushValue
+            lua_rawseti L, -2, j - LBound(arr, 2) + 1
+        Next j
+        lua_rawseti L, -2, i - LBound(arr, 1) + 1
+    Next i
+End Sub
 
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
@@ -1337,106 +1398,6 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
         GetStringFromState = ""
     End If
 End Function
-
-' 推入单个值到主 Lua 栈
-Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
-    If IsEmpty(value) Or IsNull(value) Then
-        lua_pushnil L
-    ElseIf IsNumeric(value) Then
-        lua_pushnumber L, CDbl(value)
-    ElseIf VarType(value) = vbBoolean Then
-        lua_pushboolean L, IIf(value, 1, 0)
-    ElseIf IsArray(value) Then
-        PushArray L, value
-    Else
-        lua_pushstring L, CStr(value)
-    End If
-End Sub
-
-' 推入单个值到协程线程
-Private Sub PushValueToThread(ByVal coThread As LongPtr, ByVal value As Variant)
-    If IsEmpty(value) Or IsNull(value) Then
-        lua_pushnil coThread
-    ElseIf IsNumeric(value) Then
-        lua_pushnumber coThread, CDbl(value)
-    ElseIf VarType(value) = vbBoolean Then
-        lua_pushboolean coThread, IIf(value, 1, 0)
-    ElseIf IsArray(value) Then
-        PushArrayToThread coThread, value
-    Else
-        lua_pushstring coThread, CStr(value)
-    End If
-End Sub
-
-' 推入 Range 对象到主栈
-Private Sub PushRangeValue(ByVal L As LongPtr, ByVal rng As Range)
-    If rng.Cells.Count = 1 Then
-        PushValue L, rng.value
-    Else
-        Dim arr As Variant
-        arr = rng.value
-        PushArray L, arr
-    End If
-End Sub
-
-' 推入 Range 对象到协程线程
-Private Sub PushRangeValueToThread(ByVal coThread As LongPtr, ByVal rng As Range)
-    If rng.Cells.Count = 1 Then
-        PushValueToThread coThread, rng.value
-    Else
-        Dim arr As Variant
-        arr = rng.value
-        PushArrayToThread coThread, arr
-    End If
-End Sub
-
-' 推入二维数组为 Lua table（主栈）
-Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
-    Dim i As Long, j As Long
-    Dim rows As Long, cols As Long
-    
-    rows = UBound(arr, 1) - LBound(arr, 1) + 1
-    cols = UBound(arr, 2) - LBound(arr, 2) + 1
-    
-    ' 创建主表
-    lua_createtable L, rows, 0
-    
-    For i = LBound(arr, 1) To UBound(arr, 1)
-        ' 创建行表
-        lua_createtable L, cols, 0
-        
-        For j = LBound(arr, 2) To UBound(arr, 2)
-            PushValue L, arr(i, j)
-            lua_rawseti L, -2, j - LBound(arr, 2) + 1
-        Next j
-        
-        lua_rawseti L, -2, i - LBound(arr, 1) + 1
-    Next i
-End Sub
-
-' 推入二维数组为 Lua table（协程线程）
-Private Sub PushArrayToThread(ByVal coThread As LongPtr, arr As Variant)
-    Dim i As Long, j As Long
-    Dim rows As Long, cols As Long
-    
-    rows = UBound(arr, 1) - LBound(arr, 1) + 1
-    cols = UBound(arr, 2) - LBound(arr, 2) + 1
-    
-    ' 创建主表
-    lua_createtable coThread, rows, 0
-    
-    For i = LBound(arr, 1) To UBound(arr, 1)
-        ' 创建行表
-        lua_createtable coThread, cols, 0
-        
-        For j = LBound(arr, 2) To UBound(arr, 2)
-            PushValueToThread coThread, arr(i, j)
-            lua_rawseti coThread, -2, j - LBound(arr, 2) + 1
-        Next j
-        
-        lua_rawseti coThread, -2, i - LBound(arr, 1) + 1
-    Next i
-End Sub
 
 ' 从 Lua 栈获取值
 Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
