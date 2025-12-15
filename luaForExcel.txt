@@ -100,8 +100,6 @@ Private g_HotReloadEnabled As Boolean
 Private g_TaskFunc As Object           ' taskId -> func name
 Private g_TaskStartArgs As Object      ' taskId -> startArgs array
 Private g_TaskResumeSpec As Object     ' taskId -> resumeSpec array
-Private g_TaskDynamicTargets As Object ' taskId -> dynamicTargets array
-Private g_TaskWriteTargets As Object   ' taskId -> writeTargets array
 Private g_TaskCell As Object           ' taskId -> taskCell address
 Private g_TaskStatus As Object         ' taskId -> status string
 Private g_TaskProgress As Object       ' taskId -> progress number
@@ -117,7 +115,7 @@ Private g_NextTaskId As Long
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const DEFAULT_TIME_SLICE_MS As Long = 100
-Private Const SCHEDULER_INTERVAL_SEC As Double = 2  ' 改为2秒，减少频率
+Private Const SCHEDULER_INTERVAL_SEC As Double = 0.5  ' 改为2秒，减少频率
 Private Const MAX_ITERATIONS_PER_TICK As Long = 1   ' 每次调度只执行1次迭代
 
 
@@ -186,8 +184,6 @@ Private Sub InitCoroutineSystem()
         Set g_TaskFunc = CreateObject("Scripting.Dictionary")
         Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
         Set g_TaskResumeSpec = CreateObject("Scripting.Dictionary")
-        Set g_TaskDynamicTargets = CreateObject("Scripting.Dictionary")
-        Set g_TaskWriteTargets = CreateObject("Scripting.Dictionary")
         Set g_TaskCell = CreateObject("Scripting.Dictionary")
         Set g_TaskStatus = CreateObject("Scripting.Dictionary")
         Set g_TaskProgress = CreateObject("Scripting.Dictionary")
@@ -205,16 +201,12 @@ End Sub
 ' 清理 Lua 状态机
 Public Sub CleanupLua()
     If g_Initialized Then
-        ' 停止调度器
         g_SchedulerRunning = False
         
-        ' 清理所有协程
         If Not g_TaskFunc Is Nothing Then
             g_TaskFunc.RemoveAll
             g_TaskStartArgs.RemoveAll
             g_TaskResumeSpec.RemoveAll
-            g_TaskDynamicTargets.RemoveAll
-            g_TaskWriteTargets.RemoveAll
             g_TaskCell.RemoveAll
             g_TaskStatus.RemoveAll
             g_TaskProgress.RemoveAll
@@ -225,13 +217,11 @@ Public Sub CleanupLua()
             g_TaskQueue.RemoveAll
         End If
         
-        ' 关闭 Lua
         lua_close g_LuaState.L
         g_LuaState.L = 0
         g_Initialized = False
     End If
 End Sub
-
 ' 工作簿关闭时自动清理
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     CleanupLua
@@ -648,7 +638,7 @@ Public Sub ShowTaskDetail(taskId As String)
     Else
         msg = msg & "   (无)" & vbCrLf
     End If
-    
+
     ' Resume 参数
     msg = msg & vbCrLf & "Resume 参数:" & vbCrLf
     Dim resumeSpec As Variant
@@ -660,30 +650,7 @@ Public Sub ShowTaskDetail(taskId As String)
     Else
         msg = msg & "   (无)" & vbCrLf
     End If
-    
-    ' 写入目标
-    msg = msg & vbCrLf & "动态写入目标:" & vbCrLf
-    Dim dynamicTargets As Variant
-    dynamicTargets = g_TaskDynamicTargets(taskId)
-    If IsArray(dynamicTargets) Then
-        For i = LBound(dynamicTargets) To UBound(dynamicTargets)
-            msg = msg & "   • " & CStr(dynamicTargets(i)) & vbCrLf
-        Next i
-    Else
-        msg = msg & "   (无)" & vbCrLf
-    End If
-    
-    msg = msg & vbCrLf & "最终写入目标:" & vbCrLf
-    Dim writeTargets As Variant
-    writeTargets = g_TaskWriteTargets(taskId)
-    If IsArray(writeTargets) Then
-        For i = LBound(writeTargets) To UBound(writeTargets)
-            msg = msg & "   • " & CStr(writeTargets(i)) & vbCrLf
-        Next i
-    Else
-        msg = msg & "   (无)" & vbCrLf
-    End If
-    
+
     ' 当前值
     msg = msg & vbCrLf & "当前值:" & vbCrLf
     Dim value As Variant
@@ -933,73 +900,53 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         Exit Function
     End If
 
-    ' === 获取调用单元格地址（幂等锚点）===
     Dim taskCell As String
     taskCell = Application.Caller.Address(External:=True)
 
-    ' === 幂等检查：该单元格是否已有任务 ===
     Dim existingTaskId As String
     existingTaskId = FindTaskByCell(taskCell)
 
     If existingTaskId <> "" Then
-        ' 已存在任务，直接返回，不做任何副作用
         LuaTask = existingTaskId
         Exit Function
     End If
-
-    ' ===== 以下逻辑：只会执行一次 =====
 
     Dim funcName As String
     funcName = CStr(params(0))
 
     Dim startArgs As Variant, resumeSpec As Variant
-    Dim dynamicTargets As Variant, writeTargets As Variant
     startArgs = Array()
     resumeSpec = Array()
-    dynamicTargets = Array()
-    writeTargets = Array()
 
     Dim phase As Long
     phase = 0
 
     Dim startList As Object, resumeList As Object
-    Dim dynamicList As Object, writeList As Object
     Set startList = CreateObject("System.Collections.ArrayList")
     Set resumeList = CreateObject("System.Collections.ArrayList")
-    Set dynamicList = CreateObject("System.Collections.ArrayList")
-    Set writeList = CreateObject("System.Collections.ArrayList")
 
     Dim i As Long
     For i = 1 To UBound(params)
         If VarType(params(i)) = vbString Then
-            Select Case params(i)
-                Case "|": phase = 1
-                Case ">>": phase = 2
-                Case "->": phase = 3
-                Case Else
-                    Select Case phase
-                        Case 0: startList.Add params(i)
-                        Case 1: resumeList.Add params(i)
-                        Case 2: dynamicList.Add params(i)
-                        Case 3: writeList.Add params(i)
-                    End Select
-            End Select
+            If params(i) = "|" Then
+                phase = 1
+            Else
+                Select Case phase
+                    Case 0: startList.Add params(i)
+                    Case 1: resumeList.Add params(i)
+                End Select
+            End If
         Else
             Select Case phase
                 Case 0: startList.Add params(i)
                 Case 1: resumeList.Add params(i)
-                Case 2: dynamicList.Add params(i)
-                Case 3: writeList.Add params(i)
             End Select
         End If
     Next i
 
     If startList.Count > 0 Then startArgs = startList.ToArray()
     If resumeList.Count > 0 Then resumeSpec = resumeList.ToArray()
-    If dynamicList.Count > 0 Then dynamicTargets = dynamicList.ToArray()
-    If writeList.Count > 0 Then writeTargets = writeList.ToArray()
 
-    ' === 创建新任务（仅此一次）===
     Dim taskId As String
     taskId = "TASK_" & g_NextTaskId
     g_NextTaskId = g_NextTaskId + 1
@@ -1007,8 +954,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     g_TaskFunc(taskId) = funcName
     g_TaskStartArgs(taskId) = startArgs
     g_TaskResumeSpec(taskId) = resumeSpec
-    g_TaskDynamicTargets(taskId) = dynamicTargets
-    g_TaskWriteTargets(taskId) = writeTargets
     g_TaskCell(taskId) = taskCell
     g_TaskStatus(taskId) = "defined"
     g_TaskProgress(taskId) = 0
@@ -1027,6 +972,9 @@ End Function
 ' 读取任务状态
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
+    
+    ' 标记为 volatile，每次计算都会刷新
+    Application.Volatile True
     
     If g_TaskFunc Is Nothing Then
         InitCoroutineSystem
@@ -1048,6 +996,14 @@ Public Function LuaGet(taskId As String, field As String) As Variant
             LuaGet = g_TaskValue(taskId)
         Case "error"
             LuaGet = g_TaskError(taskId)
+        Case "summary"
+            Dim summary As String
+            summary = "状态:" & g_TaskStatus(taskId)
+            summary = summary & " | 进度:" & Format(g_TaskProgress(taskId), "0.0") & "%"
+            If g_TaskStatus(taskId) = "error" Then
+                summary = summary & " | 错误:" & Left(g_TaskError(taskId), 30)
+            End If
+            LuaGet = summary
         Case Else
             LuaGet = "#ERROR: 未知字段"
     End Select
@@ -1172,34 +1128,52 @@ Public Sub SchedulerTick()
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
 
+    ' 复制任务列表，避免遍历时修改
+    Dim taskIds() As Variant
+    ReDim taskIds(0 To g_TaskQueue.Count - 1)
+    Dim idx As Long
     Dim taskId As Variant
+    idx = 0
+    For Each taskId In g_TaskQueue.Keys
+        taskIds(idx) = taskId
+        idx = idx + 1
+    Next
+
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-
     Dim iterCount As Long
 
-    For Each taskId In g_TaskQueue.Keys
+    For idx = 0 To UBound(taskIds)
         If iterCount >= MAX_ITERATIONS_PER_TICK Then Exit For
+        
+        taskId = taskIds(idx)
+        
+        ' 二次检查任务是否仍存在
+        If g_TaskFunc.Exists(CStr(taskId)) Then
+            ResumeCoroutine CStr(taskId)
+            iterCount = iterCount + 1
 
-        ResumeCoroutine CStr(taskId)
-        iterCount = iterCount + 1
-
-        If g_TaskStatus(taskId) = "done" _
-        Or g_TaskStatus(taskId) = "error" Then
+            If g_TaskStatus(CStr(taskId)) = "done" _
+            Or g_TaskStatus(CStr(taskId)) = "error" Then
+                tasksToRemove.Add taskId
+            End If
+        Else
+            ' 任务已被删除，从队列移除
             tasksToRemove.Add taskId
         End If
     Next
 
     Dim i As Long
     For i = 0 To tasksToRemove.Count - 1
-        g_TaskQueue.Remove tasksToRemove(i)
+        If g_TaskQueue.Exists(tasksToRemove(i)) Then
+            g_TaskQueue.Remove tasksToRemove(i)
+        End If
     Next
 
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
 
-    ' === 是否继续 ===
     If g_TaskQueue.Count > 0 Then
         Application.OnTime _
             Now + TimeSerial(0, 0, SCHEDULER_INTERVAL_SEC), _
@@ -1281,44 +1255,34 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
     coThread = g_TaskCoThread(taskId)
     
     Select Case result
-        Case LUA_OK  ' 协程完成
+        Case LUA_OK
             g_TaskStatus(taskId) = "done"
             g_TaskProgress(taskId) = 100
             
             If nres > 0 Then
-                ' 获取返回值（字典）
                 Dim retDict As Variant
                 retDict = GetValue(coThread, -1)
                 
                 If IsArray(retDict) Then
-                    ' 解析返回字典
                     ParseYieldReturn taskId, retDict, True
                 Else
                     g_TaskValue(taskId) = retDict
                 End If
-                
-                ' 写入最终目标
-                WriteFinalResult taskId
             End If
             
-        Case LUA_YIELD  ' 协程 yield
+        Case LUA_YIELD
             If nres > 0 Then
-                ' 获取 yield 值（字典）
                 Dim yieldDict As Variant
                 yieldDict = GetValue(coThread, -1)
                 
                 If IsArray(yieldDict) Then
-                    ' 解析 yield 字典
                     ParseYieldReturn taskId, yieldDict, False
-                    
-                    ' 写入中间结果
-                    WriteIntermediateResult taskId
                 End If
             End If
             
             g_TaskStatus(taskId) = "yielded"
             
-        Case Else  ' 错误
+        Case Else
             g_TaskStatus(taskId) = "error"
             If nres > 0 Then
                 g_TaskError(taskId) = GetStringFromState(coThread, -1)
@@ -1363,133 +1327,6 @@ Private Sub ParseYieldReturn(taskId As String, dict As Variant, isFinal As Boole
         End Select
     Next i
 End Sub
-
-' 写入中间结果
-Private Sub WriteIntermediateResult(taskId As String)
-    On Error GoTo ErrorHandler
-    
-    ' 获取写入目标
-    Dim writeTarget As String
-    writeTarget = ""
-    
-    Dim value As Variant
-    value = g_TaskValue(taskId)
-    
-    ' 优先使用 yield 字典中的 write
-    If IsArray(value) Then
-        Dim i As Long
-        For i = LBound(value, 1) To UBound(value, 1)
-            If LCase(value(i, 1)) = "write" Then
-                writeTarget = CStr(value(i, 2))
-                Exit For
-            End If
-        Next i
-    End If
-    
-    ' 其次使用 ">>" 动态目标
-    If writeTarget = "" Then
-        Dim dynamicTargets As Variant
-        dynamicTargets = g_TaskDynamicTargets(taskId)
-        If IsArray(dynamicTargets) Then
-            If UBound(dynamicTargets) >= LBound(dynamicTargets) Then
-                writeTarget = CStr(dynamicTargets(LBound(dynamicTargets)))
-            End If
-        End If
-    End If
-    
-    ' 写入
-    If writeTarget <> "" Then
-        WriteToExcel writeTarget, value
-    End If
-    
-    Exit Sub
-
-ErrorHandler:
-    ' 写入失败不影响协程继续
-End Sub
-
-' 写入最终结果
-Private Sub WriteFinalResult(taskId As String)
-    On Error GoTo ErrorHandler
-    
-    ' 获取写入目标
-    Dim writeTarget As String
-    writeTarget = ""
-    
-    Dim value As Variant
-    value = g_TaskValue(taskId)
-    
-    ' 优先使用 return 字典中的 write
-    If IsArray(value) Then
-        Dim i As Long
-        For i = LBound(value, 1) To UBound(value, 1)
-            If LCase(value(i, 1)) = "write" Then
-                writeTarget = CStr(value(i, 2))
-                Exit For
-            End If
-        Next i
-    End If
-    
-    ' 其次使用 "->" 最终目标
-    If writeTarget = "" Then
-        Dim writeTargets As Variant
-        writeTargets = g_TaskWriteTargets(taskId)
-        If IsArray(writeTargets) Then
-            If UBound(writeTargets) >= LBound(writeTargets) Then
-                writeTarget = CStr(writeTargets(LBound(writeTargets)))
-            End If
-        End If
-    End If
-    
-    ' 写入
-    If writeTarget <> "" Then
-        WriteToExcel writeTarget, value
-    End If
-    
-    Exit Sub
-
-ErrorHandler:
-    ' 写入失败不影响任务完成状态
-End Sub
-
-' 通用写入函数
-Private Sub WriteToExcel(target As String, value As Variant)
-    On Error Resume Next
-    
-    Dim rng As Range
-    Set rng = Range(target)
-    
-    If rng Is Nothing Then Exit Sub
-    
-    ' 提取实际 value（如果是字典）
-    Dim actualValue As Variant
-    actualValue = value
-    
-    If IsArray(value) Then
-        ' 检查是否是字典格式
-        Dim i As Long
-        For i = LBound(value, 1) To UBound(value, 1)
-            If LCase(value(i, 1)) = "value" Then
-                actualValue = value(i, 2)
-                Exit For
-            End If
-        Next i
-    End If
-    
-    ' 写入
-    If IsArray(actualValue) Then
-        ' 数组写入，自动扩展
-        Dim rows As Long, cols As Long
-        rows = UBound(actualValue, 1) - LBound(actualValue, 1) + 1
-        cols = UBound(actualValue, 2) - LBound(actualValue, 2) + 1
-        
-        rng.Resize(rows, cols).value = actualValue
-    Else
-        ' 单值写入
-        rng.value = actualValue
-    End If
-End Sub
-
 
 ' ============================================
 ' 第六部分：辅助函数（内部使用）
@@ -1709,20 +1546,16 @@ Public Sub TerminateAndDeleteTask(taskId As String)
     If taskId = "" Then Exit Sub
     If Not g_TaskFunc.Exists(taskId) Then Exit Sub
 
-    ' 从队列移除（安全检查）
     If Not g_TaskQueue Is Nothing Then
         If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
     End If
 
-    ' 标记终止状态
     g_TaskStatus(taskId) = "terminated"
 
-    ' 删除所有字典条目
     If g_TaskFunc.Exists(taskId) Then g_TaskFunc.Remove taskId
     If g_TaskStartArgs.Exists(taskId) Then g_TaskStartArgs.Remove taskId
     If g_TaskResumeSpec.Exists(taskId) Then g_TaskResumeSpec.Remove taskId
-    If g_TaskDynamicTargets.Exists(taskId) Then g_TaskDynamicTargets.Remove taskId
-    If g_TaskWriteTargets.Exists(taskId) Then g_TaskWriteTargets.Remove taskId
+    ' 删除 dynamicTargets 和 writeTargets
     If g_TaskCell.Exists(taskId) Then g_TaskCell.Remove taskId
     If g_TaskStatus.Exists(taskId) Then g_TaskStatus.Remove taskId
     If g_TaskProgress.Exists(taskId) Then g_TaskProgress.Remove taskId
@@ -1733,7 +1566,6 @@ Public Sub TerminateAndDeleteTask(taskId As String)
 
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
-
 
 ' 根据单元格地址获取任务ID
 Private Function GetTaskIdFromSelection() As String
@@ -1858,4 +1690,19 @@ Public Sub LuaMenu_ShowDetail()
         Exit Sub
     End If
     ShowTaskDetail taskId
+End Sub
+
+' 批量启动所有 defined 状态的任务
+Public Sub StartAllDefinedTasks()
+    Dim taskId As Variant
+    Dim count As Long
+    
+    For Each taskId In g_TaskFunc.Keys
+        If g_TaskStatus(CStr(taskId)) = "defined" Then
+            StartLuaCoroutine CStr(taskId)
+            count = count + 1
+        End If
+    Next
+    
+    MsgBox "已启动 " & count & " 个任务", vbInformation
 End Sub
