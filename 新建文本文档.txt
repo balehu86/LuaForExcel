@@ -1,3 +1,13 @@
+' 工作簿关闭时自动清理
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    CleanupLua
+End Sub
+
+' 工作簿打开时自动运行
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    EnableLuaTaskMenu
+End Sub
+
 ' 手动重载 functions.lua
 Public Sub ReloadFunctions()
     If Not g_Initialized Then

@@ -178,7 +178,6 @@ Private Sub InitCoroutineSystem()
     g_NextTaskId = 1
     g_SchedulerCursor = 0
     g_StateDirty = False
-
 End Sub
 
 ' 清理 Lua 状态机
@@ -204,11 +203,6 @@ Public Sub CleanupLua()
         g_LuaState.L = 0
         g_Initialized = False
     End If
-End Sub
-
-' 工作簿关闭时自动清理
-Private Sub Workbook_BeforeClose(Cancel As Boolean)
-    CleanupLua
 End Sub
 
 ' ============================================
