@@ -222,6 +222,7 @@ Public Sub CleanupLua()
         g_Initialized = False
     End If
 End Sub
+
 ' 工作簿关闭时自动清理
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     CleanupLua
@@ -359,7 +360,6 @@ Private Sub CheckAutoReload()
         ' 失败时已有弹窗提示，这里不再处理
     End If
 End Sub
-
 
 ' ============================================
 ' 第三部分：公共接口（基础功能）
@@ -1114,7 +1114,6 @@ Private Sub StartSchedulerIfNeeded()
         "SchedulerTick"
 End Sub
 
-
 ' 调度器心跳
 Public Sub SchedulerTick()
     On Error Resume Next
@@ -1538,8 +1537,11 @@ Private Function FindTaskByCell(taskCell As String) As String
     FindTaskByCell = ""
 End Function
 
-' 右键菜单
+' ============================================
+' 第七部分：可视化操作函数
+' ============================================
 
+' 终止并删除任务
 Public Sub TerminateAndDeleteTask(taskId As String)
     On Error Resume Next
     If g_TaskFunc Is Nothing Then Exit Sub
@@ -1675,7 +1677,6 @@ Public Sub LuaMenu_terminateTask()
     End If
     TerminateAndDeleteTask taskId
 End Sub
-
 
 ' ===== 查看任务详情 =====
 Public Sub LuaMenu_ShowDetail()
