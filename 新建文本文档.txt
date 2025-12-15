@@ -1,0 +1,187 @@
+' 手动重载 functions.lua
+Public Sub ReloadFunctions()
+    If Not g_Initialized Then
+        If Not InitLuaState() Then
+            MsgBox "无法初始化 Lua 引擎。", vbCritical, "重载失败"
+            Exit Sub
+        End If
+    End If
+    
+    If TryLoadFunctionsFile() Then
+        MsgBox "functions.lua 已成功重载！", vbInformation, "重载成功"
+    Else
+        MsgBox "functions.lua 重载失败。" & vbCrLf & _
+               "请检查文件语法。", vbCritical, "重载失败"
+    End If
+End Sub
+
+' ============================================
+' 第七部分：可视化操作函数
+' ============================================
+
+' 终止并删除任务
+Public Sub TerminateAndDeleteTask(taskId As String)
+    On Error Resume Next
+    If g_TaskFunc Is Nothing Then Exit Sub
+    If taskId = "" Then Exit Sub
+    If Not g_TaskFunc.Exists(taskId) Then Exit Sub
+
+    If Not g_TaskQueue Is Nothing Then
+        If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
+    End If
+
+    g_TaskStatus(taskId) = "terminated"
+
+    If g_TaskFunc.Exists(taskId) Then g_TaskFunc.Remove taskId
+    If g_TaskStartArgs.Exists(taskId) Then g_TaskStartArgs.Remove taskId
+    If g_TaskResumeSpec.Exists(taskId) Then g_TaskResumeSpec.Remove taskId
+    ' 删除 dynamicTargets 和 writeTargets
+    If g_TaskCell.Exists(taskId) Then g_TaskCell.Remove taskId
+    If g_TaskStatus.Exists(taskId) Then g_TaskStatus.Remove taskId
+    If g_TaskProgress.Exists(taskId) Then g_TaskProgress.Remove taskId
+    If g_TaskMessage.Exists(taskId) Then g_TaskMessage.Remove taskId
+    If g_TaskValue.Exists(taskId) Then g_TaskValue.Remove taskId
+    If g_TaskError.Exists(taskId) Then g_TaskError.Remove taskId
+    If g_TaskCoThread.Exists(taskId) Then g_TaskCoThread.Remove taskId
+
+    MsgBox "任务已终止并删除: " & taskId, vbInformation
+End Sub
+
+' 根据单元格地址获取任务ID
+Private Function GetTaskIdFromSelection() As String
+    Dim cellAddr As String
+    cellAddr = Selection.Address(External:=True)
+    GetTaskIdFromSelection = FindTaskByCell(cellAddr)
+End Function
+
+Public Sub EnableLuaTaskMenu()
+    On Error Resume Next
+
+    ' 删除已有菜单，避免重复
+    Call DisableLuaTaskMenu
+
+    ' 获取右键菜单（Cell）
+    Dim cMenu As CommandBar
+    Set cMenu = Application.CommandBars("Cell")
+
+    ' 添加主菜单
+    Dim luaMenu As CommandBarControl
+    Set luaMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
+    luaMenu.Caption = "Lua 任务管理"
+    luaMenu.Tag = "LuaTaskMenu"
+
+    ' 添加子菜单
+    AddLuaMenuItem luaMenu, "启动任务", "LuaMenu_StartTask"
+    AddLuaMenuItem luaMenu, "挂起任务", "LuaMenu_PauseTask"
+    AddLuaMenuItem luaMenu, "恢复任务", "LuaMenu_ResumeTask"
+    AddLuaMenuItem luaMenu, "终止任务", "LuaMenu_TerminateTask"
+    AddLuaMenuItem luaMenu, "查看任务详情", "LuaMenu_ShowDetail"
+
+    MsgBox "Lua 任务右键菜单已启用。", vbInformation
+End Sub
+
+' 辅助：增加子菜单项
+Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAction As String)
+    Dim ctrl As CommandBarControl
+    Set ctrl = parent.Controls.Add(Type:=msoControlButton, Temporary:=True)
+    ctrl.Caption = caption
+    ctrl.OnAction = onAction
+End Sub
+
+Public Sub DisableLuaTaskMenu()
+    On Error Resume Next
+    Dim cMenu As CommandBar
+    Set cMenu = Application.CommandBars("Cell")
+
+    Dim ctrl As CommandBarControl
+    For Each ctrl In cMenu.Controls
+        If ctrl.Tag = "LuaTaskMenu" Then ctrl.Delete
+    Next
+End Sub
+
+' ===== 启动任务 =====
+Public Sub LuaMenu_StartTask()
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If g_TaskStatus(taskId) = "defined" Then
+        StartLuaCoroutine taskId
+        MsgBox "任务已启动: " & taskId, vbInformation
+    Else
+        MsgBox "任务状态为 " & g_TaskStatus(taskId) & "，无法启动。", vbExclamation
+    End If
+End Sub
+
+' ===== 挂起任务 =====
+Public Sub LuaMenu_PauseTask()
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务已不存在。", vbExclamation
+        Exit Sub
+    End If
+    PauseTask taskId
+End Sub
+
+' ===== 恢复任务 =====
+Public Sub LuaMenu_ResumeTask()
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务已不存在。", vbExclamation
+        Exit Sub
+    End If
+    ResumeTask taskId
+End Sub
+
+' ===== 终止任务 =====
+Public Sub LuaMenu_terminateTask()
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Or Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务不存在或已删除", vbExclamation
+        Exit Sub
+    End If
+    TerminateAndDeleteTask taskId
+End Sub
+
+' ===== 查看任务详情 =====
+Public Sub LuaMenu_ShowDetail()
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If Not g_TaskFunc.Exists(taskId) Then
+        MsgBox "任务已不存在。", vbExclamation
+        Exit Sub
+    End If
+    ShowTaskDetail taskId
+End Sub
+
+' 批量启动所有 defined 状态的任务
+Public Sub StartAllDefinedTasks()
+    Dim taskId As Variant
+    Dim count As Long
+    
+    For Each taskId In g_TaskFunc.Keys
+        If g_TaskStatus(CStr(taskId)) = "defined" Then
+            StartLuaCoroutine CStr(taskId)
+            count = count + 1
+        End If
+    Next
+    
+    MsgBox "已启动 " & count & " 个任务", vbInformation
+End Sub

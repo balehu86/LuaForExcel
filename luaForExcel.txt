@@ -53,7 +53,7 @@ Option Explicit
     ' 协程任务状态 - 不使用 Type，改用多个 Dictionary
     ' 每个 Dictionary 的 key 都是 taskId
 #Else
-    ' 32位版本声明（略）
+    ' 32位版本声明（暂不提供）
     Private Type LuaState
         L As Long
         functionsPath As String
@@ -65,8 +65,6 @@ Option Explicit
         func As String
         startArgs As Variant
         resumeSpec As Variant
-        dynamicTargets As Variant
-        writeTargets As Variant
         taskCell As String
         status As String
         progress As Double
@@ -475,26 +473,6 @@ ErrorHandler:
     If g_Initialized Then lua_settop g_LuaState.L, 0
 End Function
 
-' 手动重载 functions.lua
-Public Function ReloadFunctions() As Boolean
-    If Not g_Initialized Then
-        If Not InitLuaState() Then
-            MsgBox "无法初始化 Lua 引擎。", vbCritical, "重载失败"
-            ReloadFunctions = False
-            Exit Function
-        End If
-    End If
-    
-    If TryLoadFunctionsFile() Then
-        MsgBox "functions.lua 已成功重载！", vbInformation, "重载成功"
-        ReloadFunctions = True
-    Else
-        MsgBox "functions.lua 重载失败。" & vbCrLf & _
-               "请检查文件语法。", vbCritical, "重载失败"
-        ReloadFunctions = False
-    End If
-End Function
-
 ' 启用热重载
 Public Sub EnableHotReload()
     g_HotReloadEnabled = True
@@ -738,8 +716,6 @@ Public Sub CleanupFinishedTasks()
         g_TaskFunc.Remove tid
         g_TaskStartArgs.Remove tid
         g_TaskResumeSpec.Remove tid
-        g_TaskDynamicTargets.Remove tid
-        g_TaskWriteTargets.Remove tid
         g_TaskCell.Remove tid
         g_TaskStatus.Remove tid
         g_TaskProgress.Remove tid
@@ -864,8 +840,6 @@ Public Sub ClearAllTasks()
         g_TaskFunc.RemoveAll
         g_TaskStartArgs.RemoveAll
         g_TaskResumeSpec.RemoveAll
-        g_TaskDynamicTargets.RemoveAll
-        g_TaskWriteTargets.RemoveAll
         g_TaskCell.RemoveAll
         g_TaskStatus.RemoveAll
         g_TaskProgress.RemoveAll
@@ -970,7 +944,7 @@ End Function
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
     
-    ' 标记为 volatile，每次计算都会刷新
+    ' 重新启用 Volatile，确保每次计算周期都会刷新
     Application.Volatile True
     
     If g_TaskFunc Is Nothing Then
@@ -1122,7 +1096,8 @@ Public Sub SchedulerTick()
 
     Application.ScreenUpdating = False
     Application.EnableEvents = False
-    Application.Calculation = xlCalculationManual
+    ' 注意：不要设置为 Manual，这会阻止 Volatile 函数刷新
+    ' Application.Calculation = xlCalculationManual  ' 删除这行
 
     ' 复制任务列表，避免遍历时修改
     Dim taskIds() As Variant
@@ -1166,7 +1141,12 @@ Public Sub SchedulerTick()
         End If
     Next
 
-    Application.Calculation = xlCalculationAutomatic
+    ' 删除：不再需要手动设置回 Automatic
+    ' Application.Calculation = xlCalculationAutomatic
+    
+    ' 新增：强制刷新所有活动任务的单元格
+    Application.Calculate
+    
     Application.EnableEvents = True
     Application.ScreenUpdating = True
 
@@ -1266,6 +1246,9 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
                 End If
             End If
             
+            ' 新增：触发重算
+            TriggerRecalculation taskId
+            
         Case LUA_YIELD
             If nres > 0 Then
                 Dim yieldDict As Variant
@@ -1278,6 +1261,9 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
             
             g_TaskStatus(taskId) = "yielded"
             
+            ' 新增：触发重算
+            TriggerRecalculation taskId
+            
         Case Else
             g_TaskStatus(taskId) = "error"
             If nres > 0 Then
@@ -1285,6 +1271,9 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
             Else
                 g_TaskError(taskId) = "协程错误: 代码 " & result
             End If
+            
+            ' 新增：触发重算
+            TriggerRecalculation taskId
     End Select
     
     Exit Sub
@@ -1298,30 +1287,53 @@ End Sub
 Private Sub ParseYieldReturn(taskId As String, dict As Variant, isFinal As Boolean)
     On Error Resume Next
     
-    ' dict 是二维数组，第一维是行（键值对），第二维是列（key, value）
+    ' dict 现在期望是一个字典对象（从 Lua table 转换而来）
+    ' 我们需要遍历字典的键值对
     If Not IsArray(dict) Then Exit Sub
     
-    Dim i As Long
-    For i = LBound(dict, 1) To UBound(dict, 1)
+    ' dict 是二维数组，但现在我们需要它像字典一样工作
+    ' 需要修改 TableToArray 来返回字典格式，或者在这里重新解析
+    
+    ' 临时方案：重新从 coThread 栈顶读取 table
+    Dim coThread As LongPtr
+    coThread = g_TaskCoThread(taskId)
+    
+    ' 假设 table 仍在栈顶（idx = -1）
+    ' 我们需要遍历 table 的所有字段
+    
+    ' 推入 nil 作为第一个键
+    lua_pushnil coThread
+    
+    ' 遍历 table
+    Do While lua_next(coThread, -2) <> 0
+        ' 现在栈顶是 value（-1），下面是 key（-2）
         Dim key As String
         Dim value As Variant
         
-        key = dict(i, 1)
-        value = dict(i, 2)
+        ' 获取键（必须是字符串）
+        If lua_type(coThread, -2) = LUA_TSTRING Then
+            key = GetStringFromState(coThread, -2)
+            value = GetValue(coThread, -1)
+            
+            ' 根据键设置对应的任务属性
+            Select Case LCase(key)
+                Case "status"
+                    If Not isFinal Then g_TaskStatus(taskId) = CStr(value)
+                Case "progress"
+                    g_TaskProgress(taskId) = CDbl(value)
+                Case "message"
+                    g_TaskMessage(taskId) = value
+                Case "value"
+                    g_TaskValue(taskId) = value
+            End Select
+        End If
         
-        Select Case LCase(key)
-            Case "status"
-                If Not isFinal Then g_TaskStatus(taskId) = CStr(value)
-            Case "progress"
-                g_TaskProgress(taskId) = CDbl(value)
-            Case "message"
-                g_TaskMessage(taskId) = value
-            Case "value"
-                g_TaskValue(taskId) = value
-            Case "write"
-                ' 动态写入目标会在写入函数中处理
-        End Select
-    Next i
+        ' 弹出 value，保留 key 供下次 lua_next 使用
+        lua_settop coThread, -2
+    Loop
+    
+    ' 清理栈
+    lua_settop coThread, -2
 End Sub
 
 ' ============================================
@@ -1534,173 +1546,26 @@ Private Function FindTaskByCell(taskCell As String) As String
     FindTaskByCell = ""
 End Function
 
-' ============================================
-' 第七部分：可视化操作函数
-' ============================================
-
-' 终止并删除任务
-Public Sub TerminateAndDeleteTask(taskId As String)
+' 触发工作表重新计算（强制刷新 LuaGet）
+Private Sub TriggerRecalculation(taskId As String)
     On Error Resume Next
-    If g_TaskFunc Is Nothing Then Exit Sub
-    If taskId = "" Then Exit Sub
-    If Not g_TaskFunc.Exists(taskId) Then Exit Sub
-
-    If Not g_TaskQueue Is Nothing Then
-        If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
-    End If
-
-    g_TaskStatus(taskId) = "terminated"
-
-    If g_TaskFunc.Exists(taskId) Then g_TaskFunc.Remove taskId
-    If g_TaskStartArgs.Exists(taskId) Then g_TaskStartArgs.Remove taskId
-    If g_TaskResumeSpec.Exists(taskId) Then g_TaskResumeSpec.Remove taskId
-    ' 删除 dynamicTargets 和 writeTargets
-    If g_TaskCell.Exists(taskId) Then g_TaskCell.Remove taskId
-    If g_TaskStatus.Exists(taskId) Then g_TaskStatus.Remove taskId
-    If g_TaskProgress.Exists(taskId) Then g_TaskProgress.Remove taskId
-    If g_TaskMessage.Exists(taskId) Then g_TaskMessage.Remove taskId
-    If g_TaskValue.Exists(taskId) Then g_TaskValue.Remove taskId
-    If g_TaskError.Exists(taskId) Then g_TaskError.Remove taskId
-    If g_TaskCoThread.Exists(taskId) Then g_TaskCoThread.Remove taskId
-
-    MsgBox "任务已终止并删除: " & taskId, vbInformation
-End Sub
-
-' 根据单元格地址获取任务ID
-Private Function GetTaskIdFromSelection() As String
-    Dim cellAddr As String
-    cellAddr = Selection.Address(External:=True)
-    GetTaskIdFromSelection = FindTaskByCell(cellAddr)
-End Function
-
-Public Sub EnableLuaTaskMenu()
-    On Error Resume Next
-
-    ' 删除已有菜单，避免重复
-    Call DisableLuaTaskMenu
-
-    ' 获取右键菜单（Cell）
-    Dim cMenu As CommandBar
-    Set cMenu = Application.CommandBars("Cell")
-
-    ' 添加主菜单
-    Dim luaMenu As CommandBarControl
-    Set luaMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
-    luaMenu.Caption = "Lua 任务管理"
-    luaMenu.Tag = "LuaTaskMenu"
-
-    ' 添加子菜单
-    AddLuaMenuItem luaMenu, "启动任务", "LuaMenu_StartTask"
-    AddLuaMenuItem luaMenu, "挂起任务", "LuaMenu_PauseTask"
-    AddLuaMenuItem luaMenu, "恢复任务", "LuaMenu_ResumeTask"
-    AddLuaMenuItem luaMenu, "终止任务", "LuaMenu_TerminateTask"
-    AddLuaMenuItem luaMenu, "查看任务详情", "LuaMenu_ShowDetail"
-
-    MsgBox "Lua 任务右键菜单已启用。", vbInformation
-End Sub
-
-' 辅助：增加子菜单项
-Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAction As String)
-    Dim ctrl As CommandBarControl
-    Set ctrl = parent.Controls.Add(Type:=msoControlButton, Temporary:=True)
-    ctrl.Caption = caption
-    ctrl.OnAction = onAction
-End Sub
-
-Public Sub DisableLuaTaskMenu()
-    On Error Resume Next
-    Dim cMenu As CommandBar
-    Set cMenu = Application.CommandBars("Cell")
-
-    Dim ctrl As CommandBarControl
-    For Each ctrl In cMenu.Controls
-        If ctrl.Tag = "LuaTaskMenu" Then ctrl.Delete
-    Next
-End Sub
-
-' ===== 启动任务 =====
-Public Sub LuaMenu_StartTask()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = "" Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
-    If g_TaskStatus(taskId) = "defined" Then
-        StartLuaCoroutine taskId
-        MsgBox "任务已启动: " & taskId, vbInformation
-    Else
-        MsgBox "任务状态为 " & g_TaskStatus(taskId) & "，无法启动。", vbExclamation
-    End If
-End Sub
-
-' ===== 挂起任务 =====
-Public Sub LuaMenu_PauseTask()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = "" Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
-    If Not g_TaskFunc.Exists(taskId) Then
-        MsgBox "任务已不存在。", vbExclamation
-        Exit Sub
-    End If
-    PauseTask taskId
-End Sub
-
-' ===== 恢复任务 =====
-Public Sub LuaMenu_ResumeTask()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = "" Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
-    If Not g_TaskFunc.Exists(taskId) Then
-        MsgBox "任务已不存在。", vbExclamation
-        Exit Sub
-    End If
-    ResumeTask taskId
-End Sub
-
-' ===== 终止任务 =====
-Public Sub LuaMenu_terminateTask()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = "" Or Not g_TaskFunc.Exists(taskId) Then
-        MsgBox "任务不存在或已删除", vbExclamation
-        Exit Sub
-    End If
-    TerminateAndDeleteTask taskId
-End Sub
-
-' ===== 查看任务详情 =====
-Public Sub LuaMenu_ShowDetail()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = "" Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
-    If Not g_TaskFunc.Exists(taskId) Then
-        MsgBox "任务已不存在。", vbExclamation
-        Exit Sub
-    End If
-    ShowTaskDetail taskId
-End Sub
-
-' 批量启动所有 defined 状态的任务
-Public Sub StartAllDefinedTasks()
-    Dim taskId As Variant
-    Dim count As Long
     
-    For Each taskId In g_TaskFunc.Keys
-        If g_TaskStatus(CStr(taskId)) = "defined" Then
-            StartLuaCoroutine CStr(taskId)
-            count = count + 1
-        End If
-    Next
+    ' 方法1：使用 Calculate 强制重算
+    Application.Calculate
     
-    MsgBox "已启动 " & count & " 个任务", vbInformation
+    ' 方法2（备选）：如果知道任务单元格，可以只重算相关区域
+    ' Dim taskCell As String
+    ' taskCell = g_TaskCell(taskId)
+    ' If taskCell <> "" Then
+    '     Dim ws As Worksheet, addr As String
+    '     Dim sheetName As String, cellAddr As String
+    '     
+    '     ' 解析 taskCell (格式: [Book1]Sheet1!$A$1)
+    '     ' 这里简化处理，实际可能需要更复杂的解析
+    '     On Error Resume Next
+    '     Set ws = Range(taskCell).Worksheet
+    '     If Not ws Is Nothing Then
+    '         ws.Calculate
+    '     End If
+    ' End If
 End Sub
