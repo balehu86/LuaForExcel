@@ -1372,11 +1372,11 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
     Next i
 End Sub
 
+
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
     Dim ptr As LongPtr
     Dim length As Long
-    Dim buffer() As Byte
     
     ptr = lua_tolstring(L, idx, VarPtr(length))
     If ptr = 0 Then
@@ -1384,12 +1384,49 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
         Exit Function
     End If
     
-    If length > 0 Then
-        ReDim buffer(0 To length - 1)
-        CopyMemory buffer(0), ByVal ptr, length
-        GetStringFromState = StrConv(buffer, vbUnicode)
-    Else
+    If length = 0 Then
         GetStringFromState = ""
+        Exit Function
+    End If
+    
+    ' 方案1：使用Windows API转换UTF-8
+    GetStringFromState = UTF8ToVBAString(ptr, length)
+End Function
+
+Private Function UTF8ToVBAString(ByVal ptr As LongPtr, ByVal byteLen As Long) As String
+    On Error GoTo ErrorHandler
+    
+    If ptr = 0 Or byteLen = 0 Then
+        UTF8ToVBAString = ""
+        Exit Function
+    End If
+    
+    ' 复制字节到VBA数组
+    Dim bytes() As Byte
+    ReDim bytes(0 To byteLen - 1)
+    CopyMemory bytes(0), ByVal ptr, byteLen
+    
+    ' 使用ADODB.Stream转换UTF-8
+    Dim stream As Object
+    Set stream = CreateObject("ADODB.Stream")
+    
+    stream.Type = 1 ' adTypeBinary
+    stream.Open
+    stream.Write bytes
+    stream.Position = 0
+    stream.Type = 2 ' adTypeText
+    stream.Charset = "UTF-8"
+    
+    UTF8ToVBAString = stream.ReadText
+    stream.Close
+    
+    Exit Function
+
+ErrorHandler:
+    UTF8ToVBAString = ""
+    If Not stream Is Nothing Then
+        On Error Resume Next
+        stream.Close
     End If
 End Function
 
