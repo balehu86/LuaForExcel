@@ -53,9 +53,7 @@ Option Explicit
         functionsPath As String
         lastModified As Date
     End Type
-    
-    ' 协程任务状态 - 不使用 Type，改用多个 Dictionary
-    ' 每个 Dictionary 的 key 都是 taskId
+
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -83,7 +81,7 @@ Private g_TaskFunc As Object           ' taskId -> func name
 Private g_TaskStartArgs As Object      ' taskId -> startArgs array
 Private g_TaskResumeSpec As Object     ' taskId -> resumeSpec array
 Private g_TaskCell As Object           ' taskId -> taskCell address
-Private g_TaskStatus As Object         ' taskId -> status string
+Private g_TaskStatus As Object         ' taskId -> status string:defined、yield、done、error
 Private g_TaskProgress As Object       ' taskId -> progress number
 Private g_TaskMessage As Object        ' taskId -> message variant
 Private g_TaskValue As Object          ' taskId -> value variant
@@ -92,8 +90,8 @@ Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 Private g_SchedulerRunning As Boolean
 Private g_NextTaskId As Long
-Private g_MaxIterationsPerTick As Long   ' 每次调度迭代次数
-Private g_SchedulerIntervalSec As Long
+Private g_SchedulerIntervalSec As Double
+Private g_MaxIterationsPerTick As Long
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_SEC As Double = 1  ' 调度间隔，默认1
@@ -540,19 +538,19 @@ End Function
 ' 读取任务状态
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
-    
+
     ' 标记为 volatile，每次计算都会刷新
     Application.Volatile True
-    
+
     If g_TaskFunc Is Nothing Then
         InitCoroutineSystem
     End If
-    
+
     If Not g_TaskFunc.Exists(taskId) Then
         LuaGet = "#ERROR: 任务不存在"
         Exit Function
     End If
-    
+
     Select Case LCase(field)
         Case "status"
             LuaGet = g_TaskStatus(taskId)
@@ -650,7 +648,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     HandleCoroutineResult taskId, result, CLng(nres)
     
     ' 加入调度队列
-    If g_TaskStatus(taskId) = "running" Or g_TaskStatus(taskId) = "yielded" Then
+    If g_TaskStatus(taskId) = "yielded" Then
         g_TaskQueue(taskId) = True
         StartSchedulerIfNeeded
     End If
@@ -685,7 +683,7 @@ Public Sub SchedulerTick()
     If Not g_SchedulerRunning Then
         Exit Sub
     End If
-    
+
     If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
         Exit Sub
@@ -1171,28 +1169,4 @@ Private Function FindTaskByCell(taskCell As String) As String
     Next
 
     FindTaskByCell = ""
-End Function
-
-' 辅助函数：获取数组维度
-Private Function ArrayDimensions(arr As Variant) As String
-    On Error Resume Next
-    Dim dims As String
-    Dim i As Long
-    
-    For i = 1 To 60  ' 最多检查60维
-        Dim ub As Long
-        ub = UBound(arr, i)
-        If Err.Number <> 0 Then
-            Exit For
-        End If
-        
-        Dim lb As Long
-        lb = LBound(arr, i)
-        
-        If dims <> "" Then dims = dims & " x "
-        dims = dims & (ub - lb + 1)
-    Next i
-    
-    If dims = "" Then dims = "未知"
-    ArrayDimensions = dims
 End Function
