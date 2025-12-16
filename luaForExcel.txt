@@ -650,7 +650,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     HandleCoroutineResult taskId, result, CLng(nres)
     
     ' 加入调度队列
-    If g_TaskStatus(taskId) = "running" Or g_TaskStatus(taskId) = "yielded" Then
+    If g_TaskStatus(taskId) = "yielded" Then
         g_TaskQueue(taskId) = True
         StartSchedulerIfNeeded
     End If
@@ -1171,28 +1171,4 @@ Private Function FindTaskByCell(taskCell As String) As String
     Next
 
     FindTaskByCell = ""
-End Function
-
-' 辅助函数：获取数组维度
-Private Function ArrayDimensions(arr As Variant) As String
-    On Error Resume Next
-    Dim dims As String
-    Dim i As Long
-    
-    For i = 1 To 60  ' 最多检查60维
-        Dim ub As Long
-        ub = UBound(arr, i)
-        If Err.Number <> 0 Then
-            Exit For
-        End If
-        
-        Dim lb As Long
-        lb = LBound(arr, i)
-        
-        If dims <> "" Then dims = dims & " x "
-        dims = dims & (ub - lb + 1)
-    Next i
-    
-    If dims = "" Then dims = "未知"
-    ArrayDimensions = dims
 End Function
