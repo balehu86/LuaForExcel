@@ -25,6 +25,36 @@ Public Sub ReloadFunctions()
     End If
 End Sub
 
+' 设置调度间隔（秒）
+Public Sub SetSchedulerInterval()
+    If Application.CalculationState <> xlDone Then
+        MsgBox "当前处于计算中，无法弹出输入窗口。", vbExclamation
+        Exit Sub
+    End If
+
+    Dim seconds As Variant
+    seconds = Application.InputBox( _
+            "请输入每次调度的间隔时间（>=0.1且<=60s）", _
+            "调度间隔参数", _
+            g_SchedulerIntervalSec, _
+            Type:=1 _
+        )
+
+    If seconds = False Then Exit Sub
+
+    If seconds < 0.1 Then
+        MsgBox "间隔不能小于 0.1 秒。", vbExclamation, "无效值"
+        Exit Sub
+    End If
+    
+    If seconds > 60 Then
+        MsgBox "间隔不能大于 60 秒。", vbExclamation, "无效值"
+        Exit Sub
+    End If
+
+    g_SchedulerIntervalSec = CLng(seconds)
+End Sub
+
 Public Sub SetSchedulerBatchSize()
     If Application.CalculationState <> xlDone Then
         MsgBox "当前处于计算中，无法弹出输入窗口。", vbExclamation

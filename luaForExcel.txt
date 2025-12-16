@@ -93,7 +93,7 @@ Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 Private g_SchedulerRunning As Boolean
 Private g_NextTaskId As Long
 Private g_MaxIterationsPerTick As Long   ' 每次调度迭代次数
-
+Private g_SchedulerIntervalSec As Long
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_SEC As Double = 1  ' 调度间隔，默认1
@@ -135,7 +135,6 @@ Private Function InitLuaState() As Boolean
     
     ' 初始化协程系统
     InitCoroutineSystem
-    g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
     
     ' 尝试首次加载 functions.lua（失败不影响继续）
     Dim fso As Object
@@ -161,6 +160,8 @@ End Function
 
 ' 初始化协程系统
 Private Sub InitCoroutineSystem()
+    g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
+    g_SchedulerIntervalSec = SCHEDULER_INTERVAL_SEC
     If g_TaskFunc Is Nothing Then
         Set g_TaskFunc = CreateObject("Scripting.Dictionary")
         Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
@@ -715,7 +716,7 @@ Public Sub StopScheduler()
     
     ' 尝试取消所有 OnTime 调度
     On Error Resume Next
-    Application.OnTime Now + TimeValue("00:00:01") * SCHEDULER_INTERVAL_SEC, "SchedulerTick", , False
+    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalSec, "SchedulerTick", , False
     
     MsgBox "调度器已停止。" & vbCrLf & _
            "活跃任务将保持在队列中，不会继续执行。" & vbCrLf & vbCrLf & _
@@ -735,7 +736,7 @@ Public Sub ResumeScheduler()
     End If
     
     g_SchedulerRunning = True
-    Application.OnTime Now + TimeValue("00:00:01") * SCHEDULER_INTERVAL_SEC, "SchedulerTick"
+    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalSec, "SchedulerTick"
     
     MsgBox "调度器已启动。" & vbCrLf & _
            "当前队列任务数: " & g_TaskQueue.Count, vbInformation, "调度器已启动"
@@ -779,24 +780,6 @@ Public Sub ResumeTask(taskId As String)
     Else
         MsgBox "任务 " & taskId & " 已在活跃队列中。", vbInformation, "提示"
     End If
-End Sub
-
-' 设置调度间隔（秒）
-Public Sub SetSchedulerInterval(seconds As Double)
-    If seconds < 0.1 Then
-        MsgBox "间隔不能小于 0.1 秒。", vbExclamation, "无效值"
-        Exit Sub
-    End If
-    
-    If seconds > 60 Then
-        MsgBox "间隔不能大于 60 秒。", vbExclamation, "无效值"
-        Exit Sub
-    End If
-    
-    ' 注意：这需要修改常量，实际使用时建议将常量改为变量
-    MsgBox "当前调度间隔: " & SCHEDULER_INTERVAL_SEC & " 秒" & vbCrLf & vbCrLf & _
-           "要修改间隔，请在代码中修改 SCHEDULER_INTERVAL_SEC 常量。", _
-           vbInformation, "调度间隔"
 End Sub
 
 ' 清空所有任务和队列
@@ -1053,7 +1036,7 @@ Private Sub StartSchedulerIfNeeded()
 
     g_SchedulerRunning = True
     Application.OnTime _
-        Now + TimeSerial(0, 0, SCHEDULER_INTERVAL_SEC), _
+        Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
         "SchedulerTick"
 End Sub
 
@@ -1141,7 +1124,7 @@ ExitTick:
     ' 继续或停止调度
     If g_TaskQueue.Count > 0 Then
         Application.OnTime _
-            Now + TimeSerial(0, 0, SCHEDULER_INTERVAL_SEC), _
+            Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
             "SchedulerTick"
     Else
         g_SchedulerRunning = False
