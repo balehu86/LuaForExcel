@@ -670,9 +670,13 @@ Private Sub StartSchedulerIfNeeded()
     If g_TaskQueue.Count = 0 Then Exit Sub
 
     g_SchedulerRunning = True
+    ' Application.OnTime _
+        ' Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
+        ' "SchedulerTick"
     Application.OnTime _
-        Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
-        "SchedulerTick"
+        EarliestTime:=Now + g_SchedulerIntervalSec / 86400#, _
+        Procedure:="SchedulerTick"
+
 End Sub
 
 ' 调度器心跳
@@ -880,29 +884,35 @@ Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long
             g_TaskProgress(taskId) = 100
             
             If nres > 0 Then
-                Dim retDict As Variant
-                retDict = GetValue(coThread, -1)
+                Dim retValue As Variant
+                retValue = GetValue(coThread, -1)
                 
-                If IsArray(retDict) Then
-                    ParseYieldReturn taskId, retDict, True
+                ' 检查是否为字典
+                If TypeName(retValue) = "Dictionary" Then
+                    ParseYieldReturn taskId, retValue, True
                 Else
-                    g_TaskValue(taskId) = retDict
+                    g_TaskValue(taskId) = retValue
                 End If
             End If
             
         Case LUA_YIELD
             If nres > 0 Then
-                Dim yieldDict As Variant
-                yieldDict = GetValue(coThread, -1)
+                Dim yieldValue As Variant
+                yieldValue = GetValue(coThread, -1)
                 
-                If IsArray(yieldDict) Then
-                    ParseYieldReturn taskId, yieldDict, False
+                ' 检查是否为字典
+                If TypeName(yieldValue) = "Dictionary" Then
+                    ParseYieldReturn taskId, yieldValue, False
+                Else
+                    ' 如果不是字典，直接作为 value
+                    g_TaskValue(taskId) = yieldValue
+                    g_TaskStatus(taskId) = "yielded"
                 End If
+            Else
+                g_TaskStatus(taskId) = "yielded"
             End If
             
-            g_TaskStatus(taskId) = "yielded"
             g_StateDirty = True
-
             
         Case Else
             g_TaskStatus(taskId) = "error"
@@ -926,18 +936,12 @@ End Sub
 Private Sub ParseYieldReturn(taskId As String, dict As Variant, isFinal As Boolean)
     On Error Resume Next
     
-    ' dict 是二维数组，第一维是行（键值对），第二维是列（key, value）
-    If Not IsArray(dict) Then Exit Sub
-    
-    Dim i As Long
-    For i = LBound(dict, 1) To UBound(dict, 1)
-        Dim key As String
+    Dim key As Variant
+    For Each key In dict.Keys
         Dim value As Variant
+        value = dict(key)
         
-        key = dict(i, 1)
-        value = dict(i, 2)
-        
-        Select Case LCase(key)
+        Select Case LCase(CStr(key))
             Case "status"
                 If Not isFinal Then g_TaskStatus(taskId) = CStr(value)
             Case "progress"
@@ -946,10 +950,12 @@ Private Sub ParseYieldReturn(taskId As String, dict As Variant, isFinal As Boole
                 g_TaskMessage(taskId) = value
             Case "value"
                 g_TaskValue(taskId) = value
+            Case "error"
+                g_TaskError(taskId) = value
             Case "write"
                 ' 动态写入目标会在写入函数中处理
         End Select
-    Next i
+    Next key
 End Sub
 
 ' ============================================
@@ -1107,53 +1113,53 @@ Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
     End Select
 End Function
 
-' 将 Lua table 转换为二维数组
+' 协程：将 Lua table 转换为 Dictionary（键值对）
 Private Function TableToArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
-    Dim rows As LongPtr, cols As LongPtr
-    Dim i As Long, j As Long
-    Dim arr() As Variant
-    Dim isArray As Boolean
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
     
-    rows = lua_rawlen(L, idx)
+    Dim arrLen As LongPtr
+    arrLen = lua_rawlen(L, idx)
     
-    If rows = 0 Then
-        TableToArray = Empty
-        Exit Function
-    End If
-    
-    ' 检查第一个元素是否是表
-    lua_rawgeti L, idx, 1
-    isArray = (lua_type(L, -1) = LUA_TTABLE)
-    
-    If isArray Then
-        ' 二维数组
-        cols = lua_rawlen(L, -1)
-        lua_settop L, -2
+    ' 检查是否为数组表（连续整数索引）
+    If arrLen > 0 Then
+        ' 这是一个数组表
+        Dim i As Long
+        Dim arr() As Variant
+        ReDim arr(1 To 1, 1 To CLng(arrLen))
         
-        ReDim arr(1 To CLng(rows), 1 To CLng(cols))
-        
-        For i = 1 To CLng(rows)
-            lua_rawgeti L, idx, CLng(i)
-            For j = 1 To CLng(cols)
-                lua_rawgeti L, -1, CLng(j)
-                arr(i, j) = GetValue(L, -1)
-                lua_settop L, -2
-            Next j
-            lua_settop L, -2
-        Next i
-    Else
-        ' 一维数组（转为单行二维数组）
-        lua_settop L, -2
-        ReDim arr(1 To 1, 1 To CLng(rows))
-        
-        For i = 1 To CLng(rows)
+        For i = 1 To CLng(arrLen)
             lua_rawgeti L, idx, CLng(i)
             arr(1, i) = GetValue(L, -1)
             lua_settop L, -2
         Next i
+        
+        TableToArray = arr
+        Exit Function
     End If
     
-    TableToArray = arr
+    ' 这是一个键值对表
+    lua_pushnil L  ' 第一个键
+    
+    Do While lua_next(L, idx) <> 0
+        ' 现在栈：... table ... key value
+        ' 获取键（索引 -2）
+        Dim key As String
+        key = GetStringFromState(L, -2)
+        
+        ' 获取值（索引 -1）
+        Dim value As Variant
+        value = GetValue(L, -1)
+        
+        ' 存入字典
+        dict(key) = value
+        
+        ' 弹出值，保留键供下次迭代
+        lua_settop L, -2
+    Loop
+    
+    ' 返回字典
+    Set TableToArray = dict
 End Function
 
 ' 根据调用单元格地址查找已存在的任务
