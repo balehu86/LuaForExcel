@@ -712,6 +712,7 @@ End Sub
 
 ' 手动停止调度器
 Public Sub StopScheduler()
+    ' 停止调度标志
     g_SchedulerRunning = False
     
     ' 尝试取消所有 OnTime 调度
@@ -1355,7 +1356,6 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
     Next i
 End Sub
 
-
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
     Dim ptr As LongPtr
@@ -1376,6 +1376,7 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
     GetStringFromState = UTF8ToVBAString(ptr, length)
 End Function
 
+' UTF8 to UTF16
 Private Function UTF8ToVBAString(ByVal ptr As LongPtr, ByVal byteLen As Long) As String
     On Error GoTo ErrorHandler
     
