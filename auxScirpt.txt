@@ -27,38 +27,31 @@ End Sub
 
 ' 设置调度间隔（秒）
 Public Sub SetSchedulerInterval()
-    If Application.CalculationState <> xlDone Then
-        MsgBox "当前处于计算中，无法弹出输入窗口。", vbExclamation
-        Exit Sub
+    If g_SchedulerRunning Then
+        StopScheduler
     End If
 
-    Dim seconds As Variant
+    Dim seconds As Single
     seconds = Application.InputBox( _
-            "请输入每次调度的间隔时间（>=0.1且<=60s）", _
-            "调度间隔参数", _
+            "请输入调度的间隔时间（>=0.1且<=60s）", _
+            "调度参数", _
             g_SchedulerIntervalSec, _
             Type:=1 _
         )
 
     If seconds = False Then Exit Sub
-
-    If seconds < 0.1 Then
-        MsgBox "间隔不能小于 0.1 秒。", vbExclamation, "无效值"
-        Exit Sub
-    End If
-    
-    If seconds > 60 Then
-        MsgBox "间隔不能大于 60 秒。", vbExclamation, "无效值"
+    If seconds < 0.1 Or seconds > 60 Then
+        MsgBox "间隔不能小于 0.1 秒。且不能大于 60 秒。", vbExclamation, "无效值"
         Exit Sub
     End If
 
-    g_SchedulerIntervalSec = CLng(seconds)
+    g_SchedulerIntervalSec = seconds
+    ResumeScheduler
 End Sub
 
 Public Sub SetSchedulerBatchSize()
     If g_SchedulerRunning Then
-        MsgBox "调度器运行中，无法修改批量参数。请先 StopScheduler。", vbExclamation
-        Exit Sub
+        StopScheduler
     End If
 
     Dim v As Variant
@@ -76,6 +69,7 @@ Public Sub SetSchedulerBatchSize()
     End If
 
     g_MaxIterationsPerTick = CLng(v)
+    ResumeScheduler
 End Sub
 
 

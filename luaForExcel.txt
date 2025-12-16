@@ -680,7 +680,12 @@ End Sub
 ' 调度器心跳
 Public Sub SchedulerTick()
     On Error Resume Next
-
+    
+    ' 检查运行标志
+    If Not g_SchedulerRunning Then
+        Exit Sub
+    End If
+    
     If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
         Exit Sub
