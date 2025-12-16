@@ -83,7 +83,7 @@ Private g_TaskFunc As Object           ' taskId -> func name
 Private g_TaskStartArgs As Object      ' taskId -> startArgs array
 Private g_TaskResumeSpec As Object     ' taskId -> resumeSpec array
 Private g_TaskCell As Object           ' taskId -> taskCell address
-Private g_TaskStatus As Object         ' taskId -> status string
+Private g_TaskStatus As Object         ' taskId -> status string:defined、yield、done、error
 Private g_TaskProgress As Object       ' taskId -> progress number
 Private g_TaskMessage As Object        ' taskId -> message variant
 Private g_TaskValue As Object          ' taskId -> value variant
@@ -92,8 +92,8 @@ Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 Private g_SchedulerRunning As Boolean
 Private g_NextTaskId As Long
-Private g_MaxIterationsPerTick As Long   ' 每次调度迭代次数
 Private g_SchedulerIntervalSec As Long
+Private g_MaxIterationsPerTick As Long   ' 每次调度迭代次数
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_SEC As Double = 1  ' 调度间隔，默认1
