@@ -53,7 +53,9 @@ Option Explicit
         functionsPath As String
         lastModified As Date
     End Type
-
+    
+    ' 协程任务状态 - 不使用 Type，改用多个 Dictionary
+    ' 每个 Dictionary 的 key 都是 taskId
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -81,7 +83,7 @@ Private g_TaskFunc As Object           ' taskId -> func name
 Private g_TaskStartArgs As Object      ' taskId -> startArgs array
 Private g_TaskResumeSpec As Object     ' taskId -> resumeSpec array
 Private g_TaskCell As Object           ' taskId -> taskCell address
-Private g_TaskStatus As Object         ' taskId -> status string:defined、yield、done、error
+Private g_TaskStatus As Object         ' taskId -> status string
 Private g_TaskProgress As Object       ' taskId -> progress number
 Private g_TaskMessage As Object        ' taskId -> message variant
 Private g_TaskValue As Object          ' taskId -> value variant
@@ -90,8 +92,8 @@ Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 Private g_SchedulerRunning As Boolean
 Private g_NextTaskId As Long
+Private g_MaxIterationsPerTick As Long   ' 每次调度迭代次数
 Private g_SchedulerIntervalSec As Long
-Private g_MaxIterationsPerTick As Long
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_SEC As Double = 1  ' 调度间隔，默认1
@@ -538,19 +540,19 @@ End Function
 ' 读取任务状态
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
-
+    
     ' 标记为 volatile，每次计算都会刷新
     Application.Volatile True
-
+    
     If g_TaskFunc Is Nothing Then
         InitCoroutineSystem
     End If
-
+    
     If Not g_TaskFunc.Exists(taskId) Then
         LuaGet = "#ERROR: 任务不存在"
         Exit Function
     End If
-
+    
     Select Case LCase(field)
         Case "status"
             LuaGet = g_TaskStatus(taskId)
@@ -648,7 +650,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     HandleCoroutineResult taskId, result, CLng(nres)
     
     ' 加入调度队列
-    If g_TaskStatus(taskId) = "yielded" Then
+    If g_TaskStatus(taskId) = "running" Or g_TaskStatus(taskId) = "yielded" Then
         g_TaskQueue(taskId) = True
         StartSchedulerIfNeeded
     End If
@@ -670,13 +672,9 @@ Private Sub StartSchedulerIfNeeded()
     If g_TaskQueue.Count = 0 Then Exit Sub
 
     g_SchedulerRunning = True
-    ' Application.OnTime _
-        ' Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
-        ' "SchedulerTick"
     Application.OnTime _
         Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
         "SchedulerTick"
-
 End Sub
 
 ' 调度器心跳
@@ -687,7 +685,7 @@ Public Sub SchedulerTick()
     If Not g_SchedulerRunning Then
         Exit Sub
     End If
-
+    
     If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
         Exit Sub
@@ -778,36 +776,60 @@ End Sub
 ' Resume 协程
 Private Sub ResumeCoroutine(taskId As String)
     On Error GoTo ErrorHandler
-
+    
     If g_TaskStatus(taskId) <> "yielded" Then Exit Sub
-
+    
     Dim coThread As LongPtr
     coThread = g_TaskCoThread(taskId)
-
-    ' ⚠️ 不要破坏协程栈
-    ' lua_settop coThread, 0   ' ← 删除
-
-    ' ---- 推入 resume 参数 ----
+    
+    ' 清空协程栈
+    lua_settop coThread, 0
+    
+    ' 推入 resume 参数
+    Dim i As Long
     Dim resumeSpec As Variant
     resumeSpec = g_TaskResumeSpec(taskId)
-
-    Dim nargs As Long
-    nargs = 0
-
+    
     If IsArray(resumeSpec) Then
-        Dim i As Long
         For i = LBound(resumeSpec) To UBound(resumeSpec)
-            PushValue coThread, resumeSpec(i)
-            nargs = nargs + 1
+            Dim param As Variant
+            param = resumeSpec(i)
+            
+            ' 如果是字符串，尝试解析为单元格引用
+            If VarType(param) = vbString Then
+                ' 尝试解析为单元格引用
+                On Error Resume Next
+                Dim rng As Range
+                Set rng = Range(param)
+                On Error GoTo ErrorHandler
+                
+                If Not rng Is Nothing Then
+                    PushValue coThread, rng  ' 或 PushValueToThread
+                Else
+                    PushValue coThread, param  ' 或 PushValueToThread
+                End If
+            Else
+                PushValue coThread, param  ' 或 PushValueToThread
+            End If
         Next i
     End If
-
+    
+    ' Resume
+    Dim nargs As Long
+    nargs = 0
+    If IsArray(resumeSpec) Then
+        nargs = UBound(resumeSpec) - LBound(resumeSpec) + 1
+    End If
+    
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState.L, nargs, VarPtr(nres))
-
+    
+    ' 处理结果
     HandleCoroutineResult taskId, result, CLng(nres)
+    
     Exit Sub
+
 ErrorHandler:
     g_TaskStatus(taskId) = "error"
     g_TaskError(taskId) = "Resume错误: " & Err.Description
@@ -849,91 +871,87 @@ End Sub
 ' 处理协程返回结果
 Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long)
     On Error GoTo ErrorHandler
-
+    
     Dim coThread As LongPtr
     coThread = g_TaskCoThread(taskId)
-
+    
     Select Case result
-
-        Case LUA_YIELD
-            If nres > 0 Then
-                Dim v As Variant
-                v = GetValue(coThread, -1)
-
-                If TypeName(v) = "Dictionary" Then
-                    ParseYieldReturn taskId, v, False
-                Else
-                    g_TaskStatus(taskId) = "yielded"
-                    g_TaskValue(taskId) = v
-                End If
-            Else
-                g_TaskStatus(taskId) = "yielded"
-            End If
-
-            g_StateDirty = True
-
         Case LUA_OK
             g_TaskStatus(taskId) = "done"
+            g_StateDirty = True
             g_TaskProgress(taskId) = 100
-
+            
             If nres > 0 Then
-                Dim rv As Variant
-                rv = GetValue(coThread, -1)
-
-                If TypeName(rv) = "Dictionary" Then
-                    ParseYieldReturn taskId, rv, True
+                Dim retDict As Variant
+                retDict = GetValue(coThread, -1)
+                
+                If IsArray(retDict) Then
+                    ParseYieldReturn taskId, retDict, True
                 Else
-                    g_TaskValue(taskId) = rv
+                    g_TaskValue(taskId) = retDict
                 End If
             End If
-
+            
+        Case LUA_YIELD
+            If nres > 0 Then
+                Dim yieldDict As Variant
+                yieldDict = GetValue(coThread, -1)
+                
+                If IsArray(yieldDict) Then
+                    ParseYieldReturn taskId, yieldDict, False
+                End If
+            End If
+            
+            g_TaskStatus(taskId) = "yielded"
             g_StateDirty = True
 
+            
         Case Else
             g_TaskStatus(taskId) = "error"
+            g_StateDirty = True
+
             If nres > 0 Then
                 g_TaskError(taskId) = GetStringFromState(coThread, -1)
             Else
-                g_TaskError(taskId) = "Lua错误代码: " & result
+                g_TaskError(taskId) = "协程错误: 代码 " & result
             End If
-            g_StateDirty = True
     End Select
-
+    
     Exit Sub
+
 ErrorHandler:
     g_TaskStatus(taskId) = "error"
-    g_TaskError(taskId) = "HandleCoroutineResult错误: " & Err.Description
+    g_TaskError(taskId) = "处理结果错误: " & Err.Description
 End Sub
 
 ' 解析 yield/return 字典
 Private Sub ParseYieldReturn(taskId As String, dict As Variant, isFinal As Boolean)
-    On Error GoTo ErrorHandler
-
-    ' ---- 默认语义（非常关键）----
-    If Not isFinal Then
-        g_TaskStatus(taskId) = "yielded"
-    End If
-
-    Dim key As Variant
-    For Each key In dict.Keys
-        Select Case LCase(CStr(key))
+    On Error Resume Next
+    
+    ' dict 是二维数组，第一维是行（键值对），第二维是列（key, value）
+    If Not IsArray(dict) Then Exit Sub
+    
+    Dim i As Long
+    For i = LBound(dict, 1) To UBound(dict, 1)
+        Dim key As String
+        Dim value As Variant
+        
+        key = dict(i, 1)
+        value = dict(i, 2)
+        
+        Select Case LCase(key)
             Case "status"
-                If Not isFinal Then g_TaskStatus(taskId) = CStr(dict(key))
+                If Not isFinal Then g_TaskStatus(taskId) = CStr(value)
             Case "progress"
-                g_TaskProgress(taskId) = CDbl(dict(key))
+                g_TaskProgress(taskId) = CDbl(value)
             Case "message"
-                g_TaskMessage(taskId) = dict(key)
+                g_TaskMessage(taskId) = value
             Case "value"
-                g_TaskValue(taskId) = dict(key)
-            Case "error"
-                g_TaskError(taskId) = dict(key)
+                g_TaskValue(taskId) = value
+            Case "write"
+                ' 动态写入目标会在写入函数中处理
         End Select
-    Next
-
-    Exit Sub
-ErrorHandler:
-    g_TaskStatus(taskId) = "error"
-    g_TaskError(taskId) = "ParseYieldReturn错误: " & Err.Description
+    Next i
 End Sub
 
 ' ============================================
@@ -1061,6 +1079,7 @@ Private Function UTF8ToVBAString(ByVal ptr As LongPtr, ByVal byteLen As Long) As
     stream.Close
     
     Exit Function
+
 ErrorHandler:
     UTF8ToVBAString = ""
     If Not stream Is Nothing Then
@@ -1090,57 +1109,53 @@ Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
     End Select
 End Function
 
-' 协程：将 Lua table 转换为 Dictionary（键值对）
+' 将 Lua table 转换为二维数组
 Private Function TableToArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
-    Dim hasArray As Boolean
-    Dim hasMap As Boolean
-    hasArray = False
-    hasMap = False
-
-    ' 扫描 table 的 key 类型
-    lua_pushnil L
-    Do While lua_next(L, idx) <> 0
-        Select Case lua_type(L, -2)
-            Case LUA_TNUMBER
-                hasArray = True
-            Case Else
-                hasMap = True
-        End Select
+    Dim rows As LongPtr, cols As LongPtr
+    Dim i As Long, j As Long
+    Dim arr() As Variant
+    Dim isArray As Boolean
+    
+    rows = lua_rawlen(L, idx)
+    
+    If rows = 0 Then
+        TableToArray = Empty
+        Exit Function
+    End If
+    
+    ' 检查第一个元素是否是表
+    lua_rawgeti L, idx, 1
+    isArray = (lua_type(L, -1) = LUA_TTABLE)
+    
+    If isArray Then
+        ' 二维数组
+        cols = lua_rawlen(L, -1)
         lua_settop L, -2
-    Loop
-
-    ' ---- 纯数组 ----
-    If hasArray And Not hasMap Then
-        Dim len As Long
-        len = CLng(lua_rawlen(L, idx))
-
-        Dim arr() As Variant
-        ReDim arr(1 To 1, 1 To len)
-
-        Dim i As Long
-        For i = 1 To len
-            lua_rawgeti L, idx, i
+        
+        ReDim arr(1 To CLng(rows), 1 To CLng(cols))
+        
+        For i = 1 To CLng(rows)
+            lua_rawgeti L, idx, CLng(i)
+            For j = 1 To CLng(cols)
+                lua_rawgeti L, -1, CLng(j)
+                arr(i, j) = GetValue(L, -1)
+                lua_settop L, -2
+            Next j
+            lua_settop L, -2
+        Next i
+    Else
+        ' 一维数组（转为单行二维数组）
+        lua_settop L, -2
+        ReDim arr(1 To 1, 1 To CLng(rows))
+        
+        For i = 1 To CLng(rows)
+            lua_rawgeti L, idx, CLng(i)
             arr(1, i) = GetValue(L, -1)
             lua_settop L, -2
         Next i
-
-        TableToArray = arr
-        Exit Function
     End If
-
-    ' ---- 字典（你的新约定）----
-    Dim dict As Object
-    Set dict = CreateObject("Scripting.Dictionary")
-
-    lua_pushnil L
-    Do While lua_next(L, idx) <> 0
-        Dim key As String
-        key = GetStringFromState(L, -2)
-        dict(key) = GetValue(L, -1)
-        lua_settop L, -2
-    Loop
-
-    Set TableToArray = dict
+    
+    TableToArray = arr
 End Function
 
 ' 根据调用单元格地址查找已存在的任务
@@ -1156,4 +1171,28 @@ Private Function FindTaskByCell(taskCell As String) As String
     Next
 
     FindTaskByCell = ""
+End Function
+
+' 辅助函数：获取数组维度
+Private Function ArrayDimensions(arr As Variant) As String
+    On Error Resume Next
+    Dim dims As String
+    Dim i As Long
+    
+    For i = 1 To 60  ' 最多检查60维
+        Dim ub As Long
+        ub = UBound(arr, i)
+        If Err.Number <> 0 Then
+            Exit For
+        End If
+        
+        Dim lb As Long
+        lb = LBound(arr, i)
+        
+        If dims <> "" Then dims = dims & " x "
+        dims = dims & (ub - lb + 1)
+    Next i
+    
+    If dims = "" Then dims = "未知"
+    ArrayDimensions = dims
 End Function
