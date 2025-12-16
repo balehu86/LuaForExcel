@@ -176,21 +176,21 @@ end
    - 后续参数对应 LuaTask 的启动参数（"|" 之前）
    - resume 参数通过 coroutine.yield() 的返回值接收
 
-2. yield 返回格式（必须是字典）：
+2. yield 返回格式（为一节或二阶列表、字典。列表默认作为为value，字典按如下规则）：
    {
-       status = "yielded",      -- 必填，必须是 "yielded"
+       status = "yielded",      -- 可选，应为yielded、done、error，指挥VBA调度器接下来怎么处理此协程，yielded：等待下一次resume；done：提前结束，被清理出协程队列；error：手动触发VBA调度错误，被清理出队列。如果省略此字段则默认视为yielded
        progress = 50,           -- 可选，进度百分比
        message = "消息",        -- 可选，状态消息
-       value = result_data      -- 可选，当前结果
+       value = result_data      -- 可选，当前结果，单值或列表
    }
 
-3. return 返回格式（必须是字典）：
+3. return 返回格式（为一阶或二阶列表、字典。列表默认作为value）：
    {
+       status = "done",         -- 可选，此字段一般省略，字段会被自动设置为 "done"
        progress = 100,          -- 可选，最终进度
        message = "完成",        -- 可选，完成消息
-       value = final_result     -- 可选，最终结果
+       value = final_result     -- 可选，最终结果，单值或列表
    }
-   注意：status 字段会被自动设置为 "done"
 
 4. Excel 中读取结果：
    - =LuaGet(taskId, "status")   -> 获取状态
