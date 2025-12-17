@@ -571,3 +571,37 @@ Public Sub DisableHotReload()
            "如需更新 functions.lua，请手动运行 ""ReloadFunctions""。", _
            vbExclamation, "热重载已禁用"
 End Sub
+
+' 手动设置 functions.lua 路径（供高级用户使用）
+Public Sub SetFunctionsPath(filePath As String)
+    On Error GoTo ErrorHandler
+    
+    If Not g_Initialized Then
+        If Not InitLuaState() Then
+            MsgBox "Lua 初始化失败", vbCritical
+            Exit Sub
+        End If
+    End If
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    If Not fso.FileExists(filePath) Then
+        MsgBox "文件不存在: " & filePath, vbExclamation
+        Exit Sub
+    End If
+    
+    g_LuaState.functionsPath = filePath
+    g_LuaState.lastModified = #1/1/1900#
+    
+    If TryLoadFunctionsFile() Then
+        MsgBox "functions.lua 已加载: " & filePath, vbInformation
+    Else
+        MsgBox "加载失败", vbCritical
+    End If
+    
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "设置路径失败: " & Err.Description, vbCritical
+End Sub

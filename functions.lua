@@ -337,10 +337,10 @@ function state_machine(taskCell)
         local currentState = states[stateIndex]
         
         coroutine.yield({
-            {"status", "running"},
-            {"progress", (iteration % 100)},
-            {"message", "状态: " .. currentState},
-            {"value", {{iteration, currentState, stateIndex}}},
+            status = "running",
+            progress = (iteration % 100),
+            message = "状态: " .. currentState,
+            value = {{iteration, currentState, stateIndex}},
         })
         
         -- 切换到下一个状态
