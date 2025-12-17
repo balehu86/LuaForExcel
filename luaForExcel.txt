@@ -40,10 +40,6 @@ Option Explicit
     Private Declare PtrSafe Function lua_status Lib "lua54.dll" (ByVal L As LongPtr) As Long
     Private Declare PtrSafe Sub lua_xmove Lib "lua54.dll" (ByVal fromL As LongPtr, ByVal toL As LongPtr, ByVal n As Long)
 
-    ' 调度器辅助状态
-    Private g_SchedulerCursor As Long   ' Round-Robin 游标
-    Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
-
     ' 系统 API
     Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
@@ -83,7 +79,7 @@ Private g_TaskFunc As Object           ' taskId -> func name
 Private g_TaskStartArgs As Object      ' taskId -> startArgs array
 Private g_TaskResumeSpec As Object     ' taskId -> resumeSpec array
 Private g_TaskCell As Object           ' taskId -> taskCell address
-Private g_TaskStatus As Object         ' taskId -> status string:defined、yield、done、error
+Private g_TaskStatus As Object         ' taskId -> status string:defined、yield、done、error、terminated、paused
 Private g_TaskProgress As Object       ' taskId -> progress number
 Private g_TaskMessage As Object        ' taskId -> message variant
 Private g_TaskValue As Object          ' taskId -> value variant
@@ -91,6 +87,8 @@ Private g_TaskError As Object          ' taskId -> error message
 Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 Private g_SchedulerRunning As Boolean
+Private g_SchedulerCursor As Long   ' Round-Robin 游标
+Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
 Private g_NextTaskId As Long
 Private g_SchedulerIntervalSec As Long
 Private g_MaxIterationsPerTick As Long
@@ -185,7 +183,7 @@ End Sub
 Public Sub CleanupLua()
     If g_Initialized Then
         g_SchedulerRunning = False
-        
+
         If Not g_TaskFunc Is Nothing Then
             g_TaskFunc.RemoveAll
             g_TaskStartArgs.RemoveAll
@@ -468,7 +466,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         Exit Function
     End If
 
-    ' 修改：使用更安全的方式获取调用单元格地址
+    ' 获取调用单元格地址
     Dim taskCell As String
     taskCell = Application.Caller.Address(External:=True)
 
@@ -883,7 +881,6 @@ Public Sub ResumeScheduler()
            "当前队列任务数: " & g_TaskQueue.Count, vbInformation, "调度器已启动"
 End Sub
 
-' 处理协程返回结果
 ' 处理协程返回结果
 Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long)
     On Error GoTo ErrorHandler
