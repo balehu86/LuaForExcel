@@ -253,63 +253,6 @@ end
 -- functions.lua - Lua 协程测试示例
 -- ============================================
 
--- ============================================
--- Lua 协程任务模板
--- 说明：
---   taskCell: Excel 调用的单元格地址（VBA端传入）
---   args: 可选的启动参数
--- 返回：
---   协程 yield / return 字典格式
--- ============================================
-
-local function MyTask(taskCell, ...)
-    -- 启动参数
-    local args = {...}
-
-    -- 初始化状态
-    local progress = 0
-    local message = "任务已启动"
-    local value = nil
-
-    -- yield 第一次状态（初始广播）
-    coroutine.yield{
-        status = "running",   -- running / yielded / done / error
-        progress = progress,
-        message = message,
-        value = value
-    }
-
-    -- 模拟长计算或多步任务
-    for i = 1, 10 do
-        -- 假设这里是计算逻辑
-        progress = i * 10
-        value = i * i  -- 示例值，可替换为计算结果
-
-        message = "正在计算，第 " .. i .. " 步"
-
-        -- yield 中间状态
-        coroutine.yield{
-            status = "yielded",
-            progress = progress,
-            message = message,
-            value = value,
-        }
-    end
-
-    -- 任务完成，返回最终结果
-    return {
-        status = "done",
-        progress = 100,
-        message = "任务完成",
-        value = value,
-    }
-end
-
----- 将函数注册为全局函数供 VBA 调用
---_G["MyTask"] = MyTask
-
-
-
 -- 示例1：无限循环计数器（每次 yield 增加计数）
 function counter_infinite(taskCell, startValue)
     local count = startValue or 0
@@ -394,10 +337,10 @@ function state_machine(taskCell)
         local currentState = states[stateIndex]
         
         coroutine.yield({
-            status = "running",
-            progress = (iteration % 100),
-            message = "状态: " .. currentState,
-            value = {{iteration, currentState, stateIndex}},
+            {"status", "running"},
+            {"progress", (iteration % 100)},
+            {"message", "状态: " .. currentState},
+            {"value", {{iteration, currentState, stateIndex}}},
         })
         
         -- 切换到下一个状态

@@ -78,7 +78,7 @@ Private Function ArrayDimensions(arr As Variant) As String
     Dim dims As String
     Dim i As Long
     
-    For i = 1 To 60  ' 最多检查60维
+    For i = 1 To 10  ' 最多检查10维
         Dim ub As Long
         ub = UBound(arr, i)
         If Err.Number <> 0 Then
