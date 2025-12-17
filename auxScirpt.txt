@@ -442,10 +442,10 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     Next taskId
     
     msg = msg & "状态统计:" & vbCrLf
-    msg = msg & " • 运行中: " & runningCount & vbCrLf
-    msg = msg & " • 暂停中: " & yieldedCount & vbCrLf
-    msg = msg & " • 已完成: " & doneCount & vbCrLf
-    msg = msg & " • 错误: " & errorCount & vbCrLf
+    msg = msg & "   运行中: " & runningCount & vbCrLf
+    msg = msg & "   暂停中: " & yieldedCount & vbCrLf
+    msg = msg & "   已完成: " & doneCount & vbCrLf
+    msg = msg & "   错误: " & errorCount & vbCrLf
     msg = msg & vbCrLf & "========================================" & vbCrLf & vbCrLf
     
     ' 详细列出每个任务
