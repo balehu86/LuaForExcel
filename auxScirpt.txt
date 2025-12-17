@@ -522,27 +522,27 @@ Private Sub LuaConfigMenu_ReloadFunctions()
     End If
 End Sub
 
-' ===== 设置调度间隔（秒） =====
+' ===== 设置调度间隔（毫秒） =====
 Private Sub LuaConfigMenu_SetSchedulerInterval()
     If g_SchedulerRunning Then
         StopScheduler
     End If
 
-    Dim seconds As Single
+    Dim seconds As Long
     seconds = Application.InputBox( _
-            "请输入调度的间隔时间（>=0.1且<=60s）", _
+            "请输入调度的间隔时间（>=10ms且<=60000ms）", _
             "调度参数", _
-            g_SchedulerIntervalSec, _
+            g_SchedulerIntervalMilliSec, _
             Type:=1 _
         )
 
     If seconds = False Then Exit Sub
-    If seconds < 0.1 Or seconds > 60 Then
-        MsgBox "间隔不能小于 0.1 秒。且不能大于 60 秒。", vbExclamation, "无效值"
+    If seconds < 10 Or seconds > 60 Then
+        MsgBox "间隔不能小于 10 ms。且不能大于 60 秒。", vbExclamation, "无效值"
         Exit Sub
     End If
 
-    g_SchedulerIntervalSec = seconds
+    g_SchedulerIntervalMilliSec = seconds
     ResumeScheduler
 End Sub
 

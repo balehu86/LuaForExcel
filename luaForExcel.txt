@@ -49,9 +49,7 @@ Option Explicit
         functionsPath As String
         lastModified As Date
     End Type
-    
-    ' 协程任务状态 - 不使用 Type，改用多个 Dictionary
-    ' 每个 Dictionary 的 key 都是 taskId
+
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -90,11 +88,11 @@ Private g_SchedulerRunning As Boolean
 Private g_SchedulerCursor As Long   ' Round-Robin 游标
 Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
 Private g_NextTaskId As Long
-Private g_SchedulerIntervalSec As Long
+Private g_SchedulerIntervalMilliSec As Long
 Private g_MaxIterationsPerTick As Long
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
-Private Const SCHEDULER_INTERVAL_SEC As Long = 1  ' 调度间隔，默认1
+Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
 Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代次数，默认1
 
 ' ============================================
@@ -159,7 +157,7 @@ End Function
 ' 初始化协程系统
 Private Sub InitCoroutineSystem()
     g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
-    g_SchedulerIntervalSec = SCHEDULER_INTERVAL_SEC
+    g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
     If g_TaskFunc Is Nothing Then
         Set g_TaskFunc = CreateObject("Scripting.Dictionary")
         Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
@@ -688,7 +686,7 @@ Private Sub StartSchedulerIfNeeded()
 
     g_SchedulerRunning = True
     Application.OnTime _
-        Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
+        Now + TimeSerial(0, 0, g_SchedulerIntervalMilliSec / 1000), _
         "SchedulerTick"
 End Sub
 
@@ -781,7 +779,7 @@ ExitTick:
     ' 继续或停止调度
     If g_TaskQueue.Count > 0 Then
         Application.OnTime _
-            Now + TimeSerial(0, 0, g_SchedulerIntervalSec), _
+            Now + TimeSerial(0, 0, g_SchedulerIntervalMilliSec / 1000), _
             "SchedulerTick"
     Else
         g_SchedulerRunning = False
@@ -855,7 +853,7 @@ Public Sub StopScheduler()
     
     ' 尝试取消所有 OnTime 调度
     On Error Resume Next
-    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalSec, "SchedulerTick", , False
+    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalMilliSec / 1000, "SchedulerTick", , False
     
     MsgBox "调度器已停止。" & vbCrLf & _
            "活跃任务将保持在队列中，不会继续执行。" & vbCrLf & vbCrLf & _
@@ -875,7 +873,7 @@ Public Sub ResumeScheduler()
     End If
     
     g_SchedulerRunning = True
-    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalSec, "SchedulerTick"
+    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalMilliSec / 1000, "SchedulerTick"
     
     MsgBox "调度器已启动。" & vbCrLf & _
            "当前队列任务数: " & g_TaskQueue.Count, vbInformation, "调度器已启动"
@@ -1100,7 +1098,7 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
         Exit Function
     End If
     
-    ' 方案1：使用Windows API转换UTF-8
+    ' 使用Windows API转换UTF-8
     GetStringFromState = UTF8ToVBAString(ptr, length)
 End Function
 
