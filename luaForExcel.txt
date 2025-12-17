@@ -468,6 +468,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         Exit Function
     End If
 
+    ' 修改：使用更安全的方式获取调用单元格地址
     Dim taskCell As String
     taskCell = Application.Caller.Address(External:=True)
 
@@ -820,12 +821,12 @@ Private Sub ResumeCoroutine(taskId As String)
                 On Error GoTo ErrorHandler
                 
                 If Not rng Is Nothing Then
-                    PushValue coThread, rng  ' 或 PushValueToThread
+                    PushValue coThread, rng
                 Else
-                    PushValue coThread, param  ' 或 PushValueToThread
+                    PushValue coThread, param
                 End If
             Else
-                PushValue coThread, param  ' 或 PushValueToThread
+                PushValue coThread, param
             End If
         Next i
     End If
@@ -841,9 +842,7 @@ Private Sub ResumeCoroutine(taskId As String)
     Dim result As Long
     result = lua_resume(coThread, g_LuaState.L, nargs, VarPtr(nres))
     
-    ' 处理结果
     HandleCoroutineResult taskId, result, CLng(nres)
-    
     Exit Sub
 
 ErrorHandler:
@@ -1368,10 +1367,6 @@ Private Function TableToDictArray(ByVal L As LongPtr, ByVal idx As Long) As Vari
 
 ErrorHandler:
     TableToDictArray = "#DICT_ERROR: " & Err.Description
-End Function
-
-ErrorHandler:
-    TableToVariant = "#TABLE_ERROR: " & Err.Description
 End Function
 
 ' 根据调用单元格地址查找已存在的任务
