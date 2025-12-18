@@ -1,11 +1,12 @@
 ' 工作簿关闭时自动清理
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
-    Call CleanupLua
+    CleanupLua
+    DisableLuaTaskMenu
 End Sub
 
 ' 工作簿打开时自动运行
 Private Sub Workbook_Open()
-    Call EnableLuaTaskMenu
+    EnableLuaTaskMenu
 End Sub
 
 ' 辅助函数：获取数组维度

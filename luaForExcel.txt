@@ -158,19 +158,18 @@ End Function
 Private Sub InitCoroutineSystem()
     g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
-    If g_TaskFunc Is Nothing Then
-        Set g_TaskFunc = CreateObject("Scripting.Dictionary")
-        Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
-        Set g_TaskResumeSpec = CreateObject("Scripting.Dictionary")
-        Set g_TaskCell = CreateObject("Scripting.Dictionary")
-        Set g_TaskStatus = CreateObject("Scripting.Dictionary")
-        Set g_TaskProgress = CreateObject("Scripting.Dictionary")
-        Set g_TaskMessage = CreateObject("Scripting.Dictionary")
-        Set g_TaskValue = CreateObject("Scripting.Dictionary")
-        Set g_TaskError = CreateObject("Scripting.Dictionary")
-        Set g_TaskCoThread = CreateObject("Scripting.Dictionary")
-        Set g_TaskQueue = CreateObject("Scripting.Dictionary")
-    End If
+
+    Set g_TaskFunc = CreateObject("Scripting.Dictionary")
+    Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
+    Set g_TaskResumeSpec = CreateObject("Scripting.Dictionary")
+    Set g_TaskCell = CreateObject("Scripting.Dictionary")
+    Set g_TaskStatus = CreateObject("Scripting.Dictionary")
+    Set g_TaskProgress = CreateObject("Scripting.Dictionary")
+    Set g_TaskMessage = CreateObject("Scripting.Dictionary")
+    Set g_TaskValue = CreateObject("Scripting.Dictionary")
+    Set g_TaskError = CreateObject("Scripting.Dictionary")
+    Set g_TaskCoThread = CreateObject("Scripting.Dictionary")
+    Set g_TaskQueue = CreateObject("Scripting.Dictionary")
     
     g_NextTaskId = 1
     g_SchedulerCursor = 0
@@ -181,6 +180,8 @@ End Sub
 Public Sub CleanupLua()
     If g_Initialized Then
         g_SchedulerRunning = False
+
+        StopScheduler
 
         If Not g_TaskFunc Is Nothing Then
             g_TaskFunc.RemoveAll
@@ -301,31 +302,22 @@ Private Function TryLoadFunctionsFile() As Boolean
     TryLoadFunctionsFile = LoadFunctionsIntoMainState()
 End Function
 
-' 检查文件是否需要重载
-Private Function NeedsReload() As Boolean
-    Dim fso As Object
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    
-    ' 文件不存在，无需重载
-    If Not fso.FileExists(g_LuaState.functionsPath) Then
-        NeedsReload = False
-        Exit Function
-    End If
-    
-    ' 比较修改时间
-    Dim currentModified As Date
-    currentModified = FileDateTime(g_LuaState.functionsPath)
-    NeedsReload = (currentModified <> g_LuaState.lastModified)
-End Function
-
 ' 自动热重载检查（如果启用）
 Private Sub CheckAutoReload()
     ' 未启用热重载，直接返回
     If Not g_HotReloadEnabled Then Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
     
-    ' 不需要重载，直接返回
-    If Not NeedsReload() Then Exit Sub
-    
+    ' 文件不存在，无需重载
+    If Not fso.FileExists(g_LuaState.functionsPath) Then Exit Sub
+
+    ' 比较修改时间
+    Dim currentModified As Date
+    currentModified = FileDateTime(g_LuaState.functionsPath)
+    If Not (currentModified <> g_LuaState.lastModified) Then Exit Sub
+
     ' 执行重载（失败也不影响继续使用旧状态）
     If TryLoadFunctionsFile() Then
         ' 成功，静默处理
@@ -513,7 +505,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     If resumeList.Count > 0 Then resumeSpec = resumeList.ToArray()
 
     Dim taskId As String
-    taskId = "TASK_" & g_NextTaskId
+    taskId = "TASK_" & g_NextTaskId & "_" & taskCell
     g_NextTaskId = g_NextTaskId + 1
 
     g_TaskFunc(taskId) = funcName
