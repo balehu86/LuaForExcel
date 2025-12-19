@@ -1,37 +1,14 @@
 ' ============================================
-' IRuntime.cls - 运行时接口定义
-' ============================================
-' 设计原因：
-' 1. 调度器只依赖此接口，不知道实现细节
-' 2. 允许未来扩展其他类型的运行时（如 Python）
-' 3. 强制封装，防止调度器越界访问
-' ============================================
-
-Option Explicit
-
-' 执行一次调度（处理一批任务）
-Public Sub Tick()
-End Sub
-
-' 判断是否有可运行的任务
-' 返回 False 时调度器会跳过此运行时
-Public Function HasRunnable() As Boolean
-End Function
-
-' 清理资源（Workbook 关闭时调用）
-Public Sub Dispose()
-End Sub' ============================================
 ' WorkbookRuntime.cls - 工作簿运行时
 ' ============================================
 ' 设计原因：
 ' 1. 每个 Workbook 一个实例
 ' 2. 封装 Lua VM、TaskTable、协程调度
-' 3. 实现 IRuntime 接口，供调度器驱动
+' 3. 实现 CanRun等接口，供调度器驱动
 ' 4. 处理热更新（模块级，非 VM 级）
 ' ============================================
 
 Option Explicit
-Implements IRuntime
 
 ' ===== Lua 5.4 API 声明 =====
 #If VBA7 Then
@@ -55,11 +32,22 @@ Implements IRuntime
     Private Declare PtrSafe Sub lua_rawseti Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal n As LongPtr)
     Private Declare PtrSafe Function lua_rawgeti Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal n As LongPtr) As Long
     Private Declare PtrSafe Function lua_rawlen Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As LongPtr
+    Private Declare PtrSafe Function luaL_loadfilex Lib "lua54.dll" (ByVal L As LongPtr, ByVal filename As String, ByVal mode As LongPtr) As Long
+    Private Declare PtrSafe Sub lua_setglobal Lib "lua54.dll" (ByVal L As LongPtr, ByVal name As String)
+    Private Declare PtrSafe Function lua_next Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
+    Private Declare PtrSafe Sub lua_pushvalue Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
+    Private Declare PtrSafe Function lua_getfield Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal k As String) As Long
+
+    ' 协程 API
     Private Declare PtrSafe Function lua_newthread Lib "lua54.dll" (ByVal L As LongPtr) As LongPtr
     Private Declare PtrSafe Function lua_resume Lib "lua54.dll" (ByVal L As LongPtr, ByVal from As LongPtr, ByVal narg As Long, ByVal nres As LongPtr) As Long
+    Private Declare PtrSafe Function lua_status Lib "lua54.dll" (ByVal L As LongPtr) As Long
     Private Declare PtrSafe Sub lua_xmove Lib "lua54.dll" (ByVal fromL As LongPtr, ByVal toL As LongPtr, ByVal n As Long)
+
+    ' 系统 API
     Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
-#End If
+    Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
+    
 
 ' ===== Lua 类型常量 =====
 Private Const LUA_TNIL = 0
@@ -70,7 +58,7 @@ Private Const LUA_TTABLE = 5
 Private Const LUA_TFUNCTION = 6
 Private Const LUA_OK = 0
 Private Const LUA_YIELD = 1
-
+Private Const LUA_ERRRUN = 2
 ' ===== 运行时状态（私有，外部不可访问）=====
 Private m_LuaState As LongPtr
 Private m_Workbook As Workbook
@@ -114,10 +102,6 @@ Private Sub Class_Initialize()
     m_LastModified = #1/1/1900#
 End Sub
 
-Private Sub Class_Terminate()
-    IRuntime_Dispose
-End Sub
-
 ' 绑定工作簿
 Public Sub BindWorkbook(wb As Workbook)
     Set m_Workbook = wb
@@ -129,84 +113,96 @@ Public Sub BindWorkbook(wb As Workbook)
 End Sub
 
 ' ============================================
-' IRuntime 接口实现
+' 接口实现
 ' ============================================
-
-Private Function IRuntime_HasRunnable() As Boolean
-    IRuntime_HasRunnable = (m_ActiveQueue.Count > 0)
-End Function
-
-Private Sub IRuntime_Tick()
+Public Sub Tick()
     On Error Resume Next
-    
-    ' Round-robin 调度
+
+    If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
+        Exit Sub
+    End If
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+
+    ' ---- 复制当前任务列表（快照）----
     Dim taskIds() As Variant
-    ReDim taskIds(0 To m_ActiveQueue.Count - 1)
-    
+    ReDim taskIds(0 To g_TaskQueue.Count - 1)
+
     Dim idx As Long
     Dim taskId As Variant
-    For Each taskId In m_ActiveQueue.Keys
+    idx = 0
+    For Each taskId In g_TaskQueue.Keys
         taskIds(idx) = taskId
         idx = idx + 1
     Next
-    
+
     Dim total As Long
     total = UBound(taskIds) + 1
-    If total = 0 Then Exit Sub
-    
-    ' 执行配额内的任务
+    If total = 0 Then GoTo ExitTick
+
+    ' ---- Round-Robin 调度 ----
     Dim executed As Long
+    executed = 0
+
     Dim cur As Long
-    cur = m_RoundRobinCursor Mod total
-    
+    cur = g_SchedulerCursor Mod total
+
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-    
-    Do While executed < m_MaxTasksPerTick And executed < total
+
+    Do While executed < g_MaxIterationsPerTick And executed < total
         taskId = taskIds(cur)
-        
-        If m_TaskTable.Exists(CStr(taskId)) Then
-            ResumeTask CStr(taskId)
+
+        If g_TaskFunc.Exists(CStr(taskId)) Then
+            ResumeCoroutine CStr(taskId)
             executed = executed + 1
-            
-            ' 检查是否完成
-            Dim task As Object
-            Set task = m_TaskTable(CStr(taskId))
-            If task("status") = "done" Or task("status") = "error" Then
+
+            If g_TaskStatus(CStr(taskId)) = "done" _
+            Or g_TaskStatus(CStr(taskId)) = "error" Then
                 tasksToRemove.Add taskId
             End If
         Else
             tasksToRemove.Add taskId
         End If
-        
+
         cur = (cur + 1) Mod total
     Loop
-    
-    m_RoundRobinCursor = cur
-    
-    ' 清理完成任务
+
+    ' ---- 更新游标 ----
+    g_SchedulerCursor = cur
+
+    ' ---- 清理完成 / 错误任务 ----
     Dim i As Long
     For i = 0 To tasksToRemove.Count - 1
-        If m_ActiveQueue.Exists(tasksToRemove(i)) Then
-            m_ActiveQueue.Remove tasksToRemove(i)
+        If g_TaskQueue.Exists(tasksToRemove(i)) Then
+            g_TaskQueue.Remove tasksToRemove(i)
         End If
-    Next
-End Sub
+    Next i
 
-Private Sub IRuntime_Dispose()
-    ' 清理所有任务
-    If Not m_TaskTable Is Nothing Then
-        m_TaskTable.RemoveAll
-        m_ActiveQueue.RemoveAll
+ExitTick:
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+
+    ' 关键：一个 tick 只刷新一次
+    If g_StateDirty Then
+        g_StateDirty = False
+        ActiveSheet.Calculate ' 只刷新活动单元表
+        ' Application.Calculate '刷新整个工作簿
+
     End If
-    
-    ' 关闭 Lua VM
-    If m_LuaState <> 0 Then
-        lua_close m_LuaState
-        m_LuaState = 0
+
+    ' 继续或停止调度
+    If g_TaskQueue.Count > 0 Then
+        Application.OnTime _
+            Now + TimeSerial(0, 0, g_SchedulerIntervalMilliSec / 1000), _
+            "SchedulerTick"
+    Else
+        g_SchedulerRunning = False
     End If
 End Sub
-
 ' ============================================
 ' 公共方法（供 UDF/菜单调用）
 ' ============================================
@@ -358,6 +354,22 @@ Public Sub TerminateTask(taskId As String)
     CoreRegistry.UnregisterTask taskId
 End Sub
 
+' 释放运行时资源
+Public Sub Dispose()
+    On Error Resume Next
+    
+    If m_LuaState <> 0 Then
+        lua_close m_LuaState
+        m_LuaState = 0
+    End If
+    
+    m_TaskTable.RemoveAll
+    m_ActiveQueue.RemoveAll
+    
+    Set m_TaskTable = Nothing
+    Set m_ActiveQueue = Nothing
+End Sub
+
 ' ============================================
 ' Lua 热更新（模块级）
 ' ============================================
@@ -381,7 +393,6 @@ Public Function ReloadFunctions() As Boolean
         Dim errMsg As String
         errMsg = GetStringFromState(m_LuaState, -1)
         lua_settop m_LuaState, 0
-        CoreUI.LogError "热更新失败: " & errMsg
         ReloadFunctions = False
         Exit Function
     End If
@@ -707,14 +718,14 @@ End Function' ============================================
 ' ============================================
 ' 设计原因：
 ' 1. 进程级唯一，不依赖具体 Workbook
-' 2. 只通过 IRuntime 接口驱动，不知道 Task/Lua
+' 2. 只通过 WorkbookRuntime 接口驱动，不知道 Task/Lua
 ' 3. 使用 OnTime 实现异步调度
 ' ============================================
 
 Option Explicit
 
 ' ===== 全局状态（仅调度器可见）=====
-Private g_Runnables As Collection      ' IRuntime 集合
+Private g_Runnables As Collection      ' WorkbookRuntime 集合
 Private g_SchedulerRunning As Boolean
 Private g_SchedulerIntervalSec As Double
 Private g_NextTaskId As Long
@@ -731,18 +742,18 @@ Public Sub InitScheduler()
     If g_Runnables Is Nothing Then
         Set g_Runnables = New Collection
         g_SchedulerIntervalSec = DEFAULT_INTERVAL_SEC
-        g_NextTaskId = 1
+        g_NextTaskId = 0
     End If
 End Sub
 
 ' 注册运行时（由 CoreRegistry 调用）
-Public Sub RegisterRunnable(rt As IRuntime)
+Public Sub RegisterRunnable(rt As WorkbookRuntime)
     On Error Resume Next
     g_Runnables.Add rt
 End Sub
 
 ' 注销运行时
-Public Sub UnregisterRunnable(rt As IRuntime)
+Public Sub UnregisterRunnable(rt As WorkbookRuntime)
     On Error Resume Next
     Dim i As Long
     For i = g_Runnables.Count To 1 Step -1
@@ -759,7 +770,7 @@ Public Sub StartScheduler()
     If g_Runnables Is Nothing Then InitScheduler
     
     g_SchedulerRunning = True
-    ScheduleNextTick
+    ScheduleTick
 End Sub
 
 ' 停止调度器
@@ -802,8 +813,8 @@ Public Sub SchedulerTick()
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
-    
-    Dim rt As IRuntime
+
+    Dim rt As WorkbookRuntime
     Dim needsRefresh As Boolean
     needsRefresh = False
     
@@ -811,7 +822,7 @@ Public Sub SchedulerTick()
     For Each rt In g_Runnables
         If rt.HasRunnable Then
             rt.Tick
-            needsRefresh = True
+        needsRefresh = True
         End If
     Next rt
     
@@ -839,7 +850,7 @@ End Sub
 ' ============================================
 ' 设计原因：
 ' 1. 封装所有 Dictionary 访问
-' 2. 提供 taskId → IRuntime 路由
+' 2. 提供 taskId → Runtime 路由
 ' 3. 管理 Workbook → Runtime 映射
 ' 4. 提供 WorkbookKey 工具
 ' ============================================
@@ -848,7 +859,7 @@ Option Explicit
 
 ' ===== 全局注册表（仅本模块访问）=====
 Private g_RuntimeByWorkbook As Object  ' wbKey → WorkbookRuntime
-Private g_TaskIndex As Object          ' taskId → IRuntime
+Private g_RuntimeByTaskIndex As Object ' taskId -> WorkbookRuntime
 
 ' ============================================
 ' 初始化
@@ -857,7 +868,7 @@ Private g_TaskIndex As Object          ' taskId → IRuntime
 Private Sub InitRegistry()
     If g_RuntimeByWorkbook Is Nothing Then
         Set g_RuntimeByWorkbook = CreateObject("Scripting.Dictionary")
-        Set g_TaskIndex = CreateObject("Scripting.Dictionary")
+        Set g_RuntimeByTaskIndex = CreateObject("Scripting.Dictionary")
     End If
 End Sub
 
@@ -866,7 +877,7 @@ End Sub
 ' ============================================
 
 ' 注册工作簿运行时
-Public Sub RegisterWorkbookRuntime(wb As Workbook, rt As IRuntime)
+Public Sub RegisterWorkbookRuntime(wb As Workbook, rt As WorkbookRuntime)
     InitRegistry
     Dim wbKey As String
     wbKey = GetWorkbookKey(wb)
@@ -883,7 +894,7 @@ Public Sub UnregisterWorkbookRuntime(wb As Workbook)
     wbKey = GetWorkbookKey(wb)
     
     If g_RuntimeByWorkbook.Exists(wbKey) Then
-        Dim rt As IRuntime
+        Dim rt As WorkbookRuntime
         Set rt = g_RuntimeByWorkbook(wbKey)
         
         ' 从调度器注销
@@ -898,7 +909,7 @@ Public Sub UnregisterWorkbookRuntime(wb As Workbook)
 End Sub
 
 ' 根据 Workbook 获取运行时
-Public Function GetRuntimeByWorkbook(wb As Workbook) As IRuntime
+Public Function GetRuntimeByWorkbook(wb As Workbook) As WorkbookRuntime
     InitRegistry
     Dim wbKey As String
     wbKey = GetWorkbookKey(wb)
@@ -915,16 +926,16 @@ End Function
 ' ============================================
 
 ' 注册任务到运行时的映射
-Public Sub RegisterTask(taskId As String, rt As IRuntime)
+Public Sub RegisterTask(taskId As String, rt As WorkbookRuntime)
     InitRegistry
-    g_TaskIndex(taskId) = rt
+    g_RuntimeByTaskIndex(taskId) = rt
 End Sub
 
 ' 根据 taskId 解析运行时
-Public Function ResolveRuntime(taskId As String) As IRuntime
+Public Function ResolveRuntime(taskId As String) As WorkbookRuntime
     InitRegistry
-    If g_TaskIndex.Exists(taskId) Then
-        Set ResolveRuntime = g_TaskIndex(taskId)
+    If g_RuntimeByTaskIndex.Exists(taskId) Then
+        Set ResolveRuntime = g_RuntimeByTaskIndex(taskId)
     Else
         Set ResolveRuntime = Nothing
     End If
@@ -933,8 +944,8 @@ End Function
 ' 注销任务
 Public Sub UnregisterTask(taskId As String)
     InitRegistry
-    If g_TaskIndex.Exists(taskId) Then
-        g_TaskIndex.Remove taskId
+    If g_RuntimeByTaskIndex.Exists(taskId) Then
+        g_RuntimeByTaskIndex.Remove taskId
     End If
 End Sub
 
@@ -995,61 +1006,68 @@ End Sub
 ' 启用 Lua 任务菜单
 Public Sub EnableLuaTaskMenu()
     On Error Resume Next
-    
+    ' 删除已有菜单，避免重复
     DisableLuaTaskMenu
+
+    ' 获取右键菜单（Cell）
+    Dim cellMenu As CommandBar
+    Set cellMenu = Application.CommandBars("Cell")
     
-    Dim cMenu As CommandBar
-    Set cMenu = Application.CommandBars("Cell")
-    
-    ' 任务管理菜单
-    Dim taskMenu As CommandBarControl
-    Set taskMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
-    taskMenu.Caption = "Lua 任务管理"
-    taskMenu.Tag = "LuaTaskMenu"
-    
-    AddMenuItem taskMenu, "启动任务", "OnAction_StartTask"
-    AddMenuItem taskMenu, "暂停任务", "OnAction_PauseTask"
-    AddMenuItem taskMenu, "恢复任务", "OnAction_ResumeTask"
-    AddMenuItem taskMenu, "终止任务", "OnAction_TerminateTask"
-    AddMenuItem taskMenu, "查看任务详情", "OnAction_ShowTaskDetail"
-    
-    ' 调度管理菜单
-    Dim schedulerMenu As CommandBarControl
-    Set schedulerMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
-    schedulerMenu.Caption = "Lua 调度管理"
-    schedulerMenu.Tag = "LuaSchedulerMenu"
-    
-    AddMenuItem schedulerMenu, "启动调度器", "OnAction_StartScheduler"
-    AddMenuItem schedulerMenu, "停止调度器", "OnAction_StopScheduler"
-    AddMenuItem schedulerMenu, "设置调度间隔", "OnAction_SetSchedulerInterval"
-    
-    ' 配置菜单
-    Dim configMenu As CommandBarControl
-    Set configMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
-    configMenu.Caption = "Lua 配置管理"
-    configMenu.Tag = "LuaConfigMenu"
-    
-    AddMenuItem configMenu, "重载 functions.lua", "OnAction_ReloadFunctions"
+    ' 添加单个任务的主菜单
+    Dim luaTaskMenu As CommandBarControl
+    Set luaTaskMenu = cellMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
+    luaTaskMenu.Caption = "Lua 任务管理"
+    luaTaskMenu.Tag = "LuaTaskMenu"
+    ' 添加单个任务的子菜单
+    AddLuaMenuItem luaTaskMenu, "启动任务", "LuaTaskMenu_StartTask"
+    AddLuaMenuItem luaTaskMenu, "暂停任务", "LuaTaskMenu_PauseTask"
+    AddLuaMenuItem luaTaskMenu, "恢复任务", "LuaTaskMenu_ResumeTask"
+    AddLuaMenuItem luaTaskMenu, "终止任务", "LuaTaskMenu_TerminateTask"
+    AddLuaMenuItem luaTaskMenu, "查看任务详情", "LuaTaskMenu_ShowDetail"
+
+    ' 添加调度的主菜单
+    Dim luaSchedulerMenu As CommandBarControl
+    Set luaSchedulerMenu = cellMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
+    luaSchedulerMenu.Caption = "Lua 调度管理"
+    luaSchedulerMenu.Tag = "LuaSchedulerMenu"
+    ' 添加调度的子菜单
+    AddLuaMenuItem luaSchedulerMenu, "启动所有 defined 任务", "LuaSchedulerMenu_StartAllDefinedTasks"
+    AddLuaMenuItem luaSchedulerMenu, "清理所有完成、错误任务", "LuaSchedulerMenu_CleanupFinishedTasks"
+    AddLuaMenuItem luaSchedulerMenu, "删除所有任务", "LuaSchedulerMenu_ClearAllTasks"
+    AddLuaMenuItem luaSchedulerMenu, "显示所有任务信息", "LuaSchedulerMenu_ShowAllTasks"
+
+    ' 添加管理的主菜单
+    Dim luaConfigMenu As CommandBarControl
+    Set luaConfigMenu = cellMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
+    luaConfigMenu.Caption = "Lua 设置管理"
+    luaConfigMenu.Tag = "luaConfigMenu"
+    ' 添加管理的子菜单
+    AddLuaMenuItem luaConfigMenu, "启用热重载", "LuaConfigMenu_EnableHotReload"
+    AddLuaMenuItem luaConfigMenu, "禁用热重载", "LuaConfigMenu_DisableHotReload"
+    AddLuaMenuItem luaConfigMenu, "手动重载 functions.lua", "LuaConfigMenu_ReloadFunctions"
+    AddLuaMenuItem luaConfigMenu, "设置调度间隔（秒）", "LuaConfigMenu_SetSchedulerInterval"
+    AddLuaMenuItem luaConfigMenu, "设置调度步数", "LuaConfigMenu_SetSchedulerBatchSize"
+
+    MsgBox "Lua 任务右键菜单已启用。", vbInformation
 End Sub
 
 ' 禁用菜单
 Public Sub DisableLuaTaskMenu()
     On Error Resume Next
-    Dim cMenu As CommandBar
-    Set cMenu = Application.CommandBars("Cell")
+    
+    Dim cellMenu As CommandBar
+    Set cellMenu = Application.CommandBars("Cell")
     
     Dim ctrl As CommandBarControl
-    For Each ctrl In cMenu.Controls
-        If ctrl.Tag = "LuaTaskMenu" Or _
-           ctrl.Tag = "LuaSchedulerMenu" Or _
-           ctrl.Tag = "LuaConfigMenu" Then
-            ctrl.Delete
-        End If
+    For Each ctrl In cellMenu.Controls
+        If ctrl.Tag = "LuaTaskMenu" Then ctrl.Delete
+        If ctrl.Tag = "LuaSchedulerMenu" Then ctrl.Delete
+        If ctrl.Tag = "LuaConfigMenu" Then ctrl.Delete
     Next
 End Sub
 
-' 添加菜单项
-Private Sub AddMenuItem(parent As CommandBarControl, caption As String, onAction As String)
+' 辅助：增加子菜单项
+Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAction As String)
     Dim ctrl As CommandBarControl
     Set ctrl = parent.Controls.Add(Type:=msoControlButton, Temporary:=True)
     ctrl.Caption = caption
@@ -1061,7 +1079,7 @@ End Sub
 ' ============================================
 
 ' 获取当前选中单元格的运行时
-Private Function GetRuntimeFromSelection() As IRuntime
+Private Function GetRuntimeFromSelection() As WorkbookRuntime
     Dim wb As Workbook
     Set wb = ActiveWorkbook
     If wb Is Nothing Then
