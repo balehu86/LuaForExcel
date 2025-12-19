@@ -1,18 +1,20 @@
 ' ============================================
-' CoreRegistry.bas - 运行时注册表
+' CoreRegistry.bas - 运行时注册表（完整版）
 ' ============================================
 ' 设计原因：
 ' 1. 封装所有 Dictionary 访问
-' 2. 提供 taskId → IRuntime 路由
+' 2. 提供 taskId → Runtime 路由
 ' 3. 管理 Workbook → Runtime 映射
-' 4. 提供 WorkbookKey 工具
+' 4. 新增 cellAddr → taskId 索引
+' 5. 提供 WorkbookKey 工具
 ' ============================================
 
 Option Explicit
 
 ' ===== 全局注册表（仅本模块访问）=====
 Private g_RuntimeByWorkbook As Object  ' wbKey → WorkbookRuntime
-Private g_TaskIndex As Object          ' taskId → IRuntime
+Private g_RuntimeByTaskIndex As Object ' taskId → WorkbookRuntime
+Private g_TaskIdByCellAddr As Object   ' cellAddr → taskId（新增）
 
 ' ============================================
 ' 初始化
@@ -21,7 +23,8 @@ Private g_TaskIndex As Object          ' taskId → IRuntime
 Private Sub InitRegistry()
     If g_RuntimeByWorkbook Is Nothing Then
         Set g_RuntimeByWorkbook = CreateObject("Scripting.Dictionary")
-        Set g_TaskIndex = CreateObject("Scripting.Dictionary")
+        Set g_RuntimeByTaskIndex = CreateObject("Scripting.Dictionary")
+        Set g_TaskIdByCellAddr = CreateObject("Scripting.Dictionary")
     End If
 End Sub
 
@@ -30,7 +33,7 @@ End Sub
 ' ============================================
 
 ' 注册工作簿运行时
-Public Sub RegisterWorkbookRuntime(wb As Workbook, rt As IRuntime)
+Public Sub RegisterWorkbookRuntime(wb As Workbook, rt As WorkbookRuntime)
     InitRegistry
     Dim wbKey As String
     wbKey = GetWorkbookKey(wb)
@@ -47,7 +50,7 @@ Public Sub UnregisterWorkbookRuntime(wb As Workbook)
     wbKey = GetWorkbookKey(wb)
     
     If g_RuntimeByWorkbook.Exists(wbKey) Then
-        Dim rt As IRuntime
+        Dim rt As WorkbookRuntime
         Set rt = g_RuntimeByWorkbook(wbKey)
         
         ' 从调度器注销
@@ -62,7 +65,7 @@ Public Sub UnregisterWorkbookRuntime(wb As Workbook)
 End Sub
 
 ' 根据 Workbook 获取运行时
-Public Function GetRuntimeByWorkbook(wb As Workbook) As IRuntime
+Public Function GetRuntimeByWorkbook(wb As Workbook) As WorkbookRuntime
     InitRegistry
     Dim wbKey As String
     wbKey = GetWorkbookKey(wb)
@@ -79,28 +82,60 @@ End Function
 ' ============================================
 
 ' 注册任务到运行时的映射
-Public Sub RegisterTask(taskId As String, rt As IRuntime)
+Public Sub RegisterTask(taskId As String, rt As WorkbookRuntime, cellAddr As String)
     InitRegistry
-    g_TaskIndex(taskId) = rt
+    g_RuntimeByTaskIndex(taskId) = rt
+    
+    ' 新增：注册 cellAddr → taskId 映射
+    If cellAddr <> "" Then
+        g_TaskIdByCellAddr(cellAddr) = taskId
+    End If
 End Sub
 
 ' 根据 taskId 解析运行时
-Public Function ResolveRuntime(taskId As String) As IRuntime
+Public Function ResolveRuntime(taskId As String) As WorkbookRuntime
     InitRegistry
-    If g_TaskIndex.Exists(taskId) Then
-        Set ResolveRuntime = g_TaskIndex(taskId)
+    If g_RuntimeByTaskIndex.Exists(taskId) Then
+        Set ResolveRuntime = g_RuntimeByTaskIndex(taskId)
     Else
         Set ResolveRuntime = Nothing
     End If
 End Function
 
 ' 注销任务
-Public Sub UnregisterTask(taskId As String)
+Public Sub UnregisterTask(taskId As String, cellAddr As String)
     InitRegistry
-    If g_TaskIndex.Exists(taskId) Then
-        g_TaskIndex.Remove taskId
+    
+    If g_RuntimeByTaskIndex.Exists(taskId) Then
+        g_RuntimeByTaskIndex.Remove taskId
+    End If
+    
+    ' 新增：清理 cellAddr 索引
+    If cellAddr <> "" And g_TaskIdByCellAddr.Exists(cellAddr) Then
+        g_TaskIdByCellAddr.Remove cellAddr
     End If
 End Sub
+
+' ============================================
+' 单元格地址索引（新增）
+' ============================================
+
+' 根据单元格地址查找任务 ID
+Public Function FindTaskByCell(cellAddr As String) As String
+    InitRegistry
+    
+    If g_TaskIdByCellAddr.Exists(cellAddr) Then
+        FindTaskByCell = g_TaskIdByCellAddr(cellAddr)
+    Else
+        FindTaskByCell = ""
+    End If
+End Function
+
+' 检查单元格是否已有任务
+Public Function CellHasTask(cellAddr As String) As Boolean
+    InitRegistry
+    CellHasTask = g_TaskIdByCellAddr.Exists(cellAddr)
+End Function
 
 ' ============================================
 ' 工具函数（WorkbookKey 生成）

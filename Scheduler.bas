@@ -3,14 +3,14 @@
 ' ============================================
 ' 设计原因：
 ' 1. 进程级唯一，不依赖具体 Workbook
-' 2. 只通过 IRuntime 接口驱动，不知道 Task/Lua
+' 2. 只通过 WorkbookRuntime 接口驱动，不知道 Task/Lua
 ' 3. 使用 OnTime 实现异步调度
 ' ============================================
 
 Option Explicit
 
 ' ===== 全局状态（仅调度器可见）=====
-Private g_Runnables As Collection      ' IRuntime 集合
+Private g_Runnables As Collection      ' WorkbookRuntime 集合
 Private g_SchedulerRunning As Boolean
 Private g_SchedulerIntervalSec As Double
 Private g_NextTaskId As Long
@@ -27,18 +27,19 @@ Public Sub InitScheduler()
     If g_Runnables Is Nothing Then
         Set g_Runnables = New Collection
         g_SchedulerIntervalSec = DEFAULT_INTERVAL_SEC
-        g_NextTaskId = 1
+        g_NextTaskId = 0
     End If
 End Sub
 
 ' 注册运行时（由 CoreRegistry 调用）
-Public Sub RegisterRunnable(rt As IRuntime)
+Public Sub RegisterRunnable(rt As WorkbookRuntime)
+    If g_Runnables Is Nothing Then InitScheduler
     On Error Resume Next
     g_Runnables.Add rt
 End Sub
 
 ' 注销运行时
-Public Sub UnregisterRunnable(rt As IRuntime)
+Public Sub UnregisterRunnable(rt As WorkbookRuntime)
     On Error Resume Next
     Dim i As Long
     For i = g_Runnables.Count To 1 Step -1
@@ -55,7 +56,7 @@ Public Sub StartScheduler()
     If g_Runnables Is Nothing Then InitScheduler
     
     g_SchedulerRunning = True
-    ScheduleNextTick
+    SchedulerTick
 End Sub
 
 ' 停止调度器
@@ -63,7 +64,7 @@ Public Sub StopScheduler()
     g_SchedulerRunning = False
     On Error Resume Next
     Application.OnTime EarliestTime:=Now + TimeValue("00:00:01"), _
-                       Procedure:="SchedulerTick", _
+                       Procedure:="Scheduler.SchedulerTick", _
                        Schedule:=False
 End Sub
 
@@ -98,8 +99,8 @@ Public Sub SchedulerTick()
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
-    
-    Dim rt As IRuntime
+
+    Dim rt As WorkbookRuntime
     Dim needsRefresh As Boolean
     needsRefresh = False
     
@@ -107,7 +108,7 @@ Public Sub SchedulerTick()
     For Each rt In g_Runnables
         If rt.HasRunnable Then
             rt.Tick
-            needsRefresh = True
+        needsRefresh = True
         End If
     Next rt
     
@@ -123,9 +124,7 @@ Public Sub SchedulerTick()
     
     ' 继续调度
     If g_SchedulerRunning And g_Runnables.Count > 0 Then
-        Application.OnTime _
-        EarliestTime:=Now + TimeSerial(0, 0, CLng(g_SchedulerIntervalSec)), _
-        Procedure:="SchedulerTick"
+        Application.OnTime EarliestTime:=Now + g_SchedulerIntervalSec / 86400#, Procedure:="Scheduler.SchedulerTick"
     Else
         g_SchedulerRunning = False
     End If

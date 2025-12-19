@@ -7,43 +7,83 @@
 ' 3. 确保资源正确清理
 ' ============================================
 
+' ============================================
+' ThisWorkbook - 加载项生命周期管理（完整版）
+' ============================================
+
 Option Explicit
 
-Private m_Runtime As WorkbookRuntime
+Private WithEvents App As Application
 
-' 工作簿打开时
+' 加载项打开时
 Private Sub Workbook_Open()
-    On Error GoTo ErrorHandler
+    On Error Resume Next
     
-    ' 初始化调度器（进程级唯一）
+    ' 初始化调度器
     Scheduler.InitScheduler
     
-    ' 创建本工作簿的运行时
-    Set m_Runtime = New WorkbookRuntime
-    m_Runtime.BindWorkbook Me
+    ' 监听 Application 事件
+    Set App = Application
     
-    ' 注册到核心注册表
-    CoreRegistry.RegisterWorkbookRuntime Me, m_Runtime
+    ' 启用右键菜单
+    LuaMenu.EnableLuaTaskMenu
     
-    ' 启用菜单
-    CoreUI.EnableLuaTaskMenu
-    
-    CoreUI.LogInfo "工作簿已初始化: " & Me.Name
-    Exit Sub
-    
-ErrorHandler:
-    CoreUI.LogError "工作簿初始化失败: " & Err.Description
+    Debug.Print "[LuaTask加载项] 已加载"
 End Sub
 
-' 工作簿关闭前
+' 加载项关闭前
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
     
-    ' 注销运行时（会自动清理资源）
-    CoreRegistry.UnregisterWorkbookRuntime Me
+    ' 停止调度器
+    Scheduler.StopScheduler
     
-    ' 清理菜单
-    CoreUI.DisableLuaTaskMenu
+    ' 禁用菜单
+    LuaMenu.DisableLuaTaskMenu
     
-    CoreUI.LogInfo "工作簿已清理: " & Me.Name
+    ' 移除事件监听
+    Set App = Nothing
+    
+    Debug.Print "[LuaTask加载项] 已卸载"
+End Sub
+
+' 当任何工作簿打开时
+Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
+    On Error Resume Next
+    
+    ' 跳过加载项自身
+    If Wb Is Me Then Exit Sub
+    
+    ' 为新工作簿创建运行时
+    Dim rt As New WorkbookRuntime
+    rt.BindWorkbook Wb
+    
+    ' 注册到全局注册表
+    CoreRegistry.RegisterWorkbookRuntime Wb, rt
+    
+    Debug.Print "[LuaTask] 已为工作簿创建运行时: " & Wb.Name
+End Sub
+
+' 当任何工作簿关闭前
+Private Sub App_WorkbookBeforeClose(ByVal Wb As Workbook, Cancel As Boolean)
+    On Error Resume Next
+    
+    ' 跳过加载项自身
+    If Wb Is Me Then Exit Sub
+    
+    ' 注销运行时
+    CoreRegistry.UnregisterWorkbookRuntime Wb
+    
+    Debug.Print "[LuaTask] 已清理工作簿运行时: " & Wb.Name
+End Sub
+
+Private Sub Workbook_AddinInstall()
+    On Error Resume Next
+    LuaMenu.EnableLuaTaskMenu
+End Sub
+
+Private Sub Workbook_AddinUninstall()
+    On Error Resume Next
+    LuaMenu.DisableLuaTaskMenu
+    Scheduler.StopScheduler
 End Sub

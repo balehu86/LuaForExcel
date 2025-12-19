@@ -1,10 +1,11 @@
 ' ============================================
-' UDF.bas - 用户自定义函数
+' UDF.bas - 用户自定义函数（完整版）
 ' ============================================
 ' 设计原因：
 ' 1. 提供 Excel 公式接口
 ' 2. 通过 CoreRegistry 路由到对应 WorkbookRuntime
 ' 3. 不直接访问 TaskTable
+' 4. 新增 LuaEval 和 LuaCall 用于同步 Lua 调用
 ' ============================================
 
 Option Explicit
@@ -42,9 +43,9 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     Dim cellAddr As String
     cellAddr = Application.Caller.Address(External:=True)
     
-    ' 检查是否已有任务
+    ' 检查是否已有任务（通过 CoreRegistry）
     Dim existingTaskId As String
-    existingTaskId = FindTaskByCell(cellAddr)
+    existingTaskId = CoreRegistry.FindTaskByCell(cellAddr)
     If existingTaskId <> "" Then
         LuaTask = existingTaskId
         Exit Function
@@ -95,7 +96,9 @@ ErrorHandler:
     LuaTask = "#ERROR: " & Err.Description
 End Function
 
+' ============================================
 ' LuaGet - 获取任务字段
+' ============================================
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
     
@@ -117,11 +120,71 @@ ErrorHandler:
     LuaGet = "#ERROR: " & Err.Description
 End Function
 
-' 辅助函数
-' 根据单元格地址查找已存在的任务
-' 设计说明：这是一个临时实现，实际应通过 Registry 提供统一接口
-Private Function FindTaskByCell(cellAddr As String) As String
-    ' 简化实现：假设每个单元格只有一个任务
-    ' 实际应通过 CoreRegistry 提供 cellAddr → taskId 映射
-    FindTaskByCell = ""
+' ============================================
+' LuaEval - 执行 Lua 表达式（同步）
+' ============================================
+' 用法：=LuaEval("1 + 1")
+' 返回：Lua 表达式的计算结果
+Public Function LuaEval(expression As String) As Variant
+    On Error GoTo ErrorHandler
+    
+    Application.Volatile True
+    
+    ' 获取调用单元格所在的 Workbook
+    Dim wb As Workbook
+    Set wb = Application.Caller.Parent.Parent
+    
+    ' 获取对应的 WorkbookRuntime
+    Dim rt As WorkbookRuntime
+    Set rt = CoreRegistry.GetRuntimeByWorkbook(wb)
+    
+    If rt Is Nothing Then
+        LuaEval = "#ERROR: 未找到运行时"
+        Exit Function
+    End If
+    
+    ' 调用 Runtime 的 Eval 方法
+    LuaEval = rt.EvalExpression(expression)
+    Exit Function
+    
+ErrorHandler:
+    LuaEval = "#ERROR: " & Err.Description
+End Function
+
+Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
+    On Error GoTo ErrorHandler
+    
+    Application.Volatile True
+    
+    ' 获取调用单元格所在的 Workbook
+    Dim wb As Workbook
+    Set wb = Application.Caller.Parent.Parent
+    
+    ' 获取对应的 WorkbookRuntime
+    Dim rt As WorkbookRuntime
+    Set rt = CoreRegistry.GetRuntimeByWorkbook(wb)
+    
+    If rt Is Nothing Then
+        LuaCall = "#ERROR: 未找到运行时"
+        Exit Function
+    End If
+    
+    ' 将 ParamArray 转换为普通数组
+    Dim argArray() As Variant
+    If UBound(args) >= LBound(args) Then
+        ReDim argArray(LBound(args) To UBound(args))
+        Dim i As Long
+        For i = LBound(args) To UBound(args)
+            argArray(i) = args(i)
+        Next
+    Else
+        argArray = Array()
+    End If
+    
+    ' 调用 Runtime 的 CallFunction 方法
+    LuaCall = rt.CallFunction(funcName, argArray)
+    Exit Function
+    
+ErrorHandler:
+    LuaCall = "#ERROR: " & Err.Description
 End Function

@@ -1,66 +1,70 @@
 ' ============================================
-' LuaMenu.bas - 右键菜单和用户宏
+' LuaMenu.bas - 用户界面模块
 ' ============================================
+' 设计原因：
+' 1. 统一管理菜单创建/销毁
+' 2. OnAction 路由到对应 WorkbookRuntime
+' 3. 提供日志/消息框工具
+' 4. 不访问 TaskTable，不修改 Task 状态
+' ============================================
+
 Option Explicit
 
-' 辅助：增加子菜单项
-Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAction As String)
-    Dim ctrl As CommandBarControl
-    Set ctrl = parent.Controls.Add(Type:=msoControlButton, Temporary:=True)
-    ctrl.Caption = caption
-    ctrl.OnAction = onAction
+' ===== 日志工具 =====
+Public Sub LogInfo(msg As String)
+    Debug.Print "[INFO] " & msg
+End Sub
+Public Sub LogError(msg As String)
+    Debug.Print "[ERROR] " & msg
+    MsgBox msg, vbCritical, "错误"
 End Sub
 
+' ====菜单管理====
 ' 创建右键菜单
-Public Sub CreateContextMenu()
+Public Sub EnableLuaTaskMenu()
     On Error Resume Next
-    ' 删除已有菜单，避免重复
-    RemoveContextMenu
+    DisableLuaTaskMenu
 
-    ' 获取右键菜单（Cell）
     Dim cellMenu As CommandBar
     Set cellMenu = Application.CommandBars("Cell")
     
-    ' 添加单个任务的主菜单
+    ' 任务管理菜单
     Dim luaTaskMenu As CommandBarControl
     Set luaTaskMenu = cellMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
     luaTaskMenu.Caption = "Lua 任务管理"
     luaTaskMenu.Tag = "LuaTaskMenu"
-    ' 添加单个任务的子菜单
     AddLuaMenuItem luaTaskMenu, "启动任务", "LuaTaskMenu_StartTask"
     AddLuaMenuItem luaTaskMenu, "暂停任务", "LuaTaskMenu_PauseTask"
     AddLuaMenuItem luaTaskMenu, "恢复任务", "LuaTaskMenu_ResumeTask"
     AddLuaMenuItem luaTaskMenu, "终止任务", "LuaTaskMenu_TerminateTask"
-    AddLuaMenuItem luaTaskMenu, "查看任务详情", "LuaTaskMenu_ShowDetail"
+    AddLuaMenuItem luaTaskMenu, "查看任务详情", "LuaTaskMenu_ShowTaskDetail"
 
-    ' 添加调度的主菜单
+    ' 调度管理菜单
     Dim luaSchedulerMenu As CommandBarControl
     Set luaSchedulerMenu = cellMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
     luaSchedulerMenu.Caption = "Lua 调度管理"
     luaSchedulerMenu.Tag = "LuaSchedulerMenu"
-    ' 添加调度的子菜单
     AddLuaMenuItem luaSchedulerMenu, "启动所有 defined 任务", "LuaSchedulerMenu_StartAllDefinedTasks"
     AddLuaMenuItem luaSchedulerMenu, "清理所有完成、错误任务", "LuaSchedulerMenu_CleanupFinishedTasks"
     AddLuaMenuItem luaSchedulerMenu, "删除所有任务", "LuaSchedulerMenu_ClearAllTasks"
     AddLuaMenuItem luaSchedulerMenu, "显示所有任务信息", "LuaSchedulerMenu_ShowAllTasks"
+    AddLuaMenuItem luaSchedulerMenu, "启动调度器", "LuaSchedulerMenu_StartScheduler"
+    AddLuaMenuItem luaSchedulerMenu, "停止调度器", "LuaSchedulerMenu_StopScheduler"
 
-    ' 添加管理的主菜单
+    ' 设置管理菜单
     Dim luaConfigMenu As CommandBarControl
     Set luaConfigMenu = cellMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
     luaConfigMenu.Caption = "Lua 设置管理"
     luaConfigMenu.Tag = "luaConfigMenu"
-    ' 添加管理的子菜单
     AddLuaMenuItem luaConfigMenu, "启用热重载", "LuaConfigMenu_EnableHotReload"
     AddLuaMenuItem luaConfigMenu, "禁用热重载", "LuaConfigMenu_DisableHotReload"
     AddLuaMenuItem luaConfigMenu, "手动重载 functions.lua", "LuaConfigMenu_ReloadFunctions"
     AddLuaMenuItem luaConfigMenu, "设置调度间隔（秒）", "LuaConfigMenu_SetSchedulerInterval"
-    AddLuaMenuItem luaConfigMenu, "设置调度步数", "LuaConfigMenu_SetSchedulerBatchSize"
 
     MsgBox "Lua 任务右键菜单已启用。", vbInformation
 End Sub
 
-' 移除右键菜单
-Public Sub RemoveContextMenu()
+Public Sub DisableLuaTaskMenu()
     On Error Resume Next
     
     Dim cellMenu As CommandBar
@@ -74,264 +78,320 @@ Public Sub RemoveContextMenu()
     Next
 End Sub
 
-' 任务菜单回调：启动任务
-Public Sub LuaTaskMenu_StartTask()
-    On Error GoTo ErrorHandler
-    
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    
-    If taskId = "" Then
-        MsgBox "所选单元格不是有效的任务。" & vbCrLf & _
-               "请选择包含 =LuaTask() 的单元格。", vbExclamation, "无效选择"
-        Exit Sub
-    End If
-    
-    If LuaTasks.StartTask(taskId) Then
-        MsgBox "任务已启动: " & taskId, vbInformation, "成功"
-    Else
-        MsgBox "任务启动失败。", vbExclamation, "失败"
-    End If
-    Exit Sub
-ErrorHandler:
-    MsgBox "启动任务失败: " & Err.Description, vbCritical, "错误"
+Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAction As String)
+    Dim ctrl As CommandBarControl
+    Set ctrl = parent.Controls.Add(Type:=msoControlButton, Temporary:=True)
+    ctrl.Caption = caption
+    ctrl.OnAction = onAction
 End Sub
 
-' 任务菜单回调：终止任务
-Public Sub LuaTaskMenu_TerminateTask()
-    On Error GoTo ErrorHandler
-    
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    
-    If taskId = "" Then
-        MsgBox "所选单元格不是有效的任务。", vbExclamation, "无效选择"
-        Exit Sub
+Private Function GetRuntimeFromSelection() As WorkbookRuntime
+    Dim wb As Workbook
+    Set wb = ActiveWorkbook
+    If wb Is Nothing Then
+        Set GetRuntimeFromSelection = Nothing
+        Exit Function
     End If
     
-    If Not LuaCore.g_TaskIndex.Exists(taskId) Then
-        MsgBox "任务不存在。", vbExclamation, "错误"
-        Exit Sub
-    End If
-    
-    Dim wbKey As String
-    wbKey = LuaCore.g_TaskIndex(taskId)
-    
-    If Not LuaCore.g_Runtimes.Exists(wbKey) Then
-        MsgBox "Runtime不存在。", vbCritical, "错误"
-        Exit Sub
-    End If
-    
-    Dim rt As LuaCore.WorkbookRuntime
-    rt = LuaCore.g_Runtimes(wbKey)
-    
-    rt.TaskStatus(taskId) = "terminated"
-    If rt.ActiveTasks.Exists(taskId) Then
-        rt.ActiveTasks.Remove taskId
-    End If
-    rt.StateDirty = True
-    
-    LuaCore.g_Runtimes(wbKey) = rt
-    
-    MsgBox "任务已终止: " & taskId, vbInformation, "成功"
-    Exit Sub
+    Set GetRuntimeFromSelection = CoreRegistry.GetRuntimeByWorkbook(wb)
+End Function
 
-ErrorHandler:
-    MsgBox "终止任务失败: " & Err.Description, vbCritical, "错误"
-End Sub
-
-' 任务菜单回调：暂停任务
-Public Sub LuaTaskMenu_PauseTask()
-    On Error GoTo ErrorHandler
-    
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    
-    If taskId = "" Then
-        MsgBox "所选单元格不是有效的任务。", vbExclamation, "无效选择"
-        Exit Sub
-    End If
-    
-    If Not LuaCore.g_TaskIndex.Exists(taskId) Then
-        MsgBox "任务不存在。", vbExclamation, "错误"
-        Exit Sub
-    End If
-    
-    Dim wbKey As String
-    wbKey = LuaCore.g_TaskIndex(taskId)
-    
-    Dim rt As LuaCore.WorkbookRuntime
-    rt = LuaCore.g_Runtimes(wbKey)
-    
-    If rt.TaskStatus(taskId) <> "yielded" Then
-        MsgBox "只能暂停 yielded 状态的任务。", vbExclamation, "无效操作"
-        Exit Sub
-    End If
-    
-    rt.TaskStatus(taskId) = "paused"
-    If rt.ActiveTasks.Exists(taskId) Then
-        rt.ActiveTasks.Remove taskId
-    End If
-    rt.StateDirty = True
-    
-    LuaCore.g_Runtimes(wbKey) = rt
-    
-    MsgBox "任务已暂停: " & taskId, vbInformation, "成功"
-    Exit Sub
-
-ErrorHandler:
-    MsgBox "暂停任务失败: " & Err.Description, vbCritical, "错误"
-End Sub
-
-' 任务菜单回调：恢复任务
-Public Sub LuaTaskMenu_ResumeTask()
-    On Error GoTo ErrorHandler
-    
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    
-    If taskId = "" Then
-        MsgBox "所选单元格不是有效的任务。", vbExclamation, "无效选择"
-        Exit Sub
-    End If
-    
-    If Not LuaCore.g_TaskIndex.Exists(taskId) Then
-        MsgBox "任务不存在。", vbExclamation, "错误"
-        Exit Sub
-    End If
-    
-    Dim wbKey As String
-    wbKey = LuaCore.g_TaskIndex(taskId)
-    
-    Dim rt As LuaCore.WorkbookRuntime
-    rt = LuaCore.g_Runtimes(wbKey)
-    
-    If rt.TaskStatus(taskId) <> "paused" Then
-        MsgBox "只能恢复 paused 状态的任务。", vbExclamation, "无效操作"
-        Exit Sub
-    End If
-    
-    rt.TaskStatus(taskId) = "yielded"
-    rt.ActiveTasks(taskId) = True
-    rt.StateDirty = True
-    
-    LuaCore.g_Runtimes(wbKey) = rt
-    
-    MsgBox "任务已恢复: " & taskId, vbInformation, "成功"
-    Exit Sub
-
-ErrorHandler:
-    MsgBox "恢复任务失败: " & Err.Description, vbCritical, "错误"
-End Sub
-
-' 设置菜单回调：热更新
-Public Sub LuaConfigMenu_ReloadFunctions()
-    On Error GoTo ErrorHandler
-    
-    If ActiveWorkbook Is Nothing Then
-        MsgBox "没有活动工作簿。", vbExclamation, "错误"
-        Exit Sub
-    End If
-    
-    Dim wbKey As String
-    wbKey = ActiveWorkbook.FullName
-    
-    If Not LuaCore.g_Runtimes.Exists(wbKey) Then
-        MsgBox "当前工作簿未注册。", vbExclamation, "错误"
-        Exit Sub
-    End If
-    
-    Dim rt As LuaCore.WorkbookRuntime
-    rt = LuaCore.g_Runtimes(wbKey)
-    
-    Dim fso As Object
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    
-    If Not fso.FileExists(rt.FunctionsPath) Then
-        MsgBox "找不到 functions.lua 文件: " & vbCrLf & rt.FunctionsPath, vbExclamation, "文件不存在"
-        Exit Sub
-    End If
-    
-    Dim result As Long
-    result = luaL_loadfilex(rt.LuaState, rt.FunctionsPath, 0)
-    If result = 0 Then result = lua_pcallk(rt.LuaState, 0, 0, 0, 0, 0)
-    
-    lua_settop rt.LuaState, 0
-    
-    If result = 0 Then
-        rt.LastModified = FileDateTime(rt.FunctionsPath)
-        LuaCore.g_Runtimes(wbKey) = rt
-        MsgBox "functions.lua 已重新加载。", vbInformation, "成功"
-    Else
-        MsgBox "热更新失败，请检查 Lua 语法。", vbExclamation, "失败"
-    End If
-    
-    Exit Sub
-
-ErrorHandler:
-    MsgBox "热更新失败: " & Err.Description, vbCritical, "错误"
-End Sub
-
-' 设置菜单回调：显示状态
-Public Sub LuaConfigMenu_ShowStatus()
-    Dim msg As String
-    msg = "Lua 调度器状态" & vbCrLf & vbCrLf
-    msg = msg & "运行中: " & IIf(LuaCore.g_SchedulerRunning, "是", "否") & vbCrLf
-    msg = msg & "已注册工作簿: " & LuaCore.g_Runtimes.Count & vbCrLf
-    msg = msg & "任务总数: " & LuaCore.g_TaskIndex.Count & vbCrLf
-    msg = msg & "调度间隔: " & LuaCore.g_IntervalMs & " 毫秒"
-    
-    MsgBox msg, vbInformation, "调度器状态"
-End Sub
-
-' 用户宏：启动调度器
-Public Sub StartScheduler()
-    LuaCore.StartScheduler
-    MsgBox "调度器已启动。", vbInformation, "调度器"
-End Sub
-
-' 用户宏：停止调度器
-Public Sub StopScheduler()
-    LuaCore.StopScheduler
-    MsgBox "调度器已停止。", vbInformation, "调度器"
-End Sub
-
-' 辅助函数：从选中单元格获取 taskId
 Private Function GetTaskIdFromSelection() As String
     On Error Resume Next
+    Dim taskId As String
+    taskId = CStr(Selection.Value)
     
-    If Selection Is Nothing Then
-        GetTaskIdFromSelection = ""
-        Exit Function
-    End If
-    
-    If TypeName(Selection) <> "Range" Then
-        GetTaskIdFromSelection = ""
-        Exit Function
-    End If
-    
-    Dim cell As Range
-    Set cell = Selection.Cells(1, 1)
-    
-    If Not cell.HasFormula Then
-        GetTaskIdFromSelection = ""
-        Exit Function
-    End If
-    
-    Dim formula As String
-    formula = cell.formula
-    
-    If Not (formula Like "=LuaTask(*") Then
-        GetTaskIdFromSelection = ""
-        Exit Function
-    End If
-    
-    Dim taskId As Variant
-    taskId = cell.value
-    
-    If VarType(taskId) = vbString Then
-        GetTaskIdFromSelection = CStr(taskId)
+    If Left(taskId, 5) = "TASK_" Then
+        GetTaskIdFromSelection = taskId
     Else
         GetTaskIdFromSelection = ""
     End If
 End Function
+
+' ============================================
+' 任务管理回调函数
+' ============================================
+
+Public Sub LuaTaskMenu_StartTask()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then
+        MsgBox "当前单元格没有任务", vbExclamation
+        Exit Sub
+    End If
+    
+    On Error GoTo ErrorHandler
+    rt.StartTask taskId
+    MsgBox "任务已启动: " & taskId, vbInformation
+    Exit Sub
+ErrorHandler:
+    LogError "启动任务失败: " & Err.Description
+End Sub
+
+Public Sub LuaTaskMenu_PauseTask()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then Exit Sub
+    
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then Exit Sub
+    
+    rt.PauseTask taskId
+    MsgBox "任务已暂停", vbInformation
+End Sub
+
+Public Sub LuaTaskMenu_ResumeTask()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then Exit Sub
+    
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then Exit Sub
+    
+    rt.ResumeTaskManual taskId
+    MsgBox "任务已恢复", vbInformation
+End Sub
+
+Public Sub LuaTaskMenu_TerminateTask()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then Exit Sub
+    
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then Exit Sub
+    
+    Dim result As VbMsgBoxResult
+    result = MsgBox("确定终止任务？", vbYesNo + vbExclamation)
+    If result = vbYes Then
+        rt.TerminateTask taskId
+        MsgBox "任务已终止", vbInformation
+    End If
+End Sub
+
+Public Sub LuaTaskMenu_ShowTaskDetail()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then Exit Sub
+    
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = "" Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim msg As String
+    msg = "========================================" & vbCrLf
+    msg = msg & "  任务详细信息" & vbCrLf
+    msg = msg & "========================================" & vbCrLf & vbCrLf
+    
+    msg = msg & "任务ID: " & taskId & vbCrLf
+    msg = msg & "函数名: " & g_TaskFunc(taskId) & vbCrLf
+    msg = msg & "单元格: " & g_TaskCell(taskId) & vbCrLf
+    msg = msg & "状态: " & g_TaskStatus(taskId) & vbCrLf
+    msg = msg & "进度: " & Format(g_TaskProgress(taskId), "0.00") & "%" & vbCrLf
+    msg = msg & "消息: " & CStr(g_TaskMessage(taskId)) & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
+    ' 启动参数
+    msg = msg & "启动参数:" & vbCrLf
+    Dim startArgs As Variant
+    startArgs = g_TaskStartArgs(taskId)
+    If IsArray(startArgs) Then
+        Dim i As Long
+        For i = LBound(startArgs) To UBound(startArgs)
+            msg = msg & "   [" & i & "] " & CStr(startArgs(i)) & vbCrLf
+        Next i
+    Else
+        msg = msg & "   (无)" & vbCrLf
+    End If
+    ' Resume 参数
+    msg = msg & vbCrLf & "Resume 参数:" & vbCrLf
+    Dim resumeSpec As Variant
+    resumeSpec = g_TaskResumeSpec(taskId)
+    If IsArray(resumeSpec) Then
+        For i = LBound(resumeSpec) To UBound(resumeSpec)
+            msg = msg & "   [" & i & "] " & CStr(resumeSpec(i)) & vbCrLf
+        Next i
+    Else
+        msg = msg & "   (无)" & vbCrLf
+    End If
+    ' 当前值
+    msg = msg & vbCrLf & "当前值:" & vbCrLf
+    Dim value As Variant
+    value = g_TaskValue(taskId)
+    If IsArray(value) Then
+        msg = msg & "   (数组，维度: " & ArrayDimensions(value) & ")" & vbCrLf
+    ElseIf IsEmpty(value) Then
+        msg = msg & "   (空)" & vbCrLf
+    Else
+        Dim valueStr As String
+        valueStr = CStr(value)
+        If Len(valueStr) > 100 Then valueStr = Left(valueStr, 97) & "..."
+        msg = msg & "   " & valueStr & vbCrLf
+    End If
+    ' 错误信息
+    If g_TaskStatus(taskId) = "error" Then
+        msg = msg & vbCrLf & " 错误信息:" & vbCrLf
+        msg = msg & "   " & g_TaskError(taskId) & vbCrLf
+    End If
+    ' 调度信息
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+    msg = msg & "在活跃队列中: " & IIf(g_TaskQueue.Exists(taskId), "是", "否") & vbCrLf
+    msg = msg & "协程线程: " & IIf(g_TaskCoThread(taskId) = 0, "未创建", "0x" & Hex(g_TaskCoThread(taskId))) & vbCrLf
+    
+    MsgBox msg, vbInformation, "任务详情 - " & taskId
+    
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "显示任务详情时出错: " & Err.Description, vbCritical, "错误"
+End Sub
+
+' ============================================
+' 调度管理回调函数
+' ============================================
+
+Public Sub LuaSchedulerMenu_StartAllDefinedTasks()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    
+    ' 注意：这需要在 WorkbookRuntime 中添加 GetAllTasks 方法
+    ' 当前简化实现：提示用户手动启动
+    MsgBox "请在需要启动的任务单元格上右键选择 '启动任务'" & vbCrLf & _
+           "批量启动功能需要额外实现 WorkbookRuntime.GetAllTasks()", _
+           vbInformation
+End Sub
+
+Public Sub LuaSchedulerMenu_CleanupFinishedTasks()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    rt.CleanUpFinishedTasks
+End Sub
+
+Public Sub LuaSchedulerMenu_ClearAllTasks()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim result As VbMsgBoxResult
+    result = MsgBox("确定删除所有任务？此操作不可撤销！", vbYesNo + vbExclamation)
+    If result <> vbYes Then Exit Sub
+    
+    rt.ClearAllTasks
+    MsgBox "所有任务已删除", vbInformation
+End Sub
+
+Public Sub LuaSchedulerMenu_ShowAllTasks()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    
+    ' 注意：这需要在 WorkbookRuntime 中添加 GetAllTasksInfo 方法
+    MsgBox "显示所有任务功能需要在 WorkbookRuntime 中实现 GetAllTasksInfo()" & vbCrLf & _
+           "当前版本请在各任务单元格上右键查看详情", _
+           vbInformation
+End Sub
+
+Public Sub LuaSchedulerMenu_StartScheduler()
+    Scheduler.StartScheduler
+    MsgBox "调度器已启动", vbInformation
+End Sub
+
+Public Sub LuaSchedulerMenu_StopScheduler()
+    Scheduler.StopScheduler
+    MsgBox "调度器已停止", vbInformation
+End Sub
+
+' ============================================
+' 设置管理回调函数
+' ============================================
+
+Public Sub LuaConfigMenu_EnableHotReload()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    
+    ' 注意：需要在 WorkbookRuntime 中添加 SetHotReloadEnabled 方法
+    ' 或者直接访问 m_HotReloadEnabled（需要改为 Public Property）
+    MsgBox "热重载功能需要在 WorkbookRuntime 中添加 SetHotReloadEnabled() 方法" & vbCrLf & _
+           "当前热重载默认启用", _
+           vbInformation
+End Sub
+
+Public Sub LuaConfigMenu_DisableHotReload()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    
+    MsgBox "热重载功能需要在 WorkbookRuntime 中添加 SetHotReloadEnabled() 方法" & vbCrLf & _
+           "临时解决方案：手动修改 WorkbookRuntime 的 DEFAULT_HOT_RELOAD_ENABLED 常量", _
+           vbInformation
+End Sub
+
+Public Sub LuaConfigMenu_ReloadFunctions()
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeFromSelection()
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+    
+    If rt.ReloadFunctions() Then
+        MsgBox "functions.lua 已重载", vbInformation
+    Else
+        MsgBox "重载失败，请检查 functions.lua 是否存在语法错误", vbCritical
+    End If
+End Sub
+
+Private Sub LuaConfigMenu_SetSchedulerBatchSize()
+    If g_SchedulerRunning Then
+        StopScheduler
+    End If
+
+    Dim v As Variant
+    v = Application.InputBox( _
+            "请输入每次调度的最大任务数（>=1）", _
+            "调度参数", _
+            g_MaxIterationsPerTick, _
+            Type:=1 _
+        )
+
+    If v = False Then Exit Sub
+    If v < 1 Or v <> CLng(v) Then
+        MsgBox "请输入 >=1 的整数", vbExclamation
+        Exit Sub
+    End If
+
+    g_MaxIterationsPerTick = CLng(v)
+    ResumeScheduler
+End Sub
