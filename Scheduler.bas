@@ -9,35 +9,27 @@
 
 Option Explicit
 
-' ===== 全局状态（仅调度器可见）=====
+' 全局状态（仅调度器可见）
 Private g_Runnables As Collection      ' WorkbookRuntime 集合
 Private g_SchedulerRunning As Boolean
 Private g_SchedulerIntervalSec As Double
 Private g_NextTaskId As Long
-
-' ===== 配置常量 =====
+' 配置常量
 Private Const DEFAULT_INTERVAL_SEC As Double = 1#  ' 1 秒
 
-' ============================================
-' 公共接口
-' ============================================
-
+' ====公共接口====
 ' 初始化调度器
 Public Sub InitScheduler()
-    If g_Runnables Is Nothing Then
-        Set g_Runnables = New Collection
-        g_SchedulerIntervalSec = DEFAULT_INTERVAL_SEC
-        g_NextTaskId = 0
-    End If
+    If g_Runnables Is Nothing Then Set g_Runnables = New Collection
+    If g_SchedulerIntervalSec Is Nothing Then g_SchedulerIntervalSec = DEFAULT_INTERVAL_SEC
+    'g_NextTaskId = 0
 End Sub
-
 ' 注册运行时（由 CoreRegistry 调用）
 Public Sub RegisterRunnable(rt As WorkbookRuntime)
     If g_Runnables Is Nothing Then InitScheduler
     On Error Resume Next
     g_Runnables.Add rt
 End Sub
-
 ' 注销运行时
 Public Sub UnregisterRunnable(rt As WorkbookRuntime)
     On Error Resume Next
@@ -49,12 +41,13 @@ Public Sub UnregisterRunnable(rt As WorkbookRuntime)
         End If
     Next
 End Sub
-
 ' 启动调度器
 Public Sub StartScheduler()
-    If g_SchedulerRunning Then Exit Sub
     If g_Runnables Is Nothing Then InitScheduler
-    
+    If g_SchedulerRunning Then
+        MessageBox "调度器已启动", vbInformation
+        Exit Sub
+    End If
     g_SchedulerRunning = True
     SchedulerTick
 End Sub
