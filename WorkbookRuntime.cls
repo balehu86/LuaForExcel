@@ -654,23 +654,64 @@ Private Sub ResumeTask(taskId As String)
     ' 清空协程栈
     lua_settop coThread, 0
 
-    ' ===== 动态构造 resume 参数 =====
     Dim nargs As Long
     nargs = 0
 
-    If IsArray(task("resumeSpec")) Then
-        Dim i As Long
-        For i = LBound(task("resumeSpec")) To UBound(task("resumeSpec"))
-            Dim v As Variant
-            v = ResolveResumeValue(task("resumeSpec")(i))
-            PushValue coThread, v
-            nargs = nargs + 1
-        Next
+    ' =====================================================
+    ' 1. 优先使用 resumeSpec（动态解析）
+    ' =====================================================
+    If task.Exists("resumeSpec") Then
+        If IsArray(task("resumeSpec")) Then
+            Dim i As Long
+            For i = LBound(task("resumeSpec")) To UBound(task("resumeSpec"))
+                Dim spec As Variant
+                spec = task("resumeSpec")(i)
+
+                ' resume(nil) → 跳过，不压栈
+                If IsMissing(spec) Or IsEmpty(spec) Then GoTo NextSpec
+
+                ' Range
+                If TypeName(spec) = "Range" Then
+                    PushValue coThread, spec.Value
+                    nargs = nargs + 1
+
+                ' 字符串 → 当作地址
+                ElseIf VarType(spec) = vbString Then
+                    PushValue coThread, m_Workbook.Application.Range(spec).Value
+                    nargs = nargs + 1
+
+                ' 其它 → 原样
+                Else
+                    PushValue coThread, spec
+                    nargs = nargs + 1
+                End If
+NextSpec:
+            Next
+        End If
     End If
 
-    ' Resume
+    ' =====================================================
+    ' 2. 没有任何 resume 参数 → 自动携带 taskCell 当前值
+    ' =====================================================
+    If nargs = 0 Then
+        Dim cellVal As Variant
+        cellVal = task("taskCell").Value
+
+        ' Empty / Error → 只驱动状态机
+        If Not IsEmpty(cellVal) Then
+            If Not IsError(cellVal) Then
+                PushValue coThread, cellVal
+                nargs = 1
+            End If
+        End If
+    End If
+
+    ' =====================================================
+    ' 3. Resume 协程
+    ' =====================================================
     Dim nres As LongPtr
     Dim result As Long
+
     result = lua_resume(coThread, m_LuaState, nargs, VarPtr(nres))
 
     HandleResumeResult taskId, result, CLng(nres)
