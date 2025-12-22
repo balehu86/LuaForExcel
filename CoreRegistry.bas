@@ -14,7 +14,7 @@ Option Explicit
 ' ===== 全局注册表（仅本模块访问）=====
 Private g_RuntimeByWorkbook As Object  ' wbKey → WorkbookRuntime
 Private g_RuntimeByTaskIndex As Object ' taskId → WorkbookRuntime
-Private g_TaskIdByCellAddr As Object   ' cellAddr → taskId（新增）
+Private g_TaskIdByCellAddr As Object   ' cellAddr → taskId
 
 ' ============================================
 ' 初始化

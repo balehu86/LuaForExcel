@@ -365,7 +365,7 @@ Public Sub Dispose()
     Set m_ActiveQueue = Nothing
 End Sub
 
-' ====同步 Lua 调用接口====
+' ====LuaEval LuaGet 调用接口====
 ' 执行 Lua 表达式
 Public Function EvalExpression(expression As String) As Variant
     On Error GoTo ErrorHandler
@@ -415,21 +415,18 @@ Public Function CallFunction(funcName As String, args As Variant) As Variant
     lua_getglobal m_LuaState, funcName
     If lua_type(m_LuaState, -1) <> LUA_TFUNCTION Then
         lua_settop m_LuaState, 0
-        CallFunction = "#ERROR: 函数 '" & funcName & "' 不存在"
+        CallFunction = "ERROR: 函数 '" & funcName & "' 不存在"
         Exit Function
     End If
     
     ' 推入参数
     Dim i As Long, argCount As Long
     argCount = 0
-    
-    If IsArray(args) Then
-        For i = LBound(args) To UBound(args)
-            PushValue m_LuaState, args(i)
-            argCount = argCount + 1
-        Next
-    End If
-    
+    For i = LBound(args) To UBound(args)
+        PushValue m_LuaState, args(i)
+        argCount = argCount + 1
+    Next
+
     ' 调用函数
     Dim result As Long
     result = lua_pcallk(m_LuaState, argCount, -1, 0, 0, 0)

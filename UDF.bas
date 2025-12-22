@@ -1,18 +1,16 @@
 ' ============================================
-' UDF.bas - 用户自定义函数（完整版）
+' UDF.bas - 用户自定义函数
 ' ============================================
 ' 设计原因：
 ' 1. 提供 Excel 公式接口
 ' 2. 通过 CoreRegistry 路由到对应 WorkbookRuntime
 ' 3. 不直接访问 TaskTable
-' 4. 新增 LuaEval 和 LuaCall 用于同步 Lua 调用
+' 4. LuaEval 和 LuaCall 用于同步 Lua 调用
 ' ============================================
 
 Option Explicit
 
-' ============================================
-' LuaTask - 定义协程任务
-' ============================================
+' ====LuaTask - 定义协程任务====
 ' 用法：=LuaTask("funcName", arg1, arg2, "|", resumeArg1, resumeArg2)
 ' 返回：taskId（字符串）
 Public Function LuaTask(ParamArray params() As Variant) As String
@@ -95,10 +93,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
 ErrorHandler:
     LuaTask = "#ERROR: " & Err.Description
 End Function
-
-' ============================================
-' LuaGet - 获取任务字段
-' ============================================
+' ====LuaGet - 获取任务字段====
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
     
@@ -120,11 +115,9 @@ ErrorHandler:
     LuaGet = "#ERROR: " & Err.Description
 End Function
 
-' ============================================
-' LuaEval - 执行 Lua 表达式（同步）
-' ============================================
-' 用法：=LuaEval("1 + 1")
-' 返回：Lua 表达式的计算结果
+' ====LuaEval - 执行 Lua 表达式（同步）====
+' 用法: =LuaEval("1 + 1")
+'      =LuaCall("funcName", arg1, arg2)
 Public Function LuaEval(expression As String) As Variant
     On Error GoTo ErrorHandler
     
@@ -150,7 +143,6 @@ Public Function LuaEval(expression As String) As Variant
 ErrorHandler:
     LuaEval = "#ERROR: " & Err.Description
 End Function
-
 Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
     On Error GoTo ErrorHandler
     
