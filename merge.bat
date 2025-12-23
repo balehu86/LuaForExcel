@@ -1,3 +1,3 @@
 @echo off
-copy /b "WorkbookRuntime.cls"+"Scheduler.bas"+"CoreRegistry.bas"+"LuaMenu.bas"+"UDF.bas"+"ThisWorkbook.cls" combined.txt
+copy /b "luaForExcel.bas"+"auxScirpt.bas" combined.txt
 echo 合并完成！
