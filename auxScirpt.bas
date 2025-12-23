@@ -1,3 +1,11 @@
+' ===== 日志工具 =====
+Public Sub LogInfo(msg As String)
+    Debug.Print "[INFO] " & msg
+End Sub
+Public Sub LogError(msg As String)
+    Debug.Print "[ERROR] " & msg
+    MsgBox msg, vbCritical, "错误"
+End Sub
 ' 工作簿关闭时自动清理
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     CleanupLua
