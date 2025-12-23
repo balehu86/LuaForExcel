@@ -33,23 +33,14 @@ Option Explicit
     Private Declare PtrSafe Function lua_next Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
     Private Declare PtrSafe Sub lua_pushvalue Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
     Private Declare PtrSafe Function lua_getfield Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal k As String) As Long
-
     ' 协程 API
     Private Declare PtrSafe Function lua_newthread Lib "lua54.dll" (ByVal L As LongPtr) As LongPtr
     Private Declare PtrSafe Function lua_resume Lib "lua54.dll" (ByVal L As LongPtr, ByVal from As LongPtr, ByVal narg As Long, ByVal nres As LongPtr) As Long
     Private Declare PtrSafe Function lua_status Lib "lua54.dll" (ByVal L As LongPtr) As Long
     Private Declare PtrSafe Sub lua_xmove Lib "lua54.dll" (ByVal fromL As LongPtr, ByVal toL As LongPtr, ByVal n As Long)
-
     ' 系统 API
     Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
-    
-    Private Type LuaState
-        L As LongPtr
-        functionsPath As String
-        lastModified As Date
-    End Type
-
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -93,6 +84,7 @@ Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检
 Private g_NextTaskId As Long
 Private g_SchedulerIntervalMilliSec As Long
 Private g_MaxIterationsPerTick As Long
+Private g_NextScheduleTime As Date    '标记记下一次调度时间
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
@@ -657,9 +649,8 @@ Private Sub StartSchedulerIfNeeded()
     If g_TaskQueue.Count = 0 Then Exit Sub
 
     g_SchedulerRunning = True
-    Application.OnTime _
-        Now + TimeSerial(0, 0, g_SchedulerIntervalMilliSec / 1000), _
-        "SchedulerTick"
+    g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
+    Application.OnTime g_NextScheduleTime, "SchedulerTick"
 End Sub
 
 ' 调度器心跳
@@ -732,6 +723,7 @@ Public Sub SchedulerTick()
     For i = 0 To tasksToRemove.Count - 1
         If g_TaskQueue.Exists(tasksToRemove(i)) Then
             g_TaskQueue.Remove tasksToRemove(i)
+            g_TaskWorkbook.Remove tasksToRemove(i)
         End If
     Next i
 
@@ -750,9 +742,8 @@ ExitTick:
 
     ' 继续或停止调度
     If g_TaskQueue.Count > 0 Then
-        Application.OnTime _
-            Now + TimeSerial(0, 0, g_SchedulerIntervalMilliSec / 1000), _
-            "SchedulerTick"
+        g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
+        Application.OnTime g_NextScheduleTime, "SchedulerTick"
     Else
         g_SchedulerRunning = False
     End If
@@ -780,8 +771,22 @@ Private Sub ResumeCoroutine(taskId As String)
             
             If VarType(param) = vbString Then
                 On Error Resume Next
+                Dim wb As Workbook
                 Dim rng As Range
-                Set rng = Range(param)
+
+                If Not g_TaskWorkbook.Exists(taskId) Then
+                    Err.Raise vbObjectError + 200, , "Task workbook not found: " & taskId
+                End If
+
+                Set wb = Application.Workbooks(g_TaskWorkbook(taskId))
+                If wb Is Nothing Then
+                    g_TaskStatus(taskId) = "error"
+                    g_TaskMessage(taskId) = "Workbook closed"
+                    Exit Sub
+                End If
+
+                Set rng = wb.Range(param)
+
                 On Error GoTo ErrorHandler
                 
                 If Not rng Is Nothing Then
@@ -821,7 +826,7 @@ Public Sub StopScheduler()
     
     ' 尝试取消所有 OnTime 调度
     On Error Resume Next
-    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalMilliSec / 1000, "SchedulerTick", , False
+    Application.OnTime g_NextScheduleTime, "SchedulerTick", , False
     
     MsgBox "调度器已停止。" & vbCrLf & _
            "活跃任务将保持在队列中，不会继续执行。" & vbCrLf & vbCrLf & _
@@ -841,7 +846,8 @@ Public Sub ResumeScheduler()
     End If
     
     g_SchedulerRunning = True
-    Application.OnTime Now + TimeValue("00:00:01") * g_SchedulerIntervalMilliSec / 1000, "SchedulerTick"
+    g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
+    Application.OnTime g_NextScheduleTime, "SchedulerTick"
     
     MsgBox "调度器已启动。" & vbCrLf & _
            "当前队列任务数: " & g_TaskQueue.Count, vbInformation, "调度器已启动"
