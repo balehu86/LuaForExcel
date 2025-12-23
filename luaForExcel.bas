@@ -93,7 +93,6 @@ Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代�
 ' ============================================
 ' 第一部分：核心初始化和清理
 ' ============================================
-
 ' 主初始化函数：创建空白 Lua 状态机
 Public Function InitLuaState() As Boolean
     On Error GoTo ErrorHandler
@@ -200,7 +199,6 @@ End Sub
 ' ============================================
 ' 第二部分：functions.lua 加载和热重载
 ' ============================================
-
 ' 在临时状态中验证 functions.lua 语法
 Private Function ValidateFunctionsFile() As Boolean
     On Error GoTo ErrorHandler
@@ -312,7 +310,6 @@ End Sub
 ' ============================================
 ' 第三部分：公共接口（基础功能）
 ' ============================================
-
 ' 执行 Lua 表达式
 Public Function LuaEval(expression As String) As Variant
     On Error GoTo ErrorHandler
@@ -413,7 +410,6 @@ End Function
 ' ============================================
 ' 第四部分：协程 UDF 接口
 ' ============================================
-
 ' 任务定义函数
 Public Function LuaTask(ParamArray params() As Variant) As String
     On Error GoTo ErrorHandler
@@ -553,9 +549,7 @@ End Function
 ' ============================================
 ' 第五部分：协程执行和调度
 ' ============================================
-
 ' 启动协程
-' 启动协程（带调试信息）
 Public Sub StartLuaCoroutine(taskId As String)
     On Error GoTo ErrorHandler
     
@@ -572,8 +566,7 @@ Public Sub StartLuaCoroutine(taskId As String)
         MsgBox "错误：任务已启动或已完成", vbExclamation
         Exit Sub
     End If
-    
-    ' 修改：g_LuaState.L -> g_LuaState
+
     If g_LuaState = 0 Then
         MsgBox "Lua主状态未初始化", vbCritical
         Exit Sub
@@ -601,7 +594,6 @@ Public Sub StartLuaCoroutine(taskId As String)
         Exit Sub
     End If
     
-    ' 修改：g_LuaState.L -> g_LuaState
     lua_xmove g_LuaState, coThread, 1
     
     lua_pushstring coThread, g_TaskCell(taskId)
@@ -622,7 +614,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     
     Dim nres As LongPtr
     Dim result As Long
-    ' 修改：g_LuaState.L -> g_LuaState
+
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
     
     HandleCoroutineResult taskId, result, CLng(nres)
@@ -823,18 +815,13 @@ End Sub
 Public Sub StopScheduler()
     ' 停止调度标志
     g_SchedulerRunning = False
-    
     ' 尝试取消所有 OnTime 调度
     On Error Resume Next
     Application.OnTime g_NextScheduleTime, "SchedulerTick", , False
-    
-    MsgBox "调度器已停止。" & vbCrLf & _
-           "活跃任务将保持在队列中，不会继续执行。" & vbCrLf & vbCrLf & _
-           "使用 ResumeScheduler 重新启动。", vbInformation, "调度器已停止"
 End Sub
 
 ' 恢复调度器
-Public Sub ResumeScheduler()
+Private Sub ResumeScheduler()
     If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
         MsgBox "队列中没有任务，无需启动调度器。", vbExclamation, "无任务"
         Exit Sub
@@ -853,138 +840,10 @@ Public Sub ResumeScheduler()
            "当前队列任务数: " & g_TaskQueue.Count, vbInformation, "调度器已启动"
 End Sub
 
-' 处理协程返回结果
-Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long)
-    On Error GoTo ErrorHandler
-    
-    Dim coThread As LongPtr
-    coThread = g_TaskCoThread(taskId)
-    
-    Dim topBefore As Long
-    topBefore = lua_gettop(coThread)
-    
-    Select Case result
-        Case LUA_OK
-            g_TaskStatus(taskId) = "done"
-            g_StateDirty = True
-            g_TaskProgress(taskId) = 100
-            
-            If nres > 0 And topBefore > 0 Then
-                Dim retData As Variant
-                retData = GetValue(coThread, -1)
-                ParseYieldReturn taskId, retData, True
-            End If
-            
-        Case LUA_YIELD
-            If nres > 0 And topBefore > 0 Then
-                Dim yieldData As Variant
-                yieldData = GetValue(coThread, -1)
-                ParseYieldReturn taskId, yieldData, False
-            End If
-            
-            ' 注意:这里不要立即设置为yielded,让ParseYieldReturn根据返回值决定
-            If g_TaskStatus(taskId) <> "done" And g_TaskStatus(taskId) <> "error" Then
-                g_TaskStatus(taskId) = "yielded"
-            End If
-            g_StateDirty = True
-            
-        Case Else
-            g_TaskStatus(taskId) = "error"
-            g_StateDirty = True
-
-            If nres > 0 And topBefore > 0 Then
-                g_TaskError(taskId) = GetStringFromState(coThread, -1)
-            Else
-                g_TaskError(taskId) = "协程错误: 代码 " & result
-            End If
-    End Select
-    
-    ' 清理协程栈
-    lua_settop coThread, 0
-    
-    Exit Sub
-
-ErrorHandler:
-    g_TaskStatus(taskId) = "error"
-    g_TaskError(taskId) = "处理结果错误: " & Err.Description
-    ' 确保清理栈
-    On Error Resume Next
-    If coThread <> 0 Then lua_settop coThread, 0
-End Sub
-
-' 解析 yield/return 字典
-Private Sub ParseYieldReturn(taskId As String, data As Variant, isFinal As Boolean)
-    On Error Resume Next
-    
-    ' 如果不是数组,直接作为value处理
-    If Not IsArray(data) Then
-        g_TaskValue(taskId) = data
-        Exit Sub
-    End If
-    
-    ' 检查是否为字典格式(二维数组,第二维为2列)
-    Dim isDictionary As Boolean
-    isDictionary = False
-    
-    On Error Resume Next
-    Dim cols As Long
-    cols = UBound(data, 2) - LBound(data, 2) + 1
-    If Err.Number = 0 And cols = 2 Then
-        isDictionary = True
-    End If
-    On Error GoTo 0
-    
-    ' 如果是字典格式,解析键值对
-    If isDictionary Then
-        Dim i As Long
-        For i = LBound(data, 1) To UBound(data, 1)
-            Dim key As String
-            Dim value As Variant
-            
-            key = LCase(Trim(CStr(data(i, 1))))
-            value = data(i, 2)
-            
-            Select Case key
-                Case "status"
-                    ' 只有在非final或者值不是"done"时才更新status
-                    Dim statusVal As String
-                    statusVal = LCase(Trim(CStr(value)))
-                    If Not isFinal Then
-                        ' yield时,根据返回的status字段决定协程状态
-                        Select Case statusVal
-                            Case "yielded", "done", "error"
-                                g_TaskStatus(taskId) = statusVal
-                            Case Else
-                                g_TaskStatus(taskId) = "yielded" ' 默认为yielded
-                        End Select
-                    End If
-                    
-                Case "progress"
-                    On Error Resume Next
-                    g_TaskProgress(taskId) = CDbl(value)
-                    On Error GoTo 0
-                    
-                Case "message"
-                    g_TaskMessage(taskId) = value
-                    
-                Case "value"
-                    g_TaskValue(taskId) = value
-                    
-                Case "write"
-                    ' 动态写入目标会在写入函数中处理
-            End Select
-        Next i
-    Else
-        ' 如果不是字典格式,整个数组作为value
-        g_TaskValue(taskId) = data
-    End If
-End Sub
-
 ' ============================================
 ' 第六部分：辅助函数（内部使用）
 ' ============================================
 ' 统一压栈函数 - 支持主状态机和协程线程
-' L: 可以是 g_LuaState.L 或 coThread
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
     ' 处理 Range 对象
     If TypeName(value) = "Range" Then
@@ -1019,7 +878,6 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
 End Sub
 
 ' 统一数组压栈函数 - 支持主状态机和协程线程
-' L: 可以是 g_LuaState.L 或 coThread
 Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
     Dim i As Long, j As Long
     Dim rows As Long, cols As Long
@@ -1337,6 +1195,133 @@ Private Function TableToDictArray(ByVal L As LongPtr, ByVal idx As Long) As Vari
 ErrorHandler:
     TableToDictArray = "#DICT_ERROR: " & Err.Description
 End Function
+
+' 处理协程返回结果
+Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long)
+    On Error GoTo ErrorHandler
+    
+    Dim coThread As LongPtr
+    coThread = g_TaskCoThread(taskId)
+    
+    Dim topBefore As Long
+    topBefore = lua_gettop(coThread)
+    
+    Select Case result
+        Case LUA_OK
+            g_TaskStatus(taskId) = "done"
+            g_StateDirty = True
+            g_TaskProgress(taskId) = 100
+            
+            If nres > 0 And topBefore > 0 Then
+                Dim retData As Variant
+                retData = GetValue(coThread, -1)
+                ParseYieldReturn taskId, retData, True
+            End If
+            
+        Case LUA_YIELD
+            If nres > 0 And topBefore > 0 Then
+                Dim yieldData As Variant
+                yieldData = GetValue(coThread, -1)
+                ParseYieldReturn taskId, yieldData, False
+            End If
+            
+            ' 注意:这里不要立即设置为yielded,让ParseYieldReturn根据返回值决定
+            If g_TaskStatus(taskId) <> "done" And g_TaskStatus(taskId) <> "error" Then
+                g_TaskStatus(taskId) = "yielded"
+            End If
+            g_StateDirty = True
+            
+        Case Else
+            g_TaskStatus(taskId) = "error"
+            g_StateDirty = True
+
+            If nres > 0 And topBefore > 0 Then
+                g_TaskError(taskId) = GetStringFromState(coThread, -1)
+            Else
+                g_TaskError(taskId) = "协程错误: 代码 " & result
+            End If
+    End Select
+    
+    ' 清理协程栈
+    lua_settop coThread, 0
+    
+    Exit Sub
+
+ErrorHandler:
+    g_TaskStatus(taskId) = "error"
+    g_TaskError(taskId) = "处理结果错误: " & Err.Description
+    ' 确保清理栈
+    On Error Resume Next
+    If coThread <> 0 Then lua_settop coThread, 0
+End Sub
+
+' 解析 yield/return 字典
+Private Sub ParseYieldReturn(taskId As String, data As Variant, isFinal As Boolean)
+    On Error Resume Next
+    
+    ' 如果不是数组,直接作为value处理
+    If Not IsArray(data) Then
+        g_TaskValue(taskId) = data
+        Exit Sub
+    End If
+    
+    ' 检查是否为字典格式(二维数组,第二维为2列)
+    Dim isDictionary As Boolean
+    isDictionary = False
+    
+    On Error Resume Next
+    Dim cols As Long
+    cols = UBound(data, 2) - LBound(data, 2) + 1
+    If Err.Number = 0 And cols = 2 Then
+        isDictionary = True
+    End If
+    On Error GoTo 0
+    
+    ' 如果是字典格式,解析键值对
+    If isDictionary Then
+        Dim i As Long
+        For i = LBound(data, 1) To UBound(data, 1)
+            Dim key As String
+            Dim value As Variant
+            
+            key = LCase(Trim(CStr(data(i, 1))))
+            value = data(i, 2)
+            
+            Select Case key
+                Case "status"
+                    ' 只有在非final或者值不是"done"时才更新status
+                    Dim statusVal As String
+                    statusVal = LCase(Trim(CStr(value)))
+                    If Not isFinal Then
+                        ' yield时,根据返回的status字段决定协程状态
+                        Select Case statusVal
+                            Case "yielded", "done", "error"
+                                g_TaskStatus(taskId) = statusVal
+                            Case Else
+                                g_TaskStatus(taskId) = "yielded" ' 默认为yielded
+                        End Select
+                    End If
+                    
+                Case "progress"
+                    On Error Resume Next
+                    g_TaskProgress(taskId) = CDbl(value)
+                    On Error GoTo 0
+                    
+                Case "message"
+                    g_TaskMessage(taskId) = value
+                    
+                Case "value"
+                    g_TaskValue(taskId) = value
+                    
+                Case "write"
+                    ' 动态写入目标会在写入函数中处理
+            End Select
+        Next i
+    Else
+        ' 如果不是字典格式,整个数组作为value
+        g_TaskValue(taskId) = data
+    End If
+End Sub
 
 ' 根据调用单元格地址查找已存在的任务
 Private Function FindTaskByCell(taskCell As String) As String

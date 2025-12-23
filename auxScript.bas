@@ -31,7 +31,7 @@ Private Function ArrayDimensions(arr As Variant) As String
     ArrayDimensions = dims
 End Function
 
-' 辅助：增加子菜单项
+' 辅助函数：增加子菜单项
 Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAction As String)
     Dim ctrl As CommandBarControl
     Set ctrl = parent.Controls.Add(Type:=msoControlButton, Temporary:=True)
@@ -39,17 +39,64 @@ Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAct
     ctrl.OnAction = onAction
 End Sub
 
-' ============================================
-' 第七部分：可视化操作函数
-' ============================================
-
-' 根据单元格地址获取任务ID
+' 辅助函数：根据单元格地址获取任务ID
 Private Function GetTaskIdFromSelection() As String
     Dim cellAddr As String
     cellAddr = Selection.Address(External:=True)
     GetTaskIdFromSelection = FindTaskByCell(cellAddr)
 End Function
 
+' 辅助函数：按工作簿过滤任务
+Private Function GetTasksByWorkbook(wbName As String) As Object
+    Dim result As Object
+    Set result = CreateObject("System.Collections.ArrayList")
+    
+    If g_TaskWorkbook Is Nothing Then Exit Function
+    
+    Dim taskId As Variant
+    For Each taskId In g_TaskWorkbook.Keys
+        If g_TaskWorkbook(CStr(taskId)) = wbName Then
+            result.Add taskId
+        End If
+    Next
+    
+    Set GetTasksByWorkbook = result
+End Function
+
+' 辅助函数：清理特定工作簿的任务
+Public Sub CleanupWorkbookTasks(wbName As String)
+    On Error Resume Next
+    
+    If g_TaskWorkbook Is Nothing Then Exit Sub
+
+    Dim tasksToRemove As Object
+    Set tasksToRemove = GetTasksByWorkbook(wbName)
+    
+    Dim i As Long
+    For i = 0 To tasksToRemove.Count - 1
+        Dim tid As String
+        tid = CStr(tasksToRemove(i))
+        
+        ' 从队列中移除
+        If g_TaskQueue.Exists(tid) Then g_TaskQueue.Remove tid
+        
+        ' 删除所有相关数据
+        g_TaskFunc.Remove tid
+        g_TaskWorkbook.Remove tid
+        g_TaskStartArgs.Remove tid
+        g_TaskResumeSpec.Remove tid
+        g_TaskCell.Remove tid
+        g_TaskStatus.Remove tid
+        g_TaskProgress.Remove tid
+        g_TaskMessage.Remove tid
+        g_TaskValue.Remove tid
+        g_TaskError.Remove tid
+        g_TaskCoThread.Remove tid
+    Next i
+End Sub  
+' ============================================
+' 第七部分：可视化操作函数
+' ============================================
 ' 打开并创建右键菜单功能
 Public Sub EnableLuaTaskMenu()
     On Error Resume Next
@@ -81,6 +128,7 @@ Public Sub EnableLuaTaskMenu()
     ' 添加调度的子菜单
     AddLuaMenuItem luaSchedulerMenu, "启动所有 defined 任务", "LuaSchedulerMenu_StartAllDefinedTasks"
     AddLuaMenuItem luaSchedulerMenu, "清理所有完成、错误任务", "LuaSchedulerMenu_CleanupFinishedTasks"
+    AddLuaMenuItem luaSchedulerMenu, "删除此工作簿任务", "LuaSchedulerMenu_CleanupWorkbookTasks"
     AddLuaMenuItem luaSchedulerMenu, "删除所有任务", "LuaSchedulerMenu_ClearAllTasks"
     AddLuaMenuItem luaSchedulerMenu, "显示所有任务信息", "LuaSchedulerMenu_ShowAllTasks"
 
@@ -93,8 +141,16 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaConfigMenu, "启用热重载", "LuaConfigMenu_EnableHotReload"
     AddLuaMenuItem luaConfigMenu, "禁用热重载", "LuaConfigMenu_DisableHotReload"
     AddLuaMenuItem luaConfigMenu, "手动重载 functions.lua", "LuaConfigMenu_ReloadFunctions"
-    AddLuaMenuItem luaConfigMenu, "设置调度间隔（秒）", "LuaConfigMenu_SetSchedulerInterval"
+    AddLuaMenuItem luaConfigMenu, "设置调度间隔（毫秒）", "LuaConfigMenu_SetSchedulerInterval"
     AddLuaMenuItem luaConfigMenu, "设置调度步数", "LuaConfigMenu_SetSchedulerBatchSize"
+
+    ' 添加调试的主菜单
+    Dim luaDebugMenu As CommandBarControl
+    Set luaDebugMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
+    luaDebugMenu.Caption = "Lua 调试管理"
+    luaDebugMenu.Tag = "luaDebugMenu"
+    ' 添加调试的子菜单
+    AddLuaMenuItem luaDebugMenu, "显示插件状态", "LuaDebugMenu_ShowAddinStatus"
 
     MsgBox "Lua 任务右键菜单已启用。", vbInformation
 End Sub
@@ -113,7 +169,14 @@ Public Sub DisableLuaTaskMenu()
     Next
 End Sub
 
-' ===== 启动任务 =====
+' 重新加载菜单（修复菜单丢失问题）
+Public Sub ReloadMenus()
+    DisableLuaTaskMenu
+    EnableLuaTaskMenu
+    MsgBox "右键菜单已重新加载！", vbInformation, "菜单重载"
+End Sub
+
+' 启动任务
 Private Sub LuaTaskMenu_StartTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
@@ -129,7 +192,7 @@ Private Sub LuaTaskMenu_StartTask()
     End If
 End Sub
 
-' ===== 暂停任务 =====
+' 暂停任务
 Private Sub LuaTaskMenu_PauseTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
@@ -152,7 +215,7 @@ Private Sub LuaTaskMenu_PauseTask()
     End If
 End Sub
 
-' ===== 恢复任务 =====
+' 恢复任务
 Private Sub LuaTaskMenu_ResumeTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
@@ -181,7 +244,7 @@ Private Sub LuaTaskMenu_ResumeTask()
     End If
 End Sub
 
-' ===== 终止任务 =====
+' 终止任务
 Private Sub LuaTaskMenu_terminateTask()
     On Error Resume Next
     If g_TaskFunc Is Nothing Then Exit Sub
@@ -217,7 +280,7 @@ Private Sub LuaTaskMenu_terminateTask()
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
 
-' ===== 查看任务详情 =====
+' 查看任务详情
 Private Sub LuaTaskMenu_ShowDetail()
     On Error GoTo ErrorHandler
 
@@ -308,8 +371,8 @@ Private Sub LuaTaskMenu_ShowDetail()
 ErrorHandler:
     MsgBox "显示任务详情时出错: " & Err.Description, vbCritical, "错误"
 End Sub
-
-' ===== 批量启动所有 defined 状态的任务 =====
+' ====调度管理功能====
+' 批量启动所有 defined 状态的任务
 Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
     Dim taskId As Variant
     Dim count As Long
@@ -324,7 +387,7 @@ Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
     MsgBox "已启动 " & count & " 个任务", vbInformation
 End Sub
 
-' ===== 清理所有已完成或错误的任务 =====
+' 清理所有已完成或错误的任务
 Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     On Error Resume Next
     
@@ -372,7 +435,17 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
            "剩余任务: " & g_TaskFunc.Count, vbInformation, "清理完成"
 End Sub
 
-' ===== 清空所有任务和队列 =====
+' 清理特定工作簿的任务
+Private Sub LuaSchedulerMenu_CleanupWorkbookTasks()
+    Dim taskCell As String
+    Dim wbName As String
+    taskCell = Application.Caller.Address(External:=True)
+    wbName = Application.Caller.Worksheet.Parent.Name
+    CleanupWorkbookTasks wbName
+    MsgBox "已清理工作簿 " & wbName & " 的任务。", vbInformation
+End Sub
+
+' 清空所有任务和队列
 Private Sub LuaSchedulerMenu_ClearAllTasks()
     Dim result As VbMsgBoxResult
     result = MsgBox("确定要清空所有任务吗？" & vbCrLf & vbCrLf & _
@@ -402,8 +475,7 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
 End Sub
 
-' ===== 显示所有任务信息 =====
-' ===== 修改：显示所有任务（按工作簿分组） =====
+' 显示所有任务（按工作簿分组）
 Private Sub LuaSchedulerMenu_ShowAllTasks()
     On Error GoTo ErrorHandler
     
@@ -509,7 +581,8 @@ ErrorHandler:
     MsgBox "显示任务信息时出错: " & Err.Description, vbCritical, "错误"
 End Sub
 
-' ===== 启用热重载 =====
+' ====插件设置功能====
+' 启用热重载
 Private Sub LuaConfigMenu_EnableHotReload()
     g_HotReloadEnabled = True
     MsgBox "Lua 自动热重载已启用。" & vbCrLf & _
@@ -517,7 +590,7 @@ Private Sub LuaConfigMenu_EnableHotReload()
            vbInformation, "热重载已启用"
 End Sub
 
-' ===== 禁用热重载 =====
+' 禁用热重载
 Private Sub LuaConfigMenu_DisableHotReload()
     g_HotReloadEnabled = False
     MsgBox "Lua 自动热重载已禁用。" & vbCrLf & _
@@ -525,7 +598,7 @@ Private Sub LuaConfigMenu_DisableHotReload()
            vbExclamation, "热重载已禁用"
 End Sub
 
-' ===== 手动重载 functions.lua =====
+' 手动重载 functions.lua
 Private Sub LuaConfigMenu_ReloadFunctions()
     If Not g_Initialized Then
         If Not InitLuaState() Then
@@ -542,7 +615,7 @@ Private Sub LuaConfigMenu_ReloadFunctions()
     End If
 End Sub
 
-' ===== 设置调度间隔（毫秒） =====
+' 设置调度间隔（毫秒）
 Private Sub LuaConfigMenu_SetSchedulerInterval()
     If g_SchedulerRunning Then
         StopScheduler
@@ -566,7 +639,7 @@ Private Sub LuaConfigMenu_SetSchedulerInterval()
     ResumeScheduler
 End Sub
 
-' ===== 设置调度步数 ===== 
+' 设置调度步数 
 Private Sub LuaConfigMenu_SetSchedulerBatchSize()
     If g_SchedulerRunning Then
         StopScheduler
@@ -590,61 +663,9 @@ Private Sub LuaConfigMenu_SetSchedulerBatchSize()
     ResumeScheduler
 End Sub
 
-' ===== 新增：按工作簿过滤任务 =====
-Private Function GetTasksByWorkbook(wbName As String) As Object
-    Dim result As Object
-    Set result = CreateObject("System.Collections.ArrayList")
-    
-    If g_TaskWorkbook Is Nothing Then Exit Function
-    
-    Dim taskId As Variant
-    For Each taskId In g_TaskWorkbook.Keys
-        If g_TaskWorkbook(CStr(taskId)) = wbName Then
-            result.Add taskId
-        End If
-    Next
-    
-    Set GetTasksByWorkbook = result
-End Function
-
-' ===== 新增：清理特定工作簿的任务 =====
-Public Sub CleanupWorkbookTasks(wbName As String)
-    On Error Resume Next
-    
-    If g_TaskWorkbook Is Nothing Then Exit Sub
-    
-    Dim tasksToRemove As Object
-    Set tasksToRemove = GetTasksByWorkbook(wbName)
-    
-    Dim i As Long
-    For i = 0 To tasksToRemove.Count - 1
-        Dim tid As String
-        tid = CStr(tasksToRemove(i))
-        
-        ' 从队列中移除
-        If g_TaskQueue.Exists(tid) Then g_TaskQueue.Remove tid
-        
-        ' 删除所有相关数据
-        g_TaskFunc.Remove tid
-        g_TaskWorkbook.Remove tid
-        g_TaskStartArgs.Remove tid
-        g_TaskResumeSpec.Remove tid
-        g_TaskCell.Remove tid
-        g_TaskStatus.Remove tid
-        g_TaskProgress.Remove tid
-        g_TaskMessage.Remove tid
-        g_TaskValue.Remove tid
-        g_TaskError.Remove tid
-        g_TaskCoThread.Remove tid
-    Next i
-End Sub
-
-' ============================================
-' 调试和诊断功能
-' ============================================
-
+' ====调试和诊断功能====
 ' 显示加载宏状态
-Public Sub ShowAddinStatus()
+Private Sub LuaDebugMenu_ShowAddinStatus()
     Dim msg As String
     msg = "========================================" & vbCrLf
     msg = msg & "  Excel-Lua 5.4 加载宏状态" & vbCrLf
@@ -682,17 +703,9 @@ Public Sub ShowAddinStatus()
     MsgBox msg, vbInformation, "加载宏状态"
 End Sub
 
-' 重新加载菜单（修复菜单丢失问题）
-Public Sub ReloadMenus()
-    DisableLuaTaskMenu
-    EnableLuaTaskMenu
-    MsgBox "右键菜单已重新加载！", vbInformation, "菜单重载"
-End Sub
-
 ' ============================================
 ' 手动初始化/清理函数（供外部调用）
 ' ============================================
-
 ' 手动初始化Lua引擎
 Public Sub ManualInitLua()
     If InitLuaState() Then
