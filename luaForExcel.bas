@@ -68,12 +68,15 @@ Private Const LUA_YIELD = 1
 Private Const LUA_ERRRUN = 2
 
 ' ===== 全局变量 =====
-Private g_LuaState As LuaState
+Private g_LuaState As LongPtr
 Private g_Initialized As Boolean
 Private g_HotReloadEnabled As Boolean
+Private g_FunctionsPath As String  ' 固定为加载项目录
+Private g_LastModified As Date
 
 ' ===== 协程全局变量 =====
 Private g_TaskFunc As Object           ' taskId -> func name
+Private g_TaskWorkbook As Object       ' taskId -> workbook name
 Private g_TaskStartArgs As Object      ' taskId -> startArgs array
 Private g_TaskResumeSpec As Object     ' taskId -> resumeSpec array
 Private g_TaskCell As Object           ' taskId -> taskCell address
@@ -103,46 +106,40 @@ Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代�
 Private Function InitLuaState() As Boolean
     On Error GoTo ErrorHandler
     
-    ' 如果已初始化，直接返回成功
     If g_Initialized Then
         InitLuaState = True
         Exit Function
     End If
     
-    ' 创建新的 Lua 状态机
-    g_LuaState.L = luaL_newstate()
-    If g_LuaState.L = 0 Then
+    ' 创建Lua状态机
+    g_LuaState = luaL_newstate()
+    If g_LuaState = 0 Then
         MsgBox "无法创建 Lua 状态机。" & vbCrLf & _
                "请确保 lua54.dll 在系统路径中。", vbCritical, "初始化失败"
         InitLuaState = False
         Exit Function
     End If
     
-    ' 加载 Lua 标准库
-    luaL_openlibs g_LuaState.L
+    luaL_openlibs g_LuaState
     
-    ' 设置 functions.lua 路径
-    g_LuaState.functionsPath = ThisWorkbook.Path & "\functions.lua"
-    g_LuaState.lastModified = #1/1/1900#
+    ' 固定为加载项目录下的functions.lua
+    g_FunctionsPath = ThisWorkbook.Path & "\functions.lua"
+    g_LastModified = #1/1/1900#
     
-    ' 标记为已初始化
     g_Initialized = True
     g_HotReloadEnabled = DEFAULT_HOT_RELOAD_ENABLED
     
-    ' 初始化协程系统
     InitCoroutineSystem
     
-    ' 尝试首次加载 functions.lua（失败不影响继续）
+    ' 尝试加载functions.lua
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     
-    If fso.FileExists(g_LuaState.functionsPath) Then
-        If TryLoadFunctionsFile() Then
-            ' 加载成功，静默处理
-        Else
+    If fso.FileExists(g_FunctionsPath) Then
+        If Not TryLoadFunctionsFile() Then
             MsgBox "functions.lua 加载失败。" & vbCrLf & _
-                   "Lua 引擎已启动，但自定义函数不可用。" & vbCrLf & _
-                   "请检查文件语法后手动重载。", vbExclamation, "初始化警告"
+                   "Lua 引擎已启动,但自定义函数不可用。", _
+                   vbExclamation, "初始化警告"
         End If
     End If
     
@@ -160,6 +157,7 @@ Private Sub InitCoroutineSystem()
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
 
     Set g_TaskFunc = CreateObject("Scripting.Dictionary")
+    Set g_TaskWorkbook = CreateObject("Scripting.Dictionary")  ' 新增
     Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
     Set g_TaskResumeSpec = CreateObject("Scripting.Dictionary")
     Set g_TaskCell = CreateObject("Scripting.Dictionary")
@@ -180,11 +178,11 @@ End Sub
 Public Sub CleanupLua()
     If g_Initialized Then
         g_SchedulerRunning = False
-
         StopScheduler
 
         If Not g_TaskFunc Is Nothing Then
             g_TaskFunc.RemoveAll
+            g_TaskWorkbook.RemoveAll  ' 新增
             g_TaskStartArgs.RemoveAll
             g_TaskResumeSpec.RemoveAll
             g_TaskCell.RemoveAll
@@ -197,8 +195,11 @@ Public Sub CleanupLua()
             g_TaskQueue.RemoveAll
         End If
         
-        lua_close g_LuaState.L
-        g_LuaState.L = 0
+        If g_LuaState <> 0 Then
+            lua_close g_LuaState
+            g_LuaState = 0
+        End If
+        
         g_Initialized = False
     End If
 End Sub
@@ -214,12 +215,12 @@ Private Function ValidateFunctionsFile() As Boolean
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     
-    If Not fso.FileExists(g_LuaState.functionsPath) Then
+    If Not fso.FileExists(g_FunctionsPath) Then
         ValidateFunctionsFile = False
         Exit Function
     End If
     
-    ' 创建临时 Lua 状态
+    ' 创建临时状态验证
     Dim tempL As LongPtr
     tempL = luaL_newstate()
     If tempL = 0 Then
@@ -229,18 +230,16 @@ Private Function ValidateFunctionsFile() As Boolean
     
     luaL_openlibs tempL
     
-    ' 尝试加载和执行
     Dim result As Long
-    result = luaL_loadfilex(tempL, g_LuaState.functionsPath, 0)
+    result = luaL_loadfilex(tempL, g_FunctionsPath, 0)
     If result = 0 Then result = lua_pcallk(tempL, 0, 0, 0, 0, 0)
     
-    ' 检查结果
     If result <> 0 Then
         Dim errMsg As String
         errMsg = GetStringFromState(tempL, -1)
         lua_close tempL
         
-        MsgBox "functions.lua 存在语法错误：" & vbCrLf & vbCrLf & _
+        MsgBox "functions.lua 存在语法错误:" & vbCrLf & vbCrLf & _
                errMsg, vbCritical, "文件验证失败"
         ValidateFunctionsFile = False
         Exit Function
@@ -260,28 +259,27 @@ Private Function LoadFunctionsIntoMainState() As Boolean
     On Error GoTo ErrorHandler
     
     Dim topBefore As Long
-    topBefore = lua_gettop(g_LuaState.L)
+    topBefore = lua_gettop(g_LuaState)
     
     Dim result As Long
-    result = luaL_loadfilex(g_LuaState.L, g_LuaState.functionsPath, 0)
-    If result = 0 Then result = lua_pcallk(g_LuaState.L, 0, 0, 0, 0, 0)
+    result = luaL_loadfilex(g_LuaState, g_FunctionsPath, 0)
+    If result = 0 Then result = lua_pcallk(g_LuaState, 0, 0, 0, 0, 0)
     
-    ' 恢复栈
-    lua_settop g_LuaState.L, topBefore
+    lua_settop g_LuaState, topBefore
     
     If result <> 0 Then
         Dim errMsg As String
-        errMsg = GetStringFromState(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, topBefore
+        errMsg = GetStringFromState(g_LuaState, -1)
+        lua_settop g_LuaState, topBefore
         
-        MsgBox "主状态加载 functions.lua 失败：" & vbCrLf & vbCrLf & _
+        MsgBox "主状态加载 functions.lua 失败:" & vbCrLf & vbCrLf & _
                errMsg, vbCritical, "加载失败"
         LoadFunctionsIntoMainState = False
         Exit Function
     End If
     
     ' 更新时间戳
-    g_LuaState.lastModified = FileDateTime(g_LuaState.functionsPath)
+    g_LastModified = FileDateTime(g_FunctionsPath)
     LoadFunctionsIntoMainState = True
     Exit Function
 
@@ -304,26 +302,18 @@ End Function
 
 ' 自动热重载检查（如果启用）
 Private Sub CheckAutoReload()
-    ' 未启用热重载，直接返回
     If Not g_HotReloadEnabled Then Exit Sub
 
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     
-    ' 文件不存在，无需重载
-    If Not fso.FileExists(g_LuaState.functionsPath) Then Exit Sub
+    If Not fso.FileExists(g_FunctionsPath) Then Exit Sub
 
-    ' 比较修改时间
     Dim currentModified As Date
-    currentModified = FileDateTime(g_LuaState.functionsPath)
-    If Not (currentModified <> g_LuaState.lastModified) Then Exit Sub
+    currentModified = FileDateTime(g_FunctionsPath)
+    If Not (currentModified <> g_LastModified) Then Exit Sub
 
-    ' 执行重载（失败也不影响继续使用旧状态）
-    If TryLoadFunctionsFile() Then
-        ' 成功，静默处理
-    Else
-        ' 失败时已有弹窗提示，这里不再处理
-    End If
+    Call TryLoadFunctionsFile
 End Sub
 
 ' ============================================
@@ -334,108 +324,97 @@ End Sub
 Public Function LuaEval(expression As String) As Variant
     On Error GoTo ErrorHandler
     
-    ' 确保初始化
     If Not InitLuaState() Then
         LuaEval = CVErr(xlErrValue)
         Exit Function
     End If
     
-    ' 检查热重载
     CheckAutoReload
     
-    ' 构造代码
     Dim fullCode As String
     fullCode = "return " & expression
     
-    ' 加载代码
+    ' 修改：g_LuaState.L -> g_LuaState
     Dim result As Long
-    result = luaL_loadstring(g_LuaState.L, fullCode)
+    result = luaL_loadstring(g_LuaState, fullCode)
     If result <> 0 Then
-        LuaEval = "语法错误: " & GetStringFromState(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
+        LuaEval = "语法错误: " & GetStringFromState(g_LuaState, -1)
+        lua_settop g_LuaState, 0
         Exit Function
     End If
     
-    ' 执行代码
-    result = lua_pcallk(g_LuaState.L, 0, 1, 0, 0, 0)
+    result = lua_pcallk(g_LuaState, 0, 1, 0, 0, 0)
     If result <> 0 Then
-        LuaEval = "运行错误: " & GetStringFromState(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
+        LuaEval = "运行错误: " & GetStringFromState(g_LuaState, -1)
+        lua_settop g_LuaState, 0
         Exit Function
     End If
     
-    ' 获取结果
-    LuaEval = GetValue(g_LuaState.L, -1)
-    lua_settop g_LuaState.L, 0
+    LuaEval = GetValue(g_LuaState, -1)
+    lua_settop g_LuaState, 0
     Exit Function
 
 ErrorHandler:
     LuaEval = "VBA错误: " & Err.Description
-    If g_Initialized Then lua_settop g_LuaState.L, 0
+    If g_Initialized Then lua_settop g_LuaState, 0
 End Function
 
 ' 调用 functions.lua 中的函数
 Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
     On Error GoTo ErrorHandler
     
-    ' 确保初始化
     If Not InitLuaState() Then
         LuaCall = CVErr(xlErrValue)
         Exit Function
     End If
     
-    ' 检查热重载
     CheckAutoReload
     
-    ' 获取函数
-    lua_getglobal g_LuaState.L, funcName
-    If lua_type(g_LuaState.L, -1) <> LUA_TFUNCTION Then
-        lua_settop g_LuaState.L, 0
+    ' 修改：g_LuaState.L -> g_LuaState
+    lua_getglobal g_LuaState, funcName
+    If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
+        lua_settop g_LuaState, 0
         LuaCall = "错误: 函数 '" & funcName & "' 不存在"
         Exit Function
     End If
     
-    ' 推入参数
     Dim i As Long, argCount As Long
     argCount = 0
     For i = LBound(args) To UBound(args)
-        PushValue g_LuaState.L, args(i)
+        PushValue g_LuaState, args(i)
         argCount = argCount + 1
     Next i
     
-    ' 调用函数
     Dim result As Long
-    result = lua_pcallk(g_LuaState.L, argCount, -1, 0, 0, 0)
+    result = lua_pcallk(g_LuaState, argCount, -1, 0, 0, 0)
     If result <> 0 Then
-        LuaCall = "运行错误: " & GetStringFromState(g_LuaState.L, -1)
-        lua_settop g_LuaState.L, 0
+        LuaCall = "运行错误: " & GetStringFromState(g_LuaState, -1)
+        lua_settop g_LuaState, 0
         Exit Function
     End If
     
-    ' 处理返回值
     Dim nResults As Long
-    nResults = lua_gettop(g_LuaState.L)
+    nResults = lua_gettop(g_LuaState)
     
     If nResults = 0 Then
         LuaCall = Empty
     ElseIf nResults = 1 Then
-        LuaCall = GetValue(g_LuaState.L, -1)
+        LuaCall = GetValue(g_LuaState, -1)
     Else
-        ' 多个返回值
         Dim results() As Variant
         ReDim results(1 To 1, 1 To nResults)
         For i = 1 To nResults
-            results(1, i) = GetValue(g_LuaState.L, i)
+            results(1, i) = GetValue(g_LuaState, i)
         Next i
         LuaCall = results
     End If
     
-    lua_settop g_LuaState.L, 0
+    lua_settop g_LuaState, 0
     Exit Function
 
 ErrorHandler:
     LuaCall = "VBA错误: " & Err.Description
-    If g_Initialized Then lua_settop g_LuaState.L, 0
+    If g_Initialized Then lua_settop g_LuaState, 0
 End Function
 
 ' ============================================
@@ -456,10 +435,13 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         Exit Function
     End If
 
-    ' 获取调用单元格地址
+    ' 获取调用单元格地址和工作簿名
     Dim taskCell As String
+    Dim wbName As String
     taskCell = Application.Caller.Address(External:=True)
-
+    wbName = Application.Caller.Worksheet.Parent.Name
+    
+    ' 检查是否已存在任务
     Dim existingTaskId As String
     existingTaskId = FindTaskByCell(taskCell)
 
@@ -468,6 +450,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         Exit Function
     End If
 
+    ' 解析参数
     Dim funcName As String
     funcName = CStr(params(0))
 
@@ -504,11 +487,14 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     If startList.Count > 0 Then startArgs = startList.ToArray()
     If resumeList.Count > 0 Then resumeSpec = resumeList.ToArray()
 
+    ' 生成任务ID（包含工作簿名）
     Dim taskId As String
     taskId = "TASK_" & g_NextTaskId & "_" & taskCell
     g_NextTaskId = g_NextTaskId + 1
 
+    ' 注册任务
     g_TaskFunc(taskId) = funcName
+    g_TaskWorkbook(taskId) = wbName  ' 新增
     g_TaskStartArgs(taskId) = startArgs
     g_TaskResumeSpec(taskId) = resumeSpec
     g_TaskCell(taskId) = taskCell
@@ -594,15 +580,14 @@ Public Sub StartLuaCoroutine(taskId As String)
         Exit Sub
     End If
     
-    ' 检查主状态
-    If g_LuaState.L = 0 Then
+    ' 修改：g_LuaState.L -> g_LuaState
+    If g_LuaState = 0 Then
         MsgBox "Lua主状态未初始化", vbCritical
         Exit Sub
     End If
     
-    ' 创建协程线程
     Dim coThread As LongPtr
-    coThread = lua_newthread(g_LuaState.L)
+    coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
         g_TaskStatus(taskId) = "error"
         g_TaskError(taskId) = "无法创建协程线程"
@@ -611,29 +596,25 @@ Public Sub StartLuaCoroutine(taskId As String)
     
     g_TaskCoThread(taskId) = coThread
     
-    ' 获取函数
     Dim funcName As String
     funcName = g_TaskFunc(taskId)
     
-    lua_getglobal g_LuaState.L, funcName
+    lua_getglobal g_LuaState, funcName
     
-    ' 检查函数是否存在
-    If lua_type(g_LuaState.L, -1) <> LUA_TFUNCTION Then
+    If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
         g_TaskStatus(taskId) = "error"
         g_TaskError(taskId) = "函数 '" & funcName & "' 不存在"
-        lua_settop g_LuaState.L, 0
+        lua_settop g_LuaState, 0
         Exit Sub
     End If
     
-    ' 移动函数到协程线程
-    lua_xmove g_LuaState.L, coThread, 1
+    ' 修改：g_LuaState.L -> g_LuaState
+    lua_xmove g_LuaState, coThread, 1
     
-    ' 推入 taskCell
     lua_pushstring coThread, g_TaskCell(taskId)
     
-    ' 推入启动参数
     Dim nargs As Long
-    nargs = 1  ' taskCell
+    nargs = 1
     
     Dim startArgs As Variant
     startArgs = g_TaskStartArgs(taskId)
@@ -646,15 +627,13 @@ Public Sub StartLuaCoroutine(taskId As String)
         Next i
     End If
     
-    ' 首次 resume
     Dim nres As LongPtr
     Dim result As Long
-    result = lua_resume(coThread, g_LuaState.L, nargs, VarPtr(nres))
+    ' 修改：g_LuaState.L -> g_LuaState
+    result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
     
-    ' 处理结果
     HandleCoroutineResult taskId, result, CLng(nres)
     
-    ' 加入调度队列
     If g_TaskStatus(taskId) = "yielded" Then
         g_TaskQueue(taskId) = True
         StartSchedulerIfNeeded
@@ -787,10 +766,8 @@ Private Sub ResumeCoroutine(taskId As String)
     Dim coThread As LongPtr
     coThread = g_TaskCoThread(taskId)
     
-    ' 清空协程栈
     lua_settop coThread, 0
     
-    ' 推入 resume 参数
     Dim i As Long
     Dim resumeSpec As Variant
     resumeSpec = g_TaskResumeSpec(taskId)
@@ -800,9 +777,7 @@ Private Sub ResumeCoroutine(taskId As String)
             Dim param As Variant
             param = resumeSpec(i)
             
-            ' 如果是字符串，尝试解析为单元格引用
             If VarType(param) = vbString Then
-                ' 尝试解析为单元格引用
                 On Error Resume Next
                 Dim rng As Range
                 Set rng = Range(param)
@@ -819,7 +794,6 @@ Private Sub ResumeCoroutine(taskId As String)
         Next i
     End If
     
-    ' Resume
     Dim nargs As Long
     nargs = 0
     If IsArray(resumeSpec) Then
@@ -828,7 +802,8 @@ Private Sub ResumeCoroutine(taskId As String)
     
     Dim nres As LongPtr
     Dim result As Long
-    result = lua_resume(coThread, g_LuaState.L, nargs, VarPtr(nres))
+    ' 修改：g_LuaState.L -> g_LuaState
+    result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
     
     HandleCoroutineResult taskId, result, CLng(nres)
     Exit Sub

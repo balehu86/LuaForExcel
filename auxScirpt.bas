@@ -6,11 +6,6 @@ Public Sub LogError(msg As String)
     Debug.Print "[ERROR] " & msg
     MsgBox msg, vbCritical, "错误"
 End Sub
-' 工作簿关闭时自动清理
-Private Sub Workbook_BeforeClose(Cancel As Boolean)
-    CleanupLua
-    DisableLuaTaskMenu
-End Sub
 
 ' 工作簿打开时自动运行
 Private Sub Workbook_Open()
@@ -413,6 +408,7 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
 End Sub
 
 ' ===== 显示所有任务信息 =====
+' ===== 修改：显示所有任务（按工作簿分组） =====
 Private Sub LuaSchedulerMenu_ShowAllTasks()
     On Error GoTo ErrorHandler
     
@@ -425,20 +421,40 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         Exit Sub
     End If
     
-    ' 构建任务信息字符串
-    Dim msg As String
+    ' 按工作簿分组统计
+    Dim wbStats As Object
+    Set wbStats = CreateObject("Scripting.Dictionary")
+    
     Dim taskId As Variant
     Dim taskCount As Long
     Dim runningCount As Long, yieldedCount As Long, doneCount As Long, errorCount As Long
+    For Each taskId In g_TaskWorkbook.Keys
+        Dim wbName As String
+        wbName = g_TaskWorkbook(CStr(taskId))
+        
+        If Not wbStats.Exists(wbName) Then
+            wbStats(wbName) = 0
+        End If
+        wbStats(wbName) = wbStats(wbName) + 1
+    Next
     
+    ' 构建消息
+    Dim msg As String
     msg = "========================================" & vbCrLf
-    msg = msg & "  Lua 协程任务管理器" & vbCrLf
+    msg = msg & "  Lua 协程任务管理器（单实例）" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
     
     msg = msg & "任务总数: " & g_TaskFunc.Count & vbCrLf
     msg = msg & "活跃队列: " & g_TaskQueue.Count & vbCrLf
     msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
+    msg = msg & vbCrLf & "按工作簿分组:" & vbCrLf
+    
+    Dim wb As Variant
+    For Each wb In wbStats.Keys
+        msg = msg & "  [" & CStr(wb) & "]: " & wbStats(CStr(wb)) & " 个任务" & vbCrLf
+    Next
+    
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     
     ' 统计各状态任务数
     For Each taskId In g_TaskFunc.Keys
@@ -579,35 +595,57 @@ Private Sub LuaConfigMenu_SetSchedulerBatchSize()
     ResumeScheduler
 End Sub
 
-' 手动设置 functions.lua 路径（供高级用户使用）
-Private Sub LuaConfigMenu_SetFunctionsPath(filePath As String)
-    On Error GoTo ErrorHandler
+' ===== 新增：按工作簿过滤任务 =====
+Private Function GetTasksByWorkbook(wbName As String) As Object
+    Dim result As Object
+    Set result = CreateObject("System.Collections.ArrayList")
     
-    If Not g_Initialized Then
-        If Not InitLuaState() Then
-            MsgBox "Lua 初始化失败", vbCritical
-            Exit Sub
+    If g_TaskWorkbook Is Nothing Then Exit Function
+    
+    Dim taskId As Variant
+    For Each taskId In g_TaskWorkbook.Keys
+        If g_TaskWorkbook(CStr(taskId)) = wbName Then
+            result.Add taskId
         End If
-    End If
+    Next
     
-    Dim fso As Object
-    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set GetTasksByWorkbook = result
+End Function
+
+' ===== 新增：清理特定工作簿的任务 =====
+Public Sub CleanupWorkbookTasks(wbName As String)
+    On Error Resume Next
     
-    If Not fso.FileExists(filePath) Then
-        MsgBox "文件不存在: " & filePath, vbExclamation
-        Exit Sub
-    End If
+    If g_TaskWorkbook Is Nothing Then Exit Sub
     
-    g_LuaState.functionsPath = filePath
-    g_LuaState.lastModified = #1/1/1900#
+    Dim tasksToRemove As Object
+    Set tasksToRemove = GetTasksByWorkbook(wbName)
     
-    If TryLoadFunctionsFile() Then
-        MsgBox "functions.lua 已加载: " & filePath, vbInformation
-    Else
-        MsgBox "加载失败", vbCritical
-    End If
-    
-    Exit Sub
-ErrorHandler:
-    MsgBox "设置路径失败: " & Err.Description, vbCritical
+    Dim i As Long
+    For i = 0 To tasksToRemove.Count - 1
+        Dim tid As String
+        tid = CStr(tasksToRemove(i))
+        
+        ' 从队列中移除
+        If g_TaskQueue.Exists(tid) Then g_TaskQueue.Remove tid
+        
+        ' 删除所有相关数据
+        g_TaskFunc.Remove tid
+        g_TaskWorkbook.Remove tid
+        g_TaskStartArgs.Remove tid
+        g_TaskResumeSpec.Remove tid
+        g_TaskCell.Remove tid
+        g_TaskStatus.Remove tid
+        g_TaskProgress.Remove tid
+        g_TaskMessage.Remove tid
+        g_TaskValue.Remove tid
+        g_TaskError.Remove tid
+        g_TaskCoThread.Remove tid
+    Next i
+End Sub
+
+' ===== 修改：工作簿关闭时清理其任务 =====
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    ' 只清理当前工作簿的任务
+    CleanupWorkbookTasks ThisWorkbook.Name
 End Sub
