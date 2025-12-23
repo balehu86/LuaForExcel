@@ -37,7 +37,9 @@ Option Explicit
     Private Declare PtrSafe Function lua_next Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
     Private Declare PtrSafe Sub lua_pushvalue Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
     Private Declare PtrSafe Function lua_getfield Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal k As String) As Long
-    ' 协程 API
+    Private Declare PtrSafe Sub lua_setfield Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal k As String)
+
+        ' 协程 API
     Private Declare PtrSafe Function lua_newthread Lib "lua54.dll" (ByVal L As LongPtr) As LongPtr
     Private Declare PtrSafe Function lua_resume Lib "lua54.dll" (ByVal L As LongPtr, ByVal from As LongPtr, ByVal narg As Long, ByVal nres As LongPtr) As Long
     Private Declare PtrSafe Function lua_status Lib "lua54.dll" (ByVal L As LongPtr) As Long
@@ -60,7 +62,6 @@ Private Const LUA_ERRRUN = 2
 Private m_LuaState As LongPtr
 Private m_Workbook As Workbook
 Private m_WorkbookKey As String
-Private m_FunctionsPath As String
 Private m_LastModified As Date
 ' 路径管理
 Private m_SystemMainPath As String      ' 系统 main.lua 路径
@@ -103,8 +104,8 @@ Public Sub BindWorkbook(wb As Workbook)
     m_WorkbookKey = CoreRegistry.GetWorkbookKey(wb)
     
     ' 设置路径
-    ' 假设系统路径为：Application.Path & "\lua\main.lua"
-    m_SystemMainPath = Application.Path & "\lua\main.lua"
+    ' 假设系统路径为："C:\lua\main.lua"
+    m_SystemMainPath = "C:\Lua\LuaForExcel\main.lua"
     m_FunctionsPath = wb.Path & "\functions.lua"
     
     ' 初始化修改时间
@@ -123,13 +124,11 @@ End Function
 Public Sub Tick()
     On Error GoTo ErrorHandler
 
-    ' 无活跃任务，直接返回
     If m_ActiveQueue Is Nothing Or m_ActiveQueue.Count = 0 Then Exit Sub
 
-    ' 热重载检查（轻量）
     CheckHotReload
 
-    ' 复制活跃任务 ID（快照，防止遍历中修改）
+    ' 快照活跃任务
     Dim taskIds() As Variant
     ReDim taskIds(0 To m_ActiveQueue.Count - 1)
 
@@ -165,26 +164,25 @@ Public Sub Tick()
             Dim task As Object
             Set task = m_TaskTable(taskId)
 
-            ' ===== 完成 / 错误任务：移出活跃队列 =====
             If task("status") = "done" Or task("status") = "error" Then
                 toRemove.Add taskId
             End If
         Else
-            ' 理论上不应发生，防御性清理
             toRemove.Add taskId
         End If
 
         cur = (cur + 1) Mod total
     Loop
 
-    ' ===== 更新 Round-Robin 游标 =====
+    ' ===== 修复：在删除前更新游标 =====
     m_RoundRobinCursor = cur
-
-    If m_RoundRobinCursor >= m_ActiveQueue.Count Then
+    
+    ' 如果游标超出范围，重置为 0
+    If m_RoundRobinCursor >= total Then
         m_RoundRobinCursor = 0
     End If
 
-    ' ===== 清理非活跃任务 =====
+    ' 清理非活跃任务
     Dim i As Long
     For i = 0 To toRemove.Count - 1
         If m_ActiveQueue.Exists(toRemove(i)) Then
@@ -366,7 +364,7 @@ Public Sub Dispose()
     Set m_ActiveQueue = Nothing
 End Sub
 
-' ====同步 Lua 调用接口====
+' ====LuaEval LuaGet 调用接口====
 ' 执行 Lua 表达式
 Public Function EvalExpression(expression As String) As Variant
     On Error GoTo ErrorHandler
@@ -416,21 +414,18 @@ Public Function CallFunction(funcName As String, args As Variant) As Variant
     lua_getglobal m_LuaState, funcName
     If lua_type(m_LuaState, -1) <> LUA_TFUNCTION Then
         lua_settop m_LuaState, 0
-        CallFunction = "#ERROR: 函数 '" & funcName & "' 不存在"
+        CallFunction = "ERROR: 函数 '" & funcName & "' 不存在"
         Exit Function
     End If
     
     ' 推入参数
     Dim i As Long, argCount As Long
     argCount = 0
-    
-    If IsArray(args) Then
-        For i = LBound(args) To UBound(args)
-            PushValue m_LuaState, args(i)
-            argCount = argCount + 1
-        Next
-    End If
-    
+    For i = LBound(args) To UBound(args)
+        PushValue m_LuaState, args(i)
+        argCount = argCount + 1
+    Next
+
     ' 调用函数
     Dim result As Long
     result = lua_pcallk(m_LuaState, argCount, -1, 0, 0, 0)
@@ -547,18 +542,6 @@ Public Function ReloadMainLua() As Boolean
         m_LastMainModified = FileDateTime(m_SystemMainPath)
     End If
 End Function
-' 自动检查热更新
-Private Sub CheckHotReload()
-    If Not m_HotReloadEnabled Then Exit Sub
-    
-    On Error Resume Next
-    Dim currentModified As Date
-    currentModified = FileDateTime(m_FunctionsPath)
-    
-    If Err.Number <> 0 Or currentModified = m_LastModified Then Exit Sub
-    
-    ReloadFunctions
-End Sub
 ' 加载 Lua 文件（无验证，用于初始加载）
 Private Function LoadLuaFile(filePath As String, moduleName As String) As Boolean
     On Error GoTo ErrorHandler
@@ -655,36 +638,83 @@ End Function
 ' ====协程调度（私有）====
 Private Sub ResumeTask(taskId As String)
     On Error GoTo ErrorHandler
-    
+
     Dim task As Object
     Set task = m_TaskTable(taskId)
-    
+
     If task("status") <> "yielded" Then Exit Sub
-    
+
     Dim coThread As LongPtr
     coThread = task("coThread")
-    
+
     lua_settop coThread, 0
-    
-    ' 推入 resume 参数
+
     Dim nargs As Long
     nargs = 0
-    If IsArray(task("resumeSpec")) Then
-        Dim i As Long
-        For i = LBound(task("resumeSpec")) To UBound(task("resumeSpec"))
-            PushValue coThread, task("resumeSpec")(i)
-            nargs = nargs + 1
-        Next
+
+    ' 1. 优先使用 resumeSpec
+    If task.Exists("resumeSpec") Then
+        If IsArray(task("resumeSpec")) Then
+            Dim i As Long
+            For i = LBound(task("resumeSpec")) To UBound(task("resumeSpec"))
+                Dim spec As Variant
+                spec = task("resumeSpec")(i)
+
+                If IsMissing(spec) Or IsEmpty(spec) Then GoTo NextSpec
+
+                ' Range 对象
+                If TypeName(spec) = "Range" Then
+                    PushValue coThread, spec.Value
+                    nargs = nargs + 1
+
+                ' 字符串地址
+                ElseIf VarType(spec) = vbString Then
+                    On Error Resume Next
+                    Dim rngVal As Variant
+                    rngVal = m_Workbook.Application.Range(spec).Value
+                    If Err.Number = 0 Then
+                        PushValue coThread, rngVal
+                        nargs = nargs + 1
+                    End If
+                    On Error GoTo ErrorHandler
+
+                ' 其他值
+                Else
+                    PushValue coThread, spec
+                    nargs = nargs + 1
+                End If
+NextSpec:
+            Next
+        End If
     End If
-    
-    ' Resume
+
+    ' 2. 修复：正确获取任务单元格的值
+    If nargs = 0 Then
+        Dim cellAddr As String
+        cellAddr = task("cellAddr")
+        
+        On Error Resume Next
+        Dim cellVal As Variant
+        cellVal = m_Workbook.Application.Range(cellAddr).Value
+        
+        If Err.Number = 0 Then
+            If Not IsEmpty(cellVal) And Not IsError(cellVal) Then
+                PushValue coThread, cellVal
+                nargs = 1
+            End If
+        End If
+        On Error GoTo ErrorHandler
+    End If
+
+    ' 3. Resume 协程
     Dim nres As LongPtr
     Dim result As Long
+
     result = lua_resume(coThread, m_LuaState, nargs, VarPtr(nres))
-    
+
     HandleResumeResult taskId, result, CLng(nres)
     Exit Sub
-    
+
 ErrorHandler:
     task("status") = "error"
     task("error") = "Resume 错误: " & Err.Description
@@ -1048,26 +1078,6 @@ End Sub
 Public Function GetHotReloadEnabled() As Boolean
     GetHotReloadEnabled = m_HotReloadEnabled
 End Function
-' 获取所有任务信息（用于批量操作）
-Public Function GetAllTaskIds() As Variant
-    If m_TaskTable.Count = 0 Then
-        GetAllTaskIds = Array()
-        Exit Function
-    End If
-    
-    Dim result() As String
-    ReDim result(0 To m_TaskTable.Count - 1)
-    
-    Dim i As Long
-    Dim taskId As Variant
-    i = 0
-    For Each taskId In m_TaskTable.Keys
-        result(i) = CStr(taskId)
-        i = i + 1
-    Next
-    
-    GetAllTaskIds = result
-End Function
 ' 清理已完成/错误的任务
 Public Function CleanupFinishedTasks() As Long
     Dim count As Long
@@ -1095,16 +1105,33 @@ Public Function CleanupFinishedTasks() As Long
 End Function
 ' 清除所有任务
 Public Sub ClearAllTasks()
-    Dim taskIds As Variant
-    taskIds = GetAllTaskIds()
-    
-    If Not IsArray(taskIds) Then Exit Sub
-    
+    On Error GoTo ErrorHandler
+
+    If m_TaskTable Is Nothing Or m_TaskTable.Count = 0 Then Exit Sub
+
+    ' 先快照所有 taskId，避免遍历中修改 Dictionary
+    Dim taskIds() As Variant
+    taskIds = m_TaskTable.Keys
+
     Dim i As Long
     For i = LBound(taskIds) To UBound(taskIds)
-        TerminateTask taskIds(i)
-    Next
+        TerminateTask CStr(taskIds(i))
+    Next i
+
+    ' 兜底清理（理论上应已清空）
+    If Not m_ActiveQueue Is Nothing Then
+        m_ActiveQueue.RemoveAll
+    End If
+
+    ' 状态复位
+    m_RoundRobinCursor = 0
+
+    Exit Sub
+
+ErrorHandler:
+    Debug.Print "[ClearAllTasks] Error: " & Err.Description
 End Sub
+
 ' 获取任务统计信息
 Public Function GetTaskStats() As String
     Dim total As Long, defined As Long, yielded As Long
@@ -1172,90 +1199,105 @@ Public Function GetFileStatus() As String
     GetFileStatus = msg
 End Function
 
-Private Sub GetAllTasksInfo()
-    On Error GoTo ErrorHandler
-    
-    If g_TaskFunc Is Nothing Then
-        InitCoroutineSystem
-    End If
-    
-    If g_TaskFunc.Count = 0 Then
-        MsgBox "当前没有任何任务。", vbInformation, "任务列表"
-        Exit Sub
-    End If
-    
-    ' 构建任务信息字符串
+Public Function GetAllTasksInfo() As String
     Dim msg As String
     Dim taskId As Variant
-    Dim taskCount As Long
-    Dim runningCount As Long, yieldedCount As Long, doneCount As Long, errorCount As Long
+    Dim task As Object
+    
+    Dim total As Long
+    Dim defined As Long, yielded As Long
+    Dim done As Long, errored As Long, paused As Long
+    
+    total = m_TaskTable.Count
     
     msg = "========================================" & vbCrLf
-    msg = msg & "  Lua 协程任务管理器" & vbCrLf
+    msg = msg & "  Lua 协程任务列表" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
     
-    msg = msg & "任务总数: " & g_TaskFunc.Count & vbCrLf
-    msg = msg & "活跃队列: " & g_TaskQueue.Count & vbCrLf
-    msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
+    msg = msg & "任务总数: " & total & vbCrLf & vbCrLf
     
-    ' 统计各状态任务数
-    For Each taskId In g_TaskFunc.Keys
-        Select Case g_TaskStatus(CStr(taskId))
-            Case "running": runningCount = runningCount + 1
-            Case "yielded": yieldedCount = yieldedCount + 1
-            Case "done": doneCount = doneCount + 1
-            Case "error": errorCount = errorCount + 1
+    ' ===== 统计状态 =====
+    For Each taskId In m_TaskTable.Keys
+        Set task = m_TaskTable(taskId)
+        Select Case task("status")
+            Case "defined": defined = defined + 1
+            Case "yielded": yielded = yielded + 1
+            Case "done": done = done + 1
+            Case "error": errored = errored + 1
+            Case "paused": paused = paused + 1
         End Select
-    Next taskId
+    Next
     
     msg = msg & "状态统计:" & vbCrLf
-    msg = msg & "   运行中: " & runningCount & vbCrLf
-    msg = msg & "   暂停中: " & yieldedCount & vbCrLf
-    msg = msg & "   已完成: " & doneCount & vbCrLf
-    msg = msg & "   错误: " & errorCount & vbCrLf
-    msg = msg & vbCrLf & "========================================" & vbCrLf & vbCrLf
+    msg = msg & "  defined : " & defined & vbCrLf
+    msg = msg & "  yielded : " & yielded & vbCrLf
+    msg = msg & "  paused  : " & paused & vbCrLf
+    msg = msg & "  done    : " & done & vbCrLf
+    msg = msg & "  error   : " & errored & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
     
-    ' 详细列出每个任务
-    taskCount = 0
-    For Each taskId In g_TaskFunc.Keys
-        taskCount = taskCount + 1
-        msg = msg & "【任务 #" & taskCount & "】" & vbCrLf
-        msg = msg & "  ID: " & CStr(taskId) & vbCrLf
-        msg = msg & "  函数: " & g_TaskFunc(CStr(taskId)) & vbCrLf
-        msg = msg & "  单元格: " & g_TaskCell(CStr(taskId)) & vbCrLf
-        msg = msg & "  状态: " & g_TaskStatus(CStr(taskId)) & vbCrLf
-        msg = msg & "  进度: " & Format(g_TaskProgress(CStr(taskId)), "0.0") & "%" & vbCrLf
+    ' ===== 逐任务详情 =====
+    Dim index As Long
+    index = 1
+    
+    For Each taskId In m_TaskTable.Keys
+        Set task = m_TaskTable(taskId)
         
-        ' 显示消息
-        Dim msgText As String
-        msgText = CStr(g_TaskMessage(CStr(taskId)))
-        If Len(msgText) > 50 Then msgText = Left(msgText, 47) & "..."
-        msg = msg & "  消息: " & msgText & vbCrLf
+        msg = msg & "【任务 #" & index & "】" & vbCrLf
+        msg = msg & "ID      : " & taskId & vbCrLf
+        msg = msg & "函数    : " & task("funcName") & vbCrLf
+        msg = msg & "单元格  : " & task("cellAddr") & vbCrLf
+        msg = msg & "状态    : " & task("status") & vbCrLf
+        msg = msg & "进度    : " & Format(task("progress"), "0.0") & "%" & vbCrLf
         
-        ' 如果有错误，显示错误信息
-        If g_TaskStatus(CStr(taskId)) = "error" Then
-            Dim errText As String
-            errText = CStr(g_TaskError(CStr(taskId)))
-            If Len(errText) > 60 Then errText = Left(errText, 57) & "..."
-            msg = msg & "   错误: " & errText & vbCrLf
+        If Not IsEmpty(task("message")) Then
+            msg = msg & "消息    : " & CStr(task("message")) & vbCrLf
         End If
         
-        ' 显示是否在活跃队列中
-        If g_TaskQueue.Exists(CStr(taskId)) Then
-            msg = msg & "  队列: 是" & vbCrLf
+        If task("status") = "error" And task("error") <> "" Then
+            msg = msg & "错误    : " & task("error") & vbCrLf
         End If
+        
+        msg = msg & "活跃队列: " & IIf(m_ActiveQueue.Exists(taskId), "是", "否") & vbCrLf
         
         msg = msg & "----------------------------------------" & vbCrLf
-    Next taskId
+        index = index + 1
+    Next
     
-    ' 显示消息框
-    MsgBox msg, vbInformation, "Lua 协程任务列表 (" & g_TaskFunc.Count & " 个任务)"
+    GetAllTasksInfo = msg
+End Function
+
+Public Function GetTaskDetail(taskId As String) As Object
+    If Not m_TaskTable.Exists(taskId) Then
+        Set GetTaskDetail = Nothing
+        Exit Function
+    End If
+
+    Dim src As Object
+    Set src = m_TaskTable(taskId)
+
+    ' 返回一个只读副本（防止 LuaMenu 篡改内部状态）
+    Dim info As Object
+    Set info = CreateObject("Scripting.Dictionary")
+
+    info("taskId") = taskId
+    info("funcName") = src("funcName")
+    info("cellAddr") = src("cellAddr")
+    info("status") = src("status")
+    info("progress") = src("progress")
+    info("message") = src("message")
+    info("value") = src("value")
+    info("error") = src("error")
+    info("coThread") = src("coThread")
+    info("startArgs") = src("startArgs")
+    info("resumeSpec") = src("resumeSpec")
+
+    Set GetTaskDetail = info
+End Function
     
-    Exit Sub
-ErrorHandler:
-    MsgBox "显示任务信息时出错: " & Err.Description, vbCritical, "错误"
-End Sub' ============================================
+Public Property Get GetWorkbook() As Workbook
+    Set GetWorkbook = m_Workbook
+End Property' ============================================
 ' Scheduler.bas - 进程级调度器
 ' ============================================
 ' 设计原因：
@@ -1266,35 +1308,35 @@ End Sub' ============================================
 
 Option Explicit
 
-' ===== 全局状态（仅调度器可见）=====
+' 全局状态（仅调度器可见）
 Private g_Runnables As Collection      ' WorkbookRuntime 集合
 Private g_SchedulerRunning As Boolean
-Private g_SchedulerIntervalSec As Double
 Private g_NextTaskId As Long
+Private g_SchedulerIntervalMs As Integer
+Private g_SchedulerIntervalInited As Boolean
+' 配置常量
+Private Const DEFAULT_INTERVAL_Ms As Integer = 1000  ' 1000 毫秒
 
-' ===== 配置常量 =====
-Private Const DEFAULT_INTERVAL_SEC As Double = 1#  ' 1 秒
-
-' ============================================
-' 公共接口
-' ============================================
-
+' ====公共接口====
 ' 初始化调度器
 Public Sub InitScheduler()
+    ' 修复：确保 g_Runnables 被初始化
     If g_Runnables Is Nothing Then
         Set g_Runnables = New Collection
-        g_SchedulerIntervalSec = DEFAULT_INTERVAL_SEC
+    End If
+    
+    If Not g_SchedulerIntervalInited Then
+        g_SchedulerIntervalMs = DEFAULT_INTERVAL_Ms
+        g_SchedulerIntervalInited = True
         g_NextTaskId = 0
     End If
 End Sub
-
 ' 注册运行时（由 CoreRegistry 调用）
 Public Sub RegisterRunnable(rt As WorkbookRuntime)
     If g_Runnables Is Nothing Then InitScheduler
     On Error Resume Next
     g_Runnables.Add rt
 End Sub
-
 ' 注销运行时
 Public Sub UnregisterRunnable(rt As WorkbookRuntime)
     On Error Resume Next
@@ -1306,16 +1348,16 @@ Public Sub UnregisterRunnable(rt As WorkbookRuntime)
         End If
     Next
 End Sub
-
 ' 启动调度器
 Public Sub StartScheduler()
-    If g_SchedulerRunning Then Exit Sub
     If g_Runnables Is Nothing Then InitScheduler
-    
+    If g_SchedulerRunning Then
+        MsgBox "调度器已启动", vbInformation
+        Exit Sub
+    End If
     g_SchedulerRunning = True
     SchedulerTick
 End Sub
-
 ' 停止调度器
 Public Sub StopScheduler()
     g_SchedulerRunning = False
@@ -1324,48 +1366,48 @@ Public Sub StopScheduler()
                        Procedure:="Scheduler.SchedulerTick", _
                        Schedule:=False
 End Sub
-
 ' 设置调度间隔
-Public Sub SetSchedulerInterval(intervalSec As Double)
-    If intervalSec < 0.01 Or intervalSec > 3600 Then
-        Err.Raise vbObjectError + 1, , "间隔必须在 0.01-3600 秒之间"
+Public Sub SetSchedulerInterval(intervalMs As Double)
+    If intervalMs < 10 Or intervalMs > 3600000 Then
+        Err.Raise vbObjectError + 1, , "间隔必须在 10-3600000 毫秒之间"
     End If
-    g_SchedulerIntervalSec = intervalSec
+    g_SchedulerIntervalMs = intervalMs
 End Sub
-
 ' 生成唯一 TaskId（工具函数，供 WorkbookRuntime 使用）
 Public Function GenerateTaskId(wbKey As String, cellAddr As String) As String
     GenerateTaskId = "TASK_" & g_NextTaskId & "_" & wbKey & "_" & cellAddr
     g_NextTaskId = g_NextTaskId + 1
 End Function
 
-' ============================================
-' 内部实现
-' ============================================
+Property Get IsRunning() As Boolean
+  IsRunning = g_SchedulerRunning
+End Property
 
+' ====内部实现====
 ' 调度心跳（OnTime 回调）
 Public Sub SchedulerTick()
     On Error Resume Next
     
-    ' 检查运行标志
     If Not g_SchedulerRunning Then Exit Sub
     If g_Runnables Is Nothing Then Exit Sub
     
-    ' 关键设计：调度器只知道接口，不知道实现
-    ' 20 行核心逻辑，符合架构要求
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
 
     Dim rt As WorkbookRuntime
-    Dim needsRefresh As Boolean
-    needsRefresh = False
+    Dim hasWork As Boolean
+    hasWork = False
     
-    ' 遍历所有运行时
+    ' 优化：只标记有工作的 runtime
+    Dim needsCalc As Boolean
+    needsCalc = False
+    
     For Each rt In g_Runnables
         If rt.HasRunnable Then
             rt.Tick
-        needsRefresh = True
+            hasWork = True
+            needsCalc = True
         End If
     Next rt
     
@@ -1373,20 +1415,23 @@ Public Sub SchedulerTick()
     Application.EnableEvents = True
     Application.ScreenUpdating = True
     
-    ' 只有状态变化时才刷新
-    If needsRefresh Then
+    ' 只在有实际工作时才刷新
+    If needsCalc Then
         On Error Resume Next
         ActiveSheet.Calculate
     End If
     
-    ' 继续调度
-    If g_SchedulerRunning And g_Runnables.Count > 0 Then
-        Application.OnTime EarliestTime:=Now + g_SchedulerIntervalSec / 86400#, Procedure:="Scheduler.SchedulerTick"
+    ' 继续调度或停止
+    If hasWork Or g_Runnables.Count > 0 Then
+        Dim nextTime As Date
+        nextTime = Now + TimeValue("00:00:01") * g_SchedulerIntervalMs / 1000
+        Application.OnTime EarliestTime:=nextTime, _
+                           Procedure:="Scheduler.SchedulerTick", _
+                           Schedule:=True
     Else
         g_SchedulerRunning = False
     End If
-End Sub
-' ============================================
+End Sub' ============================================
 ' CoreRegistry.bas - 运行时注册表（完整版）
 ' ============================================
 ' 设计原因：
@@ -1402,12 +1447,9 @@ Option Explicit
 ' ===== 全局注册表（仅本模块访问）=====
 Private g_RuntimeByWorkbook As Object  ' wbKey → WorkbookRuntime
 Private g_RuntimeByTaskIndex As Object ' taskId → WorkbookRuntime
-Private g_TaskIdByCellAddr As Object   ' cellAddr → taskId（新增）
+Private g_TaskIdByCellAddr As Object   ' cellAddr → taskId
 
-' ============================================
-' 初始化
-' ============================================
-
+' ====初始化====
 Private Sub InitRegistry()
     If g_RuntimeByWorkbook Is Nothing Then
         Set g_RuntimeByWorkbook = CreateObject("Scripting.Dictionary")
@@ -1416,10 +1458,7 @@ Private Sub InitRegistry()
     End If
 End Sub
 
-' ============================================
-' 运行时管理
-' ============================================
-
+' ====运行时管理====
 ' 注册工作簿运行时
 Public Sub RegisterWorkbookRuntime(wb As Workbook, rt As WorkbookRuntime)
     InitRegistry
@@ -1436,17 +1475,14 @@ Public Sub UnregisterWorkbookRuntime(wb As Workbook)
     InitRegistry
     Dim wbKey As String
     wbKey = GetWorkbookKey(wb)
-    
+
     If g_RuntimeByWorkbook.Exists(wbKey) Then
         Dim rt As WorkbookRuntime
         Set rt = g_RuntimeByWorkbook(wbKey)
-        
         ' 从调度器注销
         Scheduler.UnregisterRunnable rt
-        
         ' 清理资源
         rt.Dispose
-        
         ' 从注册表移除
         g_RuntimeByWorkbook.Remove wbKey
     End If
@@ -1465,10 +1501,7 @@ Public Function GetRuntimeByWorkbook(wb As Workbook) As WorkbookRuntime
     End If
 End Function
 
-' ============================================
-' Task 路由表（GlobalTaskIndex）
-' ============================================
-
+' ====Task 路由表（GlobalTaskIndex）====
 ' 注册任务到运行时的映射
 Public Sub RegisterTask(taskId As String, rt As WorkbookRuntime, cellAddr As String)
     InitRegistry
@@ -1736,80 +1769,67 @@ End Sub
 Public Sub LuaTaskMenu_ShowTaskDetail()
     Dim rt As WorkbookRuntime
     Set rt = GetRuntimeFromSelection()
-    If rt Is Nothing Then Exit Sub
-    
+    If rt Is Nothing Then
+        MsgBox "未找到工作簿运行时", vbExclamation
+        Exit Sub
+    End If
+
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
     If taskId = "" Then
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
         Exit Sub
     End If
-    
+
+    Dim info As Object
+    Set info = rt.GetTaskDetail(taskId)
+    If info Is Nothing Then
+        MsgBox "任务不存在或已被清理。", vbExclamation
+        Exit Sub
+    End If
+
     Dim msg As String
     msg = "========================================" & vbCrLf
-    msg = msg & "  任务详细信息" & vbCrLf
+    msg = msg & "  Lua 任务详情" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
-    
-    msg = msg & "任务ID: " & taskId & vbCrLf
-    msg = msg & "函数名: " & g_TaskFunc(taskId) & vbCrLf
-    msg = msg & "单元格: " & g_TaskCell(taskId) & vbCrLf
-    msg = msg & "状态: " & g_TaskStatus(taskId) & vbCrLf
-    msg = msg & "进度: " & Format(g_TaskProgress(taskId), "0.00") & "%" & vbCrLf
-    msg = msg & "消息: " & CStr(g_TaskMessage(taskId)) & vbCrLf
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
-    ' 启动参数
-    msg = msg & "启动参数:" & vbCrLf
-    Dim startArgs As Variant
-    startArgs = g_TaskStartArgs(taskId)
-    If IsArray(startArgs) Then
-        Dim i As Long
-        For i = LBound(startArgs) To UBound(startArgs)
-            msg = msg & "   [" & i & "] " & CStr(startArgs(i)) & vbCrLf
-        Next i
-    Else
-        msg = msg & "   (无)" & vbCrLf
-    End If
-    ' Resume 参数
-    msg = msg & vbCrLf & "Resume 参数:" & vbCrLf
-    Dim resumeSpec As Variant
-    resumeSpec = g_TaskResumeSpec(taskId)
-    If IsArray(resumeSpec) Then
-        For i = LBound(resumeSpec) To UBound(resumeSpec)
-            msg = msg & "   [" & i & "] " & CStr(resumeSpec(i)) & vbCrLf
-        Next i
-    Else
-        msg = msg & "   (无)" & vbCrLf
-    End If
-    ' 当前值
-    msg = msg & vbCrLf & "当前值:" & vbCrLf
-    Dim value As Variant
-    value = g_TaskValue(taskId)
-    If IsArray(value) Then
-        msg = msg & "   (数组，维度: " & ArrayDimensions(value) & ")" & vbCrLf
-    ElseIf IsEmpty(value) Then
-        msg = msg & "   (空)" & vbCrLf
-    Else
-        Dim valueStr As String
-        valueStr = CStr(value)
-        If Len(valueStr) > 100 Then valueStr = Left(valueStr, 97) & "..."
-        msg = msg & "   " & valueStr & vbCrLf
-    End If
-    ' 错误信息
-    If g_TaskStatus(taskId) = "error" Then
-        msg = msg & vbCrLf & " 错误信息:" & vbCrLf
-        msg = msg & "   " & g_TaskError(taskId) & vbCrLf
-    End If
-    ' 调度信息
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
-    msg = msg & "在活跃队列中: " & IIf(g_TaskQueue.Exists(taskId), "是", "否") & vbCrLf
-    msg = msg & "协程线程: " & IIf(g_TaskCoThread(taskId) = 0, "未创建", "0x" & Hex(g_TaskCoThread(taskId))) & vbCrLf
-    
-    MsgBox msg, vbInformation, "任务详情 - " & taskId
-    
-    Exit Sub
 
-ErrorHandler:
-    MsgBox "显示任务详情时出错: " & Err.Description, vbCritical, "错误"
+    msg = msg & "任务 ID: " & info("taskId") & vbCrLf
+    msg = msg & "函数名: " & info("funcName") & vbCrLf
+    msg = msg & "单元格: " & info("cellAddr") & vbCrLf
+    msg = msg & "状态: " & info("status") & vbCrLf
+    msg = msg & "进度: " & Format(info("progress"), "0.00") & "%" & vbCrLf
+
+    If Not IsEmpty(info("message")) Then
+        msg = msg & "消息: " & CStr(info("message")) & vbCrLf
+    End If
+
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+
+    ' 返回值
+    If IsArray(info("value")) Then
+        msg = msg & "返回值: (数组)" & vbCrLf
+    ElseIf IsEmpty(info("value")) Then
+        msg = msg & "返回值: (空)" & vbCrLf
+    Else
+        msg = msg & "返回值: " & CStr(info("value")) & vbCrLf
+    End If
+
+    ' 错误信息
+    If info("status") = "error" Then
+        msg = msg & vbCrLf & "错误信息:" & vbCrLf
+        msg = msg & CStr(info("error")) & vbCrLf
+    End If
+
+    ' 协程
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+    msg = msg & "协程线程: "
+    If info("coThread") = 0 Then
+        msg = msg & "未创建" & vbCrLf
+    Else
+        msg = msg & "0x" & Hex(info("coThread")) & vbCrLf
+    End If
+
+    MsgBox msg, vbInformation, "Lua 任务详情"
 End Sub
 
 ' ============================================
@@ -1838,11 +1858,7 @@ Public Sub LuaSchedulerMenu_CleanupFinishedTasks()
         MsgBox "未找到工作簿运行时", vbExclamation
         Exit Sub
     End If
-    
-    ' 注意：这需要在 WorkbookRuntime 中添加 CleanupFinishedTasks 方法
-    MsgBox "清理功能需要在 WorkbookRuntime 中实现 CleanupFinishedTasks()" & vbCrLf & _
-           "当前版本请手动终止已完成的任务", _
-           vbInformation
+    rt.CleanUpFinishedTasks
 End Sub
 
 Public Sub LuaSchedulerMenu_ClearAllTasks()
@@ -1857,10 +1873,8 @@ Public Sub LuaSchedulerMenu_ClearAllTasks()
     result = MsgBox("确定删除所有任务？此操作不可撤销！", vbYesNo + vbExclamation)
     If result <> vbYes Then Exit Sub
     
-    ' 注意：这需要在 WorkbookRuntime 中添加 ClearAllTasks 方法
-    MsgBox "清除功能需要在 WorkbookRuntime 中实现 ClearAllTasks()" & vbCrLf & _
-           "当前版本请手动终止各个任务", _
-           vbInformation
+    rt.ClearAllTasks
+    MsgBox "所有任务已删除", vbInformation
 End Sub
 
 Public Sub LuaSchedulerMenu_ShowAllTasks()
@@ -1871,10 +1885,7 @@ Public Sub LuaSchedulerMenu_ShowAllTasks()
         Exit Sub
     End If
     
-    ' 注意：这需要在 WorkbookRuntime 中添加 GetAllTasksInfo 方法
-    MsgBox "显示所有任务功能需要在 WorkbookRuntime 中实现 GetAllTasksInfo()" & vbCrLf & _
-           "当前版本请在各任务单元格上右键查看详情", _
-           vbInformation
+    MsgBox rt.GetAllTasksInfo(), vbInformation, "Lua 任务列表"
 End Sub
 
 Public Sub LuaSchedulerMenu_StartScheduler()
@@ -1934,42 +1945,39 @@ Public Sub LuaConfigMenu_ReloadFunctions()
     End If
 End Sub
 
-Private Sub LuaConfigMenu_SetSchedulerBatchSize()
-    If g_SchedulerRunning Then
-        StopScheduler
-    End If
-
-    Dim v As Variant
-    v = Application.InputBox( _
-            "请输入每次调度的最大任务数（>=1）", _
-            "调度参数", _
-            g_MaxIterationsPerTick, _
-            Type:=1 _
-        )
-
-    If v = False Then Exit Sub
-    If v < 1 Or v <> CLng(v) Then
-        MsgBox "请输入 >=1 的整数", vbExclamation
+Public Sub LuaConfigMenu_SetSchedulerInterval()
+    Dim i As String
+    i = InputBox("请输入调度间隔（秒）：", "设置调度间隔", "1")
+    
+    If i = "" Then Exit Sub
+    
+    On Error GoTo ErrorHandler
+    Dim intervalSec As Double
+    intervalSec = CDbl(i)
+    If intervalSec < 0.01 Or intervalSec > 3600 Then
+        MsgBox "间隔必须在 0.01-3600 秒之间", vbExclamation
         Exit Sub
     End If
-
-    g_MaxIterationsPerTick = CLng(v)
-    ResumeScheduler
+    
+    Scheduler.SetSchedulerInterval intervalSec * 1000
+    MsgBox "调度间隔已设置为 " & intervalSec & " 秒", vbInformation
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "输入无效：" & Err.Description, vbCritical
 End Sub' ============================================
-' UDF.bas - 用户自定义函数（完整版）
+' UDF.bas - 用户自定义函数
 ' ============================================
 ' 设计原因：
 ' 1. 提供 Excel 公式接口
 ' 2. 通过 CoreRegistry 路由到对应 WorkbookRuntime
 ' 3. 不直接访问 TaskTable
-' 4. 新增 LuaEval 和 LuaCall 用于同步 Lua 调用
+' 4. LuaEval 和 LuaCall 用于同步 Lua 调用
 ' ============================================
 
 Option Explicit
 
-' ============================================
-' LuaTask - 定义协程任务
-' ============================================
+' ====LuaTask - 定义协程任务====
 ' 用法：=LuaTask("funcName", arg1, arg2, "|", resumeArg1, resumeArg2)
 ' 返回：taskId（字符串）
 Public Function LuaTask(ParamArray params() As Variant) As String
@@ -2052,10 +2060,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
 ErrorHandler:
     LuaTask = "#ERROR: " & Err.Description
 End Function
-
-' ============================================
-' LuaGet - 获取任务字段
-' ============================================
+' ====LuaGet - 获取任务字段====
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
     
@@ -2077,11 +2082,9 @@ ErrorHandler:
     LuaGet = "#ERROR: " & Err.Description
 End Function
 
-' ============================================
-' LuaEval - 执行 Lua 表达式（同步）
-' ============================================
-' 用法：=LuaEval("1 + 1")
-' 返回：Lua 表达式的计算结果
+' ====LuaEval - 执行 Lua 表达式（同步）====
+' 用法: =LuaEval("1 + 1")
+'      =LuaCall("funcName", arg1, arg2)
 Public Function LuaEval(expression As String) As Variant
     On Error GoTo ErrorHandler
     
@@ -2107,7 +2110,6 @@ Public Function LuaEval(expression As String) As Variant
 ErrorHandler:
     LuaEval = "#ERROR: " & Err.Description
 End Function
-
 Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
     On Error GoTo ErrorHandler
     

@@ -18,11 +18,16 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     
     ' 获取调用单元格所在的 Workbook
     Dim wb As Workbook
-    Set wb = Application.Caller.Parent.Parent
+    Set wb = GetCallerWorkbook()
+
+    If wb Is Nothing Then
+        LuaTask = "#ERROR: 无法获取工作簿"
+        Exit Function
+    End If
     
     ' 获取对应的 WorkbookRuntime
     Dim rt As WorkbookRuntime
-    Set rt = CoreRegistry.GetRuntimeByWorkbook(wb)
+    Set rt = CoreRegistry.EnsureRuntimeForWorkbook(wb)
     
     If rt Is Nothing Then
         LuaTask = "#ERROR: 未找到运行时"
@@ -124,12 +129,16 @@ Public Function LuaEval(expression As String) As Variant
     Application.Volatile True
     
     ' 获取调用单元格所在的 Workbook
-    Dim wb As Workbook
-    Set wb = Application.Caller.Parent.Parent
+    Set wb = GetCallerWorkbook()  ' 修改此行
+    
+    If wb Is Nothing Then
+        LuaEval = "#ERROR: 无法获取工作簿"
+        Exit Function
+    End If
     
     ' 获取对应的 WorkbookRuntime
     Dim rt As WorkbookRuntime
-    Set rt = CoreRegistry.GetRuntimeByWorkbook(wb)
+    Set rt = CoreRegistry.EnsureRuntimeForWorkbook(wb)
     
     If rt Is Nothing Then
         LuaEval = "#ERROR: 未找到运行时"
@@ -149,12 +158,16 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
     Application.Volatile True
     
     ' 获取调用单元格所在的 Workbook
-    Dim wb As Workbook
-    Set wb = Application.Caller.Parent.Parent
+    Set wb = GetCallerWorkbook()  ' 修改此行
+    
+    If wb Is Nothing Then
+        LuaEval = "#ERROR: 无法获取工作簿"
+        Exit Function
+    End If
     
     ' 获取对应的 WorkbookRuntime
     Dim rt As WorkbookRuntime
-    Set rt = CoreRegistry.GetRuntimeByWorkbook(wb)
+    Set rt = CoreRegistry.EnsureRuntimeForWorkbook(wb)
     
     If rt Is Nothing Then
         LuaCall = "#ERROR: 未找到运行时"
@@ -179,4 +192,24 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
     
 ErrorHandler:
     LuaCall = "#ERROR: " & Err.Description
+End Function
+
+' 在 UDF.bas 顶部添加辅助函数
+Private Function GetCallerWorkbook() As Workbook
+    On Error Resume Next
+    
+    ' 尝试从 Caller 获取工作簿
+    If TypeName(Application.Caller) = "Range" Then
+        Set GetCallerWorkbook = Application.Caller.Parent.Parent
+    Else
+        ' 如果 Caller 不是 Range，使用 ActiveWorkbook
+        Set GetCallerWorkbook = ActiveWorkbook
+    End If
+    
+    ' 确保不是加载宏本身
+    If Not GetCallerWorkbook Is Nothing Then
+        If GetCallerWorkbook.IsAddin Then
+            Set GetCallerWorkbook = ActiveWorkbook
+        End If
+    End If
 End Function

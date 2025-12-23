@@ -12,17 +12,25 @@ Option Explicit
 ' 全局状态（仅调度器可见）
 Private g_Runnables As Collection      ' WorkbookRuntime 集合
 Private g_SchedulerRunning As Boolean
-Private g_SchedulerIntervalMs As Integer
 Private g_NextTaskId As Long
+Private g_SchedulerIntervalMs As Integer
+Private g_SchedulerIntervalInited As Boolean
 ' 配置常量
 Private Const DEFAULT_INTERVAL_Ms As Integer = 1000  ' 1000 毫秒
 
 ' ====公共接口====
 ' 初始化调度器
 Public Sub InitScheduler()
-    If g_Runnables Is Nothing Then Set g_Runnables = New Collection
-    If g_SchedulerIntervalSec Is Nothing Then g_SchedulerIntervalSec = DEFAULT_INTERVAL_SEC
-    'g_NextTaskId = 0
+    ' 修复：确保 g_Runnables 被初始化
+    If g_Runnables Is Nothing Then
+        Set g_Runnables = New Collection
+    End If
+    
+    If Not g_SchedulerIntervalInited Then
+        g_SchedulerIntervalMs = DEFAULT_INTERVAL_Ms
+        g_SchedulerIntervalInited = True
+        g_NextTaskId = 0
+    End If
 End Sub
 ' 注册运行时（由 CoreRegistry 调用）
 Public Sub RegisterRunnable(rt As WorkbookRuntime)
@@ -45,7 +53,7 @@ End Sub
 Public Sub StartScheduler()
     If g_Runnables Is Nothing Then InitScheduler
     If g_SchedulerRunning Then
-        MessageBox "调度器已启动", vbInformation
+        MsgBox "调度器已启动", vbInformation
         Exit Sub
     End If
     g_SchedulerRunning = True
@@ -72,29 +80,35 @@ Public Function GenerateTaskId(wbKey As String, cellAddr As String) As String
     g_NextTaskId = g_NextTaskId + 1
 End Function
 
+Property Get IsRunning() As Boolean
+  IsRunning = g_SchedulerRunning
+End Property
+
 ' ====内部实现====
 ' 调度心跳（OnTime 回调）
 Public Sub SchedulerTick()
     On Error Resume Next
     
-    ' 检查运行标志
     If Not g_SchedulerRunning Then Exit Sub
     If g_Runnables Is Nothing Then Exit Sub
     
-    ' 关键设计：调度器只知道接口，不知道实现
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
 
     Dim rt As WorkbookRuntime
-    Dim needsRefresh As Boolean
-    needsRefresh = False
+    Dim hasWork As Boolean
+    hasWork = False
     
-    ' 遍历所有运行时
+    ' 优化：只标记有工作的 runtime
+    Dim needsCalc As Boolean
+    needsCalc = False
+    
     For Each rt In g_Runnables
         If rt.HasRunnable Then
             rt.Tick
-        needsRefresh = True
+            hasWork = True
+            needsCalc = True
         End If
     Next rt
     
@@ -102,15 +116,19 @@ Public Sub SchedulerTick()
     Application.EnableEvents = True
     Application.ScreenUpdating = True
     
-    ' 只有状态变化时才刷新
-    If needsRefresh Then
+    ' 只在有实际工作时才刷新
+    If needsCalc Then
         On Error Resume Next
         ActiveSheet.Calculate
     End If
     
-    ' 继续调度
-    If g_Runnables.Count > 0 Then
-        Application.OnTime EarliestTime:=Now + TimeValue("00:00:01") * g_SchedulerIntervalMs / 1000, Procedure:="Scheduler.SchedulerTick", , False
+    ' 继续调度或停止
+    If hasWork Or g_Runnables.Count > 0 Then
+        Dim nextTime As Date
+        nextTime = Now + TimeValue("00:00:01") * g_SchedulerIntervalMs / 1000
+        Application.OnTime EarliestTime:=nextTime, _
+                           Procedure:="Scheduler.SchedulerTick", _
+                           Schedule:=True
     Else
         g_SchedulerRunning = False
     End If

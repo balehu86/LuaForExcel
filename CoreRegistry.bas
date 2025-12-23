@@ -16,10 +16,7 @@ Private g_RuntimeByWorkbook As Object  ' wbKey → WorkbookRuntime
 Private g_RuntimeByTaskIndex As Object ' taskId → WorkbookRuntime
 Private g_TaskIdByCellAddr As Object   ' cellAddr → taskId
 
-' ============================================
-' 初始化
-' ============================================
-
+' ====初始化====
 Private Sub InitRegistry()
     If g_RuntimeByWorkbook Is Nothing Then
         Set g_RuntimeByWorkbook = CreateObject("Scripting.Dictionary")
@@ -28,10 +25,7 @@ Private Sub InitRegistry()
     End If
 End Sub
 
-' ============================================
-' 运行时管理
-' ============================================
-
+' ====运行时管理====
 ' 注册工作簿运行时
 Public Sub RegisterWorkbookRuntime(wb As Workbook, rt As WorkbookRuntime)
     InitRegistry
@@ -48,17 +42,14 @@ Public Sub UnregisterWorkbookRuntime(wb As Workbook)
     InitRegistry
     Dim wbKey As String
     wbKey = GetWorkbookKey(wb)
-    
+
     If g_RuntimeByWorkbook.Exists(wbKey) Then
         Dim rt As WorkbookRuntime
         Set rt = g_RuntimeByWorkbook(wbKey)
-        
         ' 从调度器注销
         Scheduler.UnregisterRunnable rt
-        
         ' 清理资源
         rt.Dispose
-        
         ' 从注册表移除
         g_RuntimeByWorkbook.Remove wbKey
     End If
@@ -77,10 +68,7 @@ Public Function GetRuntimeByWorkbook(wb As Workbook) As WorkbookRuntime
     End If
 End Function
 
-' ============================================
-' Task 路由表（GlobalTaskIndex）
-' ============================================
-
+' ====Task 路由表（GlobalTaskIndex）====
 ' 注册任务到运行时的映射
 Public Sub RegisterTask(taskId As String, rt As WorkbookRuntime, cellAddr As String)
     InitRegistry
@@ -165,4 +153,33 @@ Public Function ExtractWorkbookFromAddress(addr As String) As String
     Else
         ExtractWorkbookFromAddress = ""
     End If
+End Function
+
+' 在 CoreRegistry.bas 中添加自动初始化函数
+Public Function EnsureRuntimeForWorkbook(wb As Workbook) As WorkbookRuntime
+    InitRegistry
+    
+    ' 如果是加载宏本身，返回 Nothing
+    If wb.IsAddin Then
+        Set EnsureRuntimeForWorkbook = Nothing
+        Exit Function
+    End If
+    
+    ' 检查是否已存在
+    Dim rt As WorkbookRuntime
+    Set rt = GetRuntimeByWorkbook(wb)
+    
+    If Not rt Is Nothing Then
+        Set EnsureRuntimeForWorkbook = rt
+        Exit Function
+    End If
+    
+    ' 创建新的 Runtime
+    Set rt = New WorkbookRuntime
+    rt.BindWorkbook wb
+    
+    ' 注册
+    RegisterWorkbookRuntime wb, rt
+    
+    Set EnsureRuntimeForWorkbook = rt
 End Function
