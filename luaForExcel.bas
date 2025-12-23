@@ -103,7 +103,7 @@ Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代�
 ' ============================================
 
 ' 主初始化函数：创建空白 Lua 状态机
-Private Function InitLuaState() As Boolean
+Public Function InitLuaState() As Boolean
     On Error GoTo ErrorHandler
     
     If g_Initialized Then
@@ -144,6 +144,7 @@ Private Function InitLuaState() As Boolean
     End If
     
     InitLuaState = True
+    MsgBox "Lua栈初始化完成",,"恭喜" 
     Exit Function
 
 ErrorHandler:

@@ -7,11 +7,6 @@ Public Sub LogError(msg As String)
     MsgBox msg, vbCritical, "错误"
 End Sub
 
-' 工作簿打开时自动运行
-Private Sub Workbook_Open()
-    EnableLuaTaskMenu
-End Sub
-
 ' 辅助函数：获取数组维度
 Private Function ArrayDimensions(arr As Variant) As String
     On Error Resume Next
@@ -644,8 +639,79 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     Next i
 End Sub
 
-' ===== 修改：工作簿关闭时清理其任务 =====
-Private Sub Workbook_BeforeClose(Cancel As Boolean)
-    ' 只清理当前工作簿的任务
-    CleanupWorkbookTasks ThisWorkbook.Name
+' ============================================
+' 调试和诊断功能
+' ============================================
+
+' 显示加载宏状态
+Public Sub ShowAddinStatus()
+    Dim msg As String
+    msg = "========================================" & vbCrLf
+    msg = msg & "  Excel-Lua 5.4 加载宏状态" & vbCrLf
+    msg = msg & "========================================" & vbCrLf & vbCrLf
+    
+    msg = msg & "加载宏名称: " & ThisWorkbook.Name & vbCrLf
+    msg = msg & "加载宏路径: " & ThisWorkbook.Path & vbCrLf
+    msg = msg & "Lua初始化: " & IIf(g_Initialized, "已初始化", "未初始化") & vbCrLf
+    msg = msg & "热重载: " & IIf(g_HotReloadEnabled, "已启用", "已禁用") & vbCrLf
+    msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
+    msg = msg & "调度间隔: " & g_SchedulerIntervalMilliSec & " 毫秒" & vbCrLf
+    msg = msg & "调度步数: " & g_MaxIterationsPerTick & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+    
+    If g_TaskFunc Is Nothing Then
+        msg = msg & "任务总数: 0" & vbCrLf
+    Else
+        msg = msg & "任务总数: " & g_TaskFunc.Count & vbCrLf
+        msg = msg & "活跃任务: " & g_TaskQueue.Count & vbCrLf
+    End If
+    
+    msg = msg & vbCrLf & "functions.lua: " & vbCrLf
+    msg = msg & "  路径: " & g_FunctionsPath & vbCrLf
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If fso.FileExists(g_FunctionsPath) Then
+        msg = msg & "  状态: 存在" & vbCrLf
+        msg = msg & "  修改时间: " & FileDateTime(g_FunctionsPath) & vbCrLf
+        msg = msg & "  最后加载: " & g_LastModified & vbCrLf
+    Else
+        msg = msg & "  状态: 不存在" & vbCrLf
+    End If
+    
+    MsgBox msg, vbInformation, "加载宏状态"
+End Sub
+
+' 重新加载菜单（修复菜单丢失问题）
+Public Sub ReloadMenus()
+    DisableLuaTaskMenu
+    EnableLuaTaskMenu
+    MsgBox "右键菜单已重新加载！", vbInformation, "菜单重载"
+End Sub
+
+' ============================================
+' 手动初始化/清理函数（供外部调用）
+' ============================================
+
+' 手动初始化Lua引擎
+Public Sub ManualInitLua()
+    If InitLuaState() Then
+        MsgBox "Lua引擎初始化成功！", vbInformation, "初始化完成"
+    Else
+        MsgBox "Lua引擎初始化失败！", vbCritical, "初始化失败"
+    End If
+End Sub
+
+' 手动清理Lua引擎（慎用！）
+Public Sub ManualCleanupLua()
+    Dim result As VbMsgBoxResult
+    result = MsgBox("警告：这将清理所有Lua资源和任务！" & vbCrLf & vbCrLf & _
+                    "所有工作簿的Lua任务都会停止。" & vbCrLf & _
+                    "确定要继续吗？", _
+                    vbExclamation + vbYesNo, "确认清理")
+    
+    If result = vbYes Then
+        CleanupLua
+        MsgBox "Lua引擎已清理。", vbInformation, "清理完成"
+    End If
 End Sub
