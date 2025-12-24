@@ -84,6 +84,7 @@ Private g_MaxIterationsPerTick As Long
 Private g_NextScheduleTime As Date    '标记记下一次调度时间
 Private g_ScheduleMode As Integer  ' 0=按任务顺序, 1=按工作簿
 Private g_WorkbookTicks As Integer  ' 默认每个工作簿的tick数
+Private g_WorkbookCursor As Object  ' wbName -> cursor index (仅mode=1时使用)
 Private g_WorkbookTickCount As Object  ' workbookName -> tick count (仅mode=1时使用)
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
@@ -163,6 +164,7 @@ Private Sub InitCoroutineSystem()
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
     g_ScheduleMode = DEFAULT_SCHEDULER_MODE ' 默认按任务顺序调度
     g_WorkbookTicks = DEFAULT_WORKBOOK_TICKS ' 按工作簿调度，默认每个工作簿1个tick
+    Set g_WorkbookCursor = CreateObject("Scripting.Dictionary")
     Set g_WorkbookTickCount = CreateObject("Scripting.Dictionary")
 
     ' 初始化性能统计
@@ -803,61 +805,80 @@ Private Sub ScheduleByTask()
 End Sub
 
 ' 按工作簿调度,被SchedulerTick调用
+' 按工作簿调度,被SchedulerTick调用
 Private Sub ScheduleByWorkbook()
     Dim wbTasks As Object
     Set wbTasks = CreateObject("Scripting.Dictionary")
-    
+
+    ' 初始化工作簿游标表
+    If g_WorkbookCursor Is Nothing Then
+        Set g_WorkbookCursor = CreateObject("Scripting.Dictionary")
+    End If
+
     Dim taskId As Variant
     Dim wbName As String
-    
+
+    ' 按工作簿分组任务
     For Each taskId In g_TaskQueue.Keys
         If g_TaskWorkbook.Exists(CStr(taskId)) Then
             wbName = g_TaskWorkbook(CStr(taskId))
-            
+
             If Not wbTasks.Exists(wbName) Then
                 Set wbTasks(wbName) = CreateObject("System.Collections.ArrayList")
             End If
             wbTasks(wbName).Add taskId
         End If
-    Next
-    
+    Next taskId
+
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-    
+
     Dim wb As Variant
     For Each wb In wbTasks.Keys
-        ' 工作簿级别计时开始
+        ' ---- 工作簿级别计时开始 ----
         Dim wbStart As Double
         wbStart = Timer
-        
+
+        ' 每个工作簿允许的 tick 数
         Dim tickCount As Long
         If g_WorkbookTickCount.Exists(CStr(wb)) Then
             tickCount = g_WorkbookTickCount(CStr(wb))
         Else
             tickCount = g_WorkbookTicks
         End If
-        
+
         Dim taskList As Object
         Set taskList = wbTasks(CStr(wb))
-        
-        ' 修改：执行 tickCount 次任务，而不是索引 0 到 tickCount-1
+
+        Dim total As Long
+        total = taskList.Count
+        If total = 0 Or tickCount <= 0 Then GoTo NextWorkbook
+
+        ' 取得该工作簿的调度游标
+        Dim cursor As Long
+        If g_WorkbookCursor.Exists(CStr(wb)) Then
+            cursor = g_WorkbookCursor(CStr(wb))
+        Else
+            cursor = 0
+        End If
+
         Dim executedCount As Long
         executedCount = 0
-        
-        Dim i As Long
-        ' 从列表中依次执行，最多执行 tickCount 个任务
-        For i = 0 To taskList.Count - 1
-            If executedCount >= tickCount Then Exit For
-            
-            taskId = taskList(i)
-            
+
+        Dim stepCount As Long
+        stepCount = 0
+
+        ' 轮转调度，最多扫描一圈
+        Do While executedCount < tickCount And stepCount < total
+            taskId = taskList(cursor)
+
             If g_TaskFunc.Exists(CStr(taskId)) Then
-                ' 只执行 yielded 状态的任务
+                ' 只调度 yielded 状态
                 If g_TaskStatus(CStr(taskId)) = "yielded" Then
                     ResumeCoroutine CStr(taskId)
                     executedCount = executedCount + 1
                 End If
-                
+
                 Dim status As String
                 status = g_TaskStatus(CStr(taskId))
                 If status = "done" Or status = "error" Or status = "terminated" Then
@@ -866,14 +887,24 @@ Private Sub ScheduleByWorkbook()
             Else
                 tasksToRemove.Add taskId
             End If
-        Next i
-        
-        ' 工作簿级别计时结束（本次调度总时间）
+
+            cursor = (cursor + 1) Mod total
+            stepCount = stepCount + 1
+        Loop
+
+        ' 保存游标
+        g_WorkbookCursor(CStr(wb)) = cursor
+
+        ' ---- 工作簿级别计时结束 ----
         Dim wbElapsed As Double
         wbElapsed = (Timer - wbStart) * 1000
         g_WorkbookLastTime(CStr(wb)) = wbElapsed
+
+NextWorkbook:
     Next wb
-    
+
+    ' 清理已完成 / 无效任务
+    Dim i As Long
     For i = 0 To tasksToRemove.Count - 1
         If g_TaskQueue.Exists(tasksToRemove(i)) Then
             g_TaskQueue.Remove tasksToRemove(i)
