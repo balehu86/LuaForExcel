@@ -74,6 +74,7 @@ Private g_TaskValue As Object          ' taskId -> value variant
 Private g_TaskError As Object          ' taskId -> error message
 Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
+' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean
 Private g_SchedulerCursor As Long   ' Round-Robin 游标
 Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
@@ -81,10 +82,28 @@ Private g_NextTaskId As Long
 Private g_SchedulerIntervalMilliSec As Long
 Private g_MaxIterationsPerTick As Long
 Private g_NextScheduleTime As Date    '标记记下一次调度时间
+Private g_ScheduleMode As Integer  ' 0=按任务顺序, 1=按工作簿
+Private g_WorkbookTicks As Integer  ' 默认每个工作簿的tick数
+Private g_WorkbookTickCount As Object  ' workbookName -> tick count (仅mode=1时使用)
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
 Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代次数，默认1
+Private Const DEFAULT_SCHEDULER_MODE As Integer = 0  ' 调度模式：0=按任务顺序, 1=按工作簿
+Private Const DEFAULT_WORKBOOK_TICKS As Integer = 1  ' 每个工作簿的默认tick数
+' ===== 性能统计全局变量 =====
+Private g_SchedulerTotalTime As Double      ' 调度器总运行时间(ms)
+Private g_SchedulerLastTime As Double       ' 上次调度花费时间(ms)
+Private g_SchedulerTotalCount As Long       ' 总调度次数
+Private g_SchedulerStartTime As Date        ' 调度器启动时间
+
+Private g_TaskLastTime As Object            ' taskId -> 上次运行时间(ms)
+Private g_TaskTotalTime As Object           ' taskId -> 总运行时间(ms)
+Private g_TaskRunCount As Object            ' taskId -> 调度次数
+
+Private g_WorkbookLastTime As Object        ' workbookName -> 上次调度时间(ms)
+Private g_WorkbookTotalTime As Object       ' workbookName -> 总运行时间(ms)
+Private g_WorkbookTickCount_Stats As Object ' workbookName -> 调度次数(统计用，与配置的g_WorkbookTickCount区分)
 ' ============================================
 ' 第一部分：核心初始化和清理
 ' ============================================
@@ -142,6 +161,22 @@ End Function
 Private Sub InitCoroutineSystem()
     g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
+    g_ScheduleMode = DEFAULT_SCHEDULER_MODE ' 默认按任务顺序调度
+    g_WorkbookTicks = DEFAULT_WORKBOOK_TICKS ' 按工作簿调度，默认每个工作簿1个tick
+    Set g_WorkbookTickCount = CreateObject("Scripting.Dictionary")
+
+    ' 初始化性能统计
+    g_SchedulerTotalTime = 0
+    g_SchedulerLastTime = 0
+    g_SchedulerTotalCount = 0
+    g_SchedulerStartTime = Now
+    Set g_TaskLastTime = CreateObject("Scripting.Dictionary")
+    Set g_TaskTotalTime = CreateObject("Scripting.Dictionary")
+    Set g_TaskRunCount = CreateObject("Scripting.Dictionary")
+    
+    Set g_WorkbookLastTime = CreateObject("Scripting.Dictionary")
+    Set g_WorkbookTotalTime = CreateObject("Scripting.Dictionary")
+    Set g_WorkbookTickCount_Stats = CreateObject("Scripting.Dictionary")
 
     Set g_TaskFunc = CreateObject("Scripting.Dictionary")
     Set g_TaskWorkbook = CreateObject("Scripting.Dictionary")
@@ -180,6 +215,14 @@ Public Sub CleanupLua()
             g_TaskError.RemoveAll
             g_TaskCoThread.RemoveAll
             g_TaskQueue.RemoveAll
+            
+            ' 新增：清理性能统计
+            g_TaskLastTime.RemoveAll
+            g_TaskTotalTime.RemoveAll
+            g_TaskRunCount.RemoveAll
+            g_WorkbookLastTime.RemoveAll
+            g_WorkbookTotalTime.RemoveAll
+            g_WorkbookTickCount_Stats.RemoveAll
         End If
         
         If g_LuaState <> 0 Then
@@ -660,11 +703,7 @@ End Sub
 Public Sub SchedulerTick()
     On Error Resume Next
     
-    ' 检查运行标志
-    If Not g_SchedulerRunning Then
-        Exit Sub
-    End If
-    
+    If Not g_SchedulerRunning Then Exit Sub
     If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
         Exit Sub
@@ -674,77 +713,34 @@ Public Sub SchedulerTick()
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
 
-    ' ---- 复制当前任务列表（快照）----
-    Dim taskIds() As Variant
-    ReDim taskIds(0 To g_TaskQueue.Count - 1)
+    Dim schedulerStart As Double
+    schedulerStart = Timer
 
-    Dim idx As Long
-    Dim taskId As Variant
-    idx = 0
-    For Each taskId In g_TaskQueue.Keys
-        taskIds(idx) = taskId
-        idx = idx + 1
-    Next
+    ' 根据调度模式选择不同的调度逻辑
+    If g_ScheduleMode = 0 Then
+        Call ScheduleByTask
+    Else
+        Call ScheduleByWorkbook
+    End If
 
-    Dim total As Long
-    total = UBound(taskIds) + 1
-    If total = 0 Then GoTo ExitTick
+    ' 性能计时统计
+    Dim schedulerElapsed As Double
+    schedulerElapsed = (Timer - schedulerStart) * 1000
+    g_SchedulerLastTime = schedulerElapsed
+    g_SchedulerTotalTime = g_SchedulerTotalTime + schedulerElapsed
+    g_SchedulerTotalCount = g_SchedulerTotalCount + 1
+    
+    Debug.Print "[PERF] Scheduler #" & g_SchedulerTotalCount & " 执行时间: " & Format(schedulerElapsed, "0.00") & " ms"
 
-    ' ---- Round-Robin 调度 ----
-    Dim executed As Long
-    executed = 0
-
-    Dim cur As Long
-    cur = g_SchedulerCursor Mod total
-
-    Dim tasksToRemove As Object
-    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-
-    Do While executed < g_MaxIterationsPerTick And executed < total
-        taskId = taskIds(cur)
-
-        If g_TaskFunc.Exists(CStr(taskId)) Then
-            ResumeCoroutine CStr(taskId)
-            executed = executed + 1
-
-            If g_TaskStatus(CStr(taskId)) = "done" _
-            Or g_TaskStatus(CStr(taskId)) = "error" Then
-                tasksToRemove.Add taskId
-            End If
-        Else
-            tasksToRemove.Add taskId
-        End If
-
-        cur = (cur + 1) Mod total
-    Loop
-
-    ' ---- 更新游标 ----
-    g_SchedulerCursor = cur
-
-    ' ---- 清理完成 / 错误任务 ----
-    Dim i As Long
-    For i = 0 To tasksToRemove.Count - 1
-        If g_TaskQueue.Exists(tasksToRemove(i)) Then
-            g_TaskQueue.Remove tasksToRemove(i)
-            'g_TaskWorkbook.Remove tasksToRemove(i)
-            'g_TaskStatus(tasksToRemove(i)) = "Terminated"
-        End If
-    Next i
-
-ExitTick:
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
 
-    ' 关键：一个 tick 只刷新一次
     If g_StateDirty Then
         g_StateDirty = False
-        ActiveSheet.Calculate ' 只刷新活动单元表
-        ' Application.Calculate '刷新整个工作簿
-
+        ActiveSheet.Calculate
     End If
 
-    ' 继续或停止调度
     If g_TaskQueue.Count > 0 Then
         g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
         Application.OnTime g_NextScheduleTime, "SchedulerTick"
@@ -753,18 +749,141 @@ ExitTick:
     End If
 End Sub
 
+' 按任务顺序调度,被SchedulerTick调用
+Private Sub ScheduleByTask()
+    Dim taskIds() As Variant
+    ReDim taskIds(0 To g_TaskQueue.Count - 1)
+    
+    Dim idx As Long, taskId As Variant
+    idx = 0
+    For Each taskId In g_TaskQueue.Keys
+        taskIds(idx) = taskId
+        idx = idx + 1
+    Next
+    
+    Dim total As Long
+    total = UBound(taskIds) + 1
+    If total = 0 Then Exit Sub
+    
+    Dim executed As Long, cur As Long
+    cur = g_SchedulerCursor Mod total
+    
+    Dim tasksToRemove As Object
+    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
+    
+    Do While executed < g_MaxIterationsPerTick And executed < total
+        taskId = taskIds(cur)
+        
+        If g_TaskFunc.Exists(CStr(taskId)) Then
+            ResumeCoroutine CStr(taskId)
+            executed = executed + 1
+            
+            Dim status As String
+            status = g_TaskStatus(CStr(taskId))
+            If status = "done" Or status = "error" Or status = "terminated" Then
+                tasksToRemove.Add taskId
+            End If
+        Else
+            tasksToRemove.Add taskId
+        End If
+        
+        cur = (cur + 1) Mod total
+    Loop
+    
+    g_SchedulerCursor = cur
+    
+    Dim i As Long
+    For i = 0 To tasksToRemove.Count - 1
+        If g_TaskQueue.Exists(tasksToRemove(i)) Then
+            g_TaskQueue.Remove tasksToRemove(i)
+        End If
+    Next i
+End Sub
+
+' 按工作簿调度,被SchedulerTick调用
+Private Sub ScheduleByWorkbook()
+    Dim wbTasks As Object
+    Set wbTasks = CreateObject("Scripting.Dictionary")
+    
+    Dim taskId As Variant
+    Dim wbName As String  ' 只在这里声明一次
+    
+    For Each taskId In g_TaskQueue.Keys
+        If g_TaskWorkbook.Exists(CStr(taskId)) Then
+            wbName = g_TaskWorkbook(CStr(taskId))  ' 直接使用，不再声明
+            
+            If Not wbTasks.Exists(wbName) Then
+                Set wbTasks(wbName) = CreateObject("System.Collections.ArrayList")
+            End If
+            wbTasks(wbName).Add taskId
+        End If
+    Next
+    
+    Dim tasksToRemove As Object
+    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
+    
+    Dim wb As Variant  ' 用于 For Each 循环
+    For Each wb In wbTasks.Keys
+        ' 工作簿级别计时开始
+        Dim wbStart As Double
+        wbStart = Timer
+        
+        Dim tickCount As Long
+        If g_WorkbookTickCount.Exists(CStr(wb)) Then
+            tickCount = g_WorkbookTickCount(CStr(wb))
+        Else
+            tickCount = g_WorkbookTicks
+        End If
+        
+        Dim taskList As Object
+        Set taskList = wbTasks(CStr(wb))
+        
+        Dim i As Long
+        For i = 0 To Application.Min(tickCount - 1, taskList.Count - 1)
+            taskId = taskList(i)
+            
+            If g_TaskFunc.Exists(CStr(taskId)) Then
+                ResumeCoroutine CStr(taskId)
+                
+                Dim status As String
+                status = g_TaskStatus(CStr(taskId))
+                If status = "done" Or status = "error" Or status = "terminated" Then
+                    tasksToRemove.Add taskId
+                End If
+            Else
+                tasksToRemove.Add taskId
+            End If
+        Next i
+        
+        ' 工作簿级别计时结束（本次调度总时间）
+        Dim wbElapsed As Double
+        wbElapsed = (Timer - wbStart) * 1000
+        g_WorkbookLastTime(CStr(wb)) = wbElapsed
+    Next wb
+    
+    For i = 0 To tasksToRemove.Count - 1
+        If g_TaskQueue.Exists(tasksToRemove(i)) Then
+            g_TaskQueue.Remove tasksToRemove(i)
+        End If
+    Next i
+End Sub
+
 ' Resume 协程
 Private Sub ResumeCoroutine(taskId As String)
     On Error GoTo ErrorHandler
     
+    If g_TaskStatus(taskId) = "paused" Then Exit Sub
     If g_TaskStatus(taskId) <> "yielded" Then Exit Sub
+    
+    ' 性能计时开始
+    Dim taskStart As Double
+    taskStart = Timer
     
     ' 检查工作簿是否仍然打开
     If g_TaskWorkbook.Exists(taskId) Then
         Dim wbName As String
         wbName = g_TaskWorkbook(taskId)
         
-        ' 验证工作簿是否存在且打开
         Dim wb As Workbook
         Dim wbExists As Boolean
         wbExists = False
@@ -825,7 +944,6 @@ Private Sub ResumeCoroutine(taskId As String)
         Next i
     End If
     
-    ' 获取返回值
     Dim nargs As Long
     nargs = 0
     If IsArray(resumeSpec) Then
@@ -835,8 +953,32 @@ Private Sub ResumeCoroutine(taskId As String)
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
     
-    ' 处理结果
     HandleCoroutineResult taskId, result, CLng(nres)
+    
+    ' 性能计时结束并统计
+    Dim taskElapsed As Double
+    taskElapsed = (Timer - taskStart) * 1000
+    
+    ' 更新任务统计
+    g_TaskLastTime(taskId) = taskElapsed
+    If Not g_TaskTotalTime.Exists(taskId) Then
+        g_TaskTotalTime(taskId) = 0
+        g_TaskRunCount(taskId) = 0
+    End If
+    g_TaskTotalTime(taskId) = g_TaskTotalTime(taskId) + taskElapsed
+    g_TaskRunCount(taskId) = g_TaskRunCount(taskId) + 1
+    
+    ' 更新工作簿统计
+    If g_TaskWorkbook.Exists(taskId) Then
+        wbName = g_TaskWorkbook(taskId)
+        If Not g_WorkbookTotalTime.Exists(wbName) Then
+            g_WorkbookTotalTime(wbName) = 0
+            g_WorkbookTickCount_Stats(wbName) = 0
+        End If
+        g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
+        g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
+    End If
+    
     Exit Sub
 
 ErrorHandler:

@@ -143,6 +143,8 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaConfigMenu, "手动重载 functions.lua", "LuaConfigMenu_ReloadFunctions"
     AddLuaMenuItem luaConfigMenu, "设置调度间隔（毫秒）", "LuaConfigMenu_SetSchedulerInterval"
     AddLuaMenuItem luaConfigMenu, "设置调度步数", "LuaConfigMenu_SetSchedulerBatchSize"
+    AddLuaMenuItem luaConfigMenu, "切换调度模式", "LuaConfigMenu_ToggleScheduleMode"
+    AddLuaMenuItem luaConfigMenu, "设置工作簿Tick数", "LuaConfigMenu_SetWorkbookTicks"
 
     ' 添加调试的主菜单
     Dim luaDebugMenu As CommandBarControl
@@ -152,6 +154,16 @@ Public Sub EnableLuaTaskMenu()
     ' 添加调试的子菜单
     AddLuaMenuItem luaDebugMenu, "显示插件状态", "LuaDebugMenu_ShowAddinStatus"
 
+    ' 在右键菜单最后添加性能统计菜单
+    Dim luaPerfMenu As CommandBarControl
+    Set luaPerfMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
+    luaPerfMenu.Caption = "Lua 性能统计"
+    luaPerfMenu.Tag = "LuaPerfMenu"
+
+    AddLuaMenuItem luaPerfMenu, "调度器统计", "LuaPerfMenu_ShowSchedulerStats"
+    AddLuaMenuItem luaPerfMenu, "任务性能统计", "LuaPerfMenu_ShowTaskStats"
+    AddLuaMenuItem luaPerfMenu, "工作簿性能统计", "LuaPerfMenu_ShowWorkbookStats"
+    AddLuaMenuItem luaPerfMenu, "重置性能统计", "LuaPerfMenu_ResetStats"
     MsgBox "Lua 任务右键菜单已启用。", vbInformation
 End Sub
 
@@ -166,6 +178,7 @@ Public Sub DisableLuaTaskMenu()
         If ctrl.Tag = "LuaTaskMenu" Then ctrl.Delete
         If ctrl.Tag = "LuaSchedulerMenu" Then ctrl.Delete
         If ctrl.Tag = "LuaConfigMenu" Then ctrl.Delete
+        If ctrl.Tag = "LuaPerfMenu" Then ctrl.Delete  ' 新增
     Next
 End Sub
 
@@ -256,26 +269,27 @@ Private Sub LuaTaskMenu_terminateTask()
         Exit Sub
     End If
 
-    If g_TaskQueue Is Nothing Then
-        MsgBox "任务队列未创建", vbExclamation
-        If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
-    Else
+    ' 从队列移除
+    If Not g_TaskQueue Is Nothing Then
         If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
     End If
 
+    ' 设置终止状态并标记为脏
     g_TaskStatus(taskId) = "terminated"
+    g_StateDirty = True
 
-    If g_TaskFunc.Exists(taskId) Then g_TaskFunc.Remove taskId
-    If g_TaskStartArgs.Exists(taskId) Then g_TaskStartArgs.Remove taskId
-    If g_TaskResumeSpec.Exists(taskId) Then g_TaskResumeSpec.Remove taskId
-    ' 删除 dynamicTargets 和 writeTargets
-    If g_TaskCell.Exists(taskId) Then g_TaskCell.Remove taskId
-    If g_TaskStatus.Exists(taskId) Then g_TaskStatus.Remove taskId
-    If g_TaskProgress.Exists(taskId) Then g_TaskProgress.Remove taskId
-    If g_TaskMessage.Exists(taskId) Then g_TaskMessage.Remove taskId
-    If g_TaskValue.Exists(taskId) Then g_TaskValue.Remove taskId
-    If g_TaskError.Exists(taskId) Then g_TaskError.Remove taskId
-    If g_TaskCoThread.Exists(taskId) Then g_TaskCoThread.Remove taskId
+    ' 删除所有数据
+    g_TaskFunc.Remove taskId
+    g_TaskWorkbook.Remove taskId
+    g_TaskStartArgs.Remove taskId
+    g_TaskResumeSpec.Remove taskId
+    g_TaskCell.Remove taskId
+    g_TaskStatus.Remove taskId
+    g_TaskProgress.Remove taskId
+    g_TaskMessage.Remove taskId
+    g_TaskValue.Remove taskId
+    g_TaskError.Remove taskId
+    g_TaskCoThread.Remove taskId
 
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
@@ -663,6 +677,65 @@ Private Sub LuaConfigMenu_SetSchedulerBatchSize()
     ResumeScheduler
 End Sub
 
+' 切换调度模式
+Private Sub LuaConfigMenu_ToggleScheduleMode()
+    If g_ScheduleMode = 0 Then
+        g_ScheduleMode = 1
+        MsgBox "已切换到【按工作簿调度】模式" & vbCrLf & _
+               "每个工作簿可独立设置执行的tick数", vbInformation
+    Else
+        g_ScheduleMode = 0
+        MsgBox "已切换到【按任务顺序调度】模式" & vbCrLf & _
+               "使用Round-Robin轮询所有任务", vbInformation
+    End If
+End Sub
+
+' 设置工作簿Tick数
+Private Sub LuaConfigMenu_SetWorkbookTicks()
+    If g_ScheduleMode = 0 Then
+        MsgBox "当前为【按任务顺序】模式，此设置无效" & vbCrLf & _
+               "请先切换到【按工作簿调度】模式", vbExclamation
+        Exit Sub
+    End If
+
+    Dim choice As String
+    choice = InputBox("请选择设置方式：" & vbCrLf & _
+                     "1 - 设置默认tick数（所有工作簿）" & vbCrLf & _
+                     "2 - 设置当前工作簿tick数", "设置工作簿Tick", "1")
+
+    If choice = "1" Then
+        Dim defaultTicks As Variant
+        defaultTicks = Application.InputBox("请输入默认tick数（>=1）", "默认设置", g_WorkbookTicks, Type:=1)
+        If defaultTicks = False Then Exit Sub
+        If defaultTicks < 1 Then
+            MsgBox "tick数必须>=1", vbExclamation
+            Exit Sub
+        End If
+        g_WorkbookTicks = CLng(defaultTicks)
+        MsgBox "默认工作簿tick数已设置为: " & g_WorkbookTicks, vbInformation
+
+    ElseIf choice = "2" Then
+        Dim wbName As String
+        wbName = ActiveWorkbook.Name
+
+        Dim wbTicks As Variant
+        Dim currentTicks As Long
+        If g_WorkbookTickCount.Exists(wbName) Then
+            currentTicks = g_WorkbookTickCount(wbName)
+        Else
+            currentTicks = g_WorkbookTicks
+        End If
+
+        wbTicks = Application.InputBox("设置工作簿 [" & wbName & "] 的tick数（>=1）", "工作簿设置", currentTicks, Type:=1)
+        If wbTicks = False Then Exit Sub
+        If wbTicks < 1 Then
+            MsgBox "tick数必须>=1", vbExclamation
+            Exit Sub
+        End If
+        g_WorkbookTickCount(wbName) = CLng(wbTicks)
+        MsgBox "工作簿 [" & wbName & "] tick数已设置为: " & wbTicks, vbInformation
+    End If
+End Sub
 ' ====调试和诊断功能====
 ' 显示加载宏状态
 Private Sub LuaDebugMenu_ShowAddinStatus()
@@ -678,6 +751,10 @@ Private Sub LuaDebugMenu_ShowAddinStatus()
     msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
     msg = msg & "调度间隔: " & g_SchedulerIntervalMilliSec & " 毫秒" & vbCrLf
     msg = msg & "调度步数: " & g_MaxIterationsPerTick & vbCrLf
+    msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
+    If g_ScheduleMode = 1 Then
+        msg = msg & "默认Tick数: " & g_WorkbookTicks & vbCrLf
+    End If
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     
     If g_TaskFunc Is Nothing Then
@@ -702,7 +779,179 @@ Private Sub LuaDebugMenu_ShowAddinStatus()
     
     MsgBox msg, vbInformation, "加载宏状态"
 End Sub
+' ====性能统计功能====
+' 显示调度器统计
+Private Sub LuaPerfMenu_ShowSchedulerStats()
+    Dim msg As String
+    msg = "========================================" & vbCrLf
+    msg = msg & "  调度器性能统计" & vbCrLf
+    msg = msg & "========================================" & vbCrLf & vbCrLf
+    
+    msg = msg & "启动时间: " & Format(g_SchedulerStartTime, "yyyy-mm-dd hh:nn:ss") & vbCrLf
+    msg = msg & "运行时长: " & Format(Now - g_SchedulerStartTime, "hh:nn:ss") & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+    
+    msg = msg & "总调度次数: " & g_SchedulerTotalCount & vbCrLf
+    msg = msg & "总运行时间: " & Format(g_SchedulerTotalTime, "0.00") & " ms" & vbCrLf
+    
+    If g_SchedulerTotalCount > 0 Then
+        msg = msg & "平均每次: " & Format(g_SchedulerTotalTime / g_SchedulerTotalCount, "0.00") & " ms" & vbCrLf
+    End If
+    
+    msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerLastTime, "0.00") & " ms" & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+    
+    msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
+    msg = msg & "调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf
+    
+    If g_ScheduleMode = 0 Then
+        msg = msg & "每次执行: " & g_MaxIterationsPerTick & " 个任务" & vbCrLf
+    Else
+        msg = msg & "默认Tick: " & g_WorkbookTicks & " 次/工作簿" & vbCrLf
+    End If
+    
+    msg = msg & vbCrLf & "当前状态: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
+    msg = msg & "活跃任务: " & g_TaskQueue.Count & vbCrLf
+    
+    MsgBox msg, vbInformation, "调度器性能统计"
+End Sub
 
+' 显示任务性能统计
+Private Sub LuaPerfMenu_ShowTaskStats()
+    If g_TaskFunc Is Nothing Or g_TaskFunc.Count = 0 Then
+        MsgBox "当前没有任何任务。", vbInformation, "任务性能统计"
+        Exit Sub
+    End If
+    
+    Dim msg As String
+    msg = "========================================" & vbCrLf
+    msg = msg & "  任务性能统计" & vbCrLf
+    msg = msg & "========================================" & vbCrLf & vbCrLf
+    
+    msg = msg & "任务总数: " & g_TaskFunc.Count & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
+    
+    Dim taskId As Variant
+    Dim taskNum As Long
+    taskNum = 0
+    
+    For Each taskId In g_TaskFunc.Keys
+        taskNum = taskNum + 1
+        msg = msg & "【任务 #" & taskNum & "】" & vbCrLf
+        msg = msg & "  ID: " & CStr(taskId) & vbCrLf
+        msg = msg & "  函数: " & g_TaskFunc(CStr(taskId)) & vbCrLf
+        msg = msg & "  状态: " & g_TaskStatus(CStr(taskId)) & vbCrLf
+        
+        If g_TaskRunCount.Exists(CStr(taskId)) Then
+            msg = msg & "  调度次数: " & g_TaskRunCount(CStr(taskId)) & vbCrLf
+            msg = msg & "  总运行时间: " & Format(g_TaskTotalTime(CStr(taskId)), "0.00") & " ms" & vbCrLf
+            msg = msg & "  平均时间: " & Format(g_TaskTotalTime(CStr(taskId)) / g_TaskRunCount(CStr(taskId)), "0.00") & " ms" & vbCrLf
+            msg = msg & "  上次运行: " & Format(g_TaskLastTime(CStr(taskId)), "0.00") & " ms" & vbCrLf
+        Else
+            msg = msg & "  (尚未执行)" & vbCrLf
+        End If
+        
+        msg = msg & "----------------------------------------" & vbCrLf
+    Next taskId
+    
+    MsgBox msg, vbInformation, "任务性能统计 (" & g_TaskFunc.Count & " 个任务)"
+End Sub
+
+' 显示工作簿性能统计
+Private Sub LuaPerfMenu_ShowWorkbookStats()
+    If g_TaskWorkbook Is Nothing Or g_TaskWorkbook.Count = 0 Then
+        MsgBox "当前没有任何任务。", vbInformation, "工作簿性能统计"
+        Exit Sub
+    End If
+    
+    ' 统计每个工作簿的任务数
+    Dim wbTaskCount As Object
+    Set wbTaskCount = CreateObject("Scripting.Dictionary")
+    
+    Dim taskId As Variant
+    For Each taskId In g_TaskWorkbook.Keys
+        Dim wbName As String
+        wbName = g_TaskWorkbook(CStr(taskId))
+        
+        If Not wbTaskCount.Exists(wbName) Then
+            wbTaskCount(wbName) = 0
+        End If
+        wbTaskCount(wbName) = wbTaskCount(wbName) + 1
+    Next
+    
+    Dim msg As String
+    msg = "========================================" & vbCrLf
+    msg = msg & "  工作簿性能统计" & vbCrLf
+    msg = msg & "========================================" & vbCrLf & vbCrLf
+    
+    msg = msg & "工作簿总数: " & wbTaskCount.Count & vbCrLf
+    msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
+    
+    Dim wb As Variant
+    Dim wbNum As Long
+    wbNum = 0
+    
+    For Each wb In wbTaskCount.Keys
+        wbNum = wbNum + 1
+        msg = msg & "【工作簿 #" & wbNum & "】" & vbCrLf
+        msg = msg & "  名称: " & CStr(wb) & vbCrLf
+        msg = msg & "  任务数: " & wbTaskCount(CStr(wb)) & vbCrLf
+        
+        If g_WorkbookTickCount_Stats.Exists(CStr(wb)) Then
+            msg = msg & "  总调度次数: " & g_WorkbookTickCount_Stats(CStr(wb)) & vbCrLf
+            msg = msg & "  总运行时间: " & Format(g_WorkbookTotalTime(CStr(wb)), "0.00") & " ms" & vbCrLf
+            msg = msg & "  平均时间: " & Format(g_WorkbookTotalTime(CStr(wb)) / g_WorkbookTickCount_Stats(CStr(wb)), "0.00") & " ms" & vbCrLf
+            
+            If g_WorkbookLastTime.Exists(CStr(wb)) Then
+                msg = msg & "  上次调度: " & Format(g_WorkbookLastTime(CStr(wb)), "0.00") & " ms" & vbCrLf
+            End If
+        Else
+            msg = msg & "  (尚未执行)" & vbCrLf
+        End If
+        
+        ' 显示配置的tick数（仅在按工作簿调度模式下）
+        If g_ScheduleMode = 1 Then
+            If g_WorkbookTickCount.Exists(CStr(wb)) Then
+                msg = msg & "  配置Tick数: " & g_WorkbookTickCount(CStr(wb)) & vbCrLf
+            Else
+                msg = msg & "  配置Tick数: " & g_WorkbookTicks & " (默认)" & vbCrLf
+            End If
+        End If
+        
+        msg = msg & "----------------------------------------" & vbCrLf
+    Next wb
+    
+    MsgBox msg, vbInformation, "工作簿性能统计 (" & wbTaskCount.Count & " 个工作簿)"
+End Sub
+
+' 重置性能统计
+Private Sub LuaPerfMenu_ResetStats()
+    Dim result As VbMsgBoxResult
+    result = MsgBox("确定要重置所有性能统计数据吗？" & vbCrLf & vbCrLf & _
+                    "这将清除所有计时数据，但不影响任务运行。", _
+                    vbQuestion + vbYesNo, "确认重置")
+    
+    If result = vbNo Then Exit Sub
+    
+    ' 重置调度器统计
+    g_SchedulerTotalTime = 0
+    g_SchedulerLastTime = 0
+    g_SchedulerTotalCount = 0
+    g_SchedulerStartTime = Now
+    
+    ' 重置任务统计
+    If Not g_TaskLastTime Is Nothing Then g_TaskLastTime.RemoveAll
+    If Not g_TaskTotalTime Is Nothing Then g_TaskTotalTime.RemoveAll
+    If Not g_TaskRunCount Is Nothing Then g_TaskRunCount.RemoveAll
+    
+    ' 重置工作簿统计
+    If Not g_WorkbookLastTime Is Nothing Then g_WorkbookLastTime.RemoveAll
+    If Not g_WorkbookTotalTime Is Nothing Then g_WorkbookTotalTime.RemoveAll
+    If Not g_WorkbookTickCount_Stats Is Nothing Then g_WorkbookTickCount_Stats.RemoveAll
+    
+    MsgBox "所有性能统计数据已重置。", vbInformation, "重置完成"
+End Sub
 ' ============================================
 ' 手动初始化/清理函数（供外部调用）
 ' ============================================
