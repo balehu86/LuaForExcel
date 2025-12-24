@@ -502,7 +502,7 @@ Public Function LuaGet(taskId As String, field As String) As Variant
     Application.Volatile True
     
     If Not InitLuaState() Then
-        LuaEval = CVErr(xlErrValue)
+        LuaGet = CVErr(xlErrValue)
         Exit Function
     End If
     
