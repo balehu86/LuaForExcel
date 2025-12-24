@@ -419,14 +419,33 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     ' 获取调用单元格地址和工作簿名
     Dim taskCell As String
     Dim wbName As String
+    Dim callerWb As Workbook
+    
+    On Error Resume Next
     taskCell = Application.Caller.Address(External:=True)
-    wbName = Application.Caller.Worksheet.Parent.Name
+    Set callerWb = Application.Caller.Worksheet.Parent
+    
+    ' 关键修复:检查调用者工作簿是否为宏文件
+    If callerWb Is Nothing Then
+        LuaTask = "#ERROR: 无法获取调用工作簿"
+        Exit Function
+    End If
+    
+    ' 防止在xlam文件中创建任务
+    If callerWb.FileFormat = xlAddIn Then
+        LuaTask = "#ERROR: 不能在宏文件中创建任务"
+        MsgBox "禁止在宏文件里创建任务", vbCritical, "LuaTask:Waring"
+        Exit Function
+    End If
+    
+    wbName = callerWb.Name
+    On Error GoTo ErrorHandler
     
     ' 检查是否已存在任务
     Dim existingTaskId As String
     existingTaskId = FindTaskByCell(taskCell)
 
-    If existingTaskId <> "" Then
+    If existingTaskId <> vbNullString Then
         LuaTask = existingTaskId
         Exit Function
     End If
@@ -483,7 +502,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     g_TaskProgress(taskId) = 0
     g_TaskMessage(taskId) = Empty
     g_TaskValue(taskId) = Empty
-    g_TaskError(taskId) = ""
+    g_TaskError(taskId) = vbNullString
     g_TaskCoThread(taskId) = 0
 
     LuaTask = taskId
@@ -740,6 +759,28 @@ Private Sub ResumeCoroutine(taskId As String)
     
     If g_TaskStatus(taskId) <> "yielded" Then Exit Sub
     
+    ' 检查工作簿是否仍然打开
+    If g_TaskWorkbook.Exists(taskId) Then
+        Dim wbName As String
+        wbName = g_TaskWorkbook(taskId)
+        
+        ' 验证工作簿是否存在且打开
+        Dim wb As Workbook
+        Dim wbExists As Boolean
+        wbExists = False
+        
+        On Error Resume Next
+        Set wb = Application.Workbooks(wbName)
+        wbExists = Not (wb Is Nothing)
+        On Error GoTo ErrorHandler
+        
+        If Not wbExists Then
+            g_TaskStatus(taskId) = "error"
+            g_TaskError(taskId) = "工作簿已关闭: " & wbName
+            Exit Sub
+        End If
+    End If
+    
     Dim coThread As LongPtr
     coThread = g_TaskCoThread(taskId)
     
@@ -756,7 +797,6 @@ Private Sub ResumeCoroutine(taskId As String)
             
             If VarType(param) = vbString Then
                 On Error Resume Next
-                Dim wb As Workbook
                 Dim rng As Range
 
                 If Not g_TaskWorkbook.Exists(taskId) Then
@@ -766,7 +806,7 @@ Private Sub ResumeCoroutine(taskId As String)
                 Set wb = Application.Workbooks(g_TaskWorkbook(taskId))
                 If wb Is Nothing Then
                     g_TaskStatus(taskId) = "error"
-                    g_TaskMessage(taskId) = "Workbook closed"
+                    g_TaskError(taskId) = "工作簿已关闭"
                     Exit Sub
                 End If
 
@@ -974,12 +1014,12 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
     
     ptr = lua_tolstring(L, idx, VarPtr(length))
     If ptr = 0 Then
-        GetStringFromState = ""
+        GetStringFromState = vbNullString
         Exit Function
     End If
     
     If length = 0 Then
-        GetStringFromState = ""
+        GetStringFromState = vbNullString
         Exit Function
     End If
     
@@ -992,7 +1032,7 @@ Private Function UTF8ToVBAString(ByVal ptr As LongPtr, ByVal byteLen As Long) As
     On Error GoTo ErrorHandler
     
     If ptr = 0 Or byteLen = 0 Then
-        UTF8ToVBAString = ""
+        UTF8ToVBAString = vbNullString
         Exit Function
     End If
     
@@ -1018,7 +1058,7 @@ Private Function UTF8ToVBAString(ByVal ptr As LongPtr, ByVal byteLen As Long) As
     Exit Function
 
 ErrorHandler:
-    UTF8ToVBAString = ""
+    UTF8ToVBAString = vbNullString
     If Not stream Is Nothing Then
         On Error Resume Next
         stream.Close
@@ -1329,5 +1369,5 @@ Private Function FindTaskByCell(taskCell As String) As String
         End If
     Next
 
-    FindTaskByCell = ""
+    FindTaskByCell = vbNullString
 End Function
