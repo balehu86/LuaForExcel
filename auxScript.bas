@@ -891,19 +891,19 @@ Private Sub LuaPerfMenu_ShowSchedulerStats()
     msg = "========================================" & vbCrLf
     msg = msg & "  调度器性能统计" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
-    
-    msg = msg & "启动时间: " & Format(g_SchedulerStartTime, "yyyy-mm-dd hh:nn:ss") & vbCrLf
-    msg = msg & "运行时长: " & Format(Now - g_SchedulerStartTime, "hh:nn:ss") & vbCrLf
+
+    msg = msg & "启动时间: " & Format(g_SchedulerStats.StartTime, "yyyy-mm-dd hh:nn:ss") & vbCrLf
+    msg = msg & "运行时长: " & Format(Now - g_SchedulerStats.StartTime, "hh:nn:ss") & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
-    
-    msg = msg & "总调度次数: " & g_SchedulerTotalCount & vbCrLf
-    msg = msg & "总运行时间: " & Format(g_SchedulerTotalTime, "0.00") & " ms" & vbCrLf
-    
-    If g_SchedulerTotalCount > 0 Then
-        msg = msg & "平均每次: " & Format(g_SchedulerTotalTime / g_SchedulerTotalCount, "0.00") & " ms" & vbCrLf
+
+    msg = msg & "总调度次数: " & g_SchedulerStats.TotalCount & vbCrLf
+    msg = msg & "总运行时间: " & Format(g_SchedulerStats.TotalTime, "0.00") & " ms" & vbCrLf
+
+    If g_SchedulerStats.TotalCount > 0 Then
+        msg = msg & "平均每次: " & Format(g_SchedulerStats.TotalTime / g_SchedulerStats.TotalCount, "0.00") & " ms" & vbCrLf
     End If
-    
-    msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerLastTime, "0.00") & " ms" & vbCrLf
+
+    msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerStats.LastTime, "0.00") & " ms" & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     
     msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
@@ -948,10 +948,10 @@ Private Sub LuaPerfMenu_ShowTaskStats()
         msg = msg & "  状态: " & g_TaskStatus(CStr(taskId)) & vbCrLf
         
         If g_TaskRunCount.Exists(CStr(taskId)) Then
-            msg = msg & "  调度次数: " & g_TaskRunCount(CStr(taskId)) & vbCrLf
-            msg = msg & "  总运行时间: " & Format(g_TaskTotalTime(CStr(taskId)), "0.00") & " ms" & vbCrLf
-            msg = msg & "  平均时间: " & Format(g_TaskTotalTime(CStr(taskId)) / g_TaskRunCount(CStr(taskId)), "0.00") & " ms" & vbCrLf
-            msg = msg & "  上次运行: " & Format(g_TaskLastTime(CStr(taskId)), "0.00") & " ms" & vbCrLf
+            msg = msg & "  调度次数: " & g_TaskStats(CStr(taskId)).RunCount & vbCrLf
+            msg = msg & "  总运行时间: " & Format(g_TaskStats(CStr(taskId)).TotalTime, "0.00") & " ms" & vbCrLf
+            msg = msg & "  平均时间: " & Format(g_TaskStats(CStr(taskId)).TotalTime / g_TaskStats(CStr(taskId)).RunCount, "0.00") & " ms" & vbCrLf
+            msg = msg & "  上次运行: " & Format(g_TaskStats(CStr(taskId)).LastTime, "0.00") & " ms" & vbCrLf
         Else
             msg = msg & "  (尚未执行)" & vbCrLf
         End If
@@ -1003,14 +1003,11 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
         msg = msg & "  名称: " & CStr(wb) & vbCrLf
         msg = msg & "  任务数: " & wbTaskCount(CStr(wb)) & vbCrLf
         
-        If g_WorkbookTickCount_Stats.Exists(CStr(wb)) Then
-            msg = msg & "  总调度次数: " & g_WorkbookTickCount_Stats(CStr(wb)) & vbCrLf
-            msg = msg & "  总运行时间: " & Format(g_WorkbookTotalTime(CStr(wb)), "0.00") & " ms" & vbCrLf
-            msg = msg & "  平均时间: " & Format(g_WorkbookTotalTime(CStr(wb)) / g_WorkbookTickCount_Stats(CStr(wb)), "0.00") & " ms" & vbCrLf
-            
-            If g_WorkbookLastTime.Exists(CStr(wb)) Then
-                msg = msg & "  上次调度: " & Format(g_WorkbookLastTime(CStr(wb)), "0.00") & " ms" & vbCrLf
-            End If
+        If g_WorkbookStats.Exists(CStr(wb)) Then
+            msg = msg & "  总调度次数: " & g_WorkbookStats(CStr(wb)).TickCount & vbCrLf
+            msg = msg & "  总运行时间: " & Format(g_WorkbookStats(CStr(wb)).TotalTime, "0.00") & " ms" & vbCrLf
+            msg = msg & "  平均时间: " & Format(g_WorkbookStats(CStr(wb)).TotalTime / g_WorkbookStats(CStr(wb)).TickCount, "0.00") & " ms" & vbCrLf
+            msg = msg & "  上次调度: " & Format(g_WorkbookStats(CStr(wb)).LastTime, "0.00") & " ms" & vbCrLf
         Else
             msg = msg & "  (尚未执行)" & vbCrLf
         End If
@@ -1036,25 +1033,21 @@ Private Sub LuaPerfMenu_ResetStats()
     result = MsgBox("确定要重置所有性能统计数据吗？" & vbCrLf & vbCrLf & _
                     "这将清除所有计时数据，但不影响任务运行。", _
                     vbQuestion + vbYesNo, "确认重置")
-    
+
     If result = vbNo Then Exit Sub
-    
+
     ' 重置调度器统计
-    g_SchedulerTotalTime = 0
-    g_SchedulerLastTime = 0
-    g_SchedulerTotalCount = 0
-    g_SchedulerStartTime = Now
-    
+    g_SchedulerStats.TotalTime = 0
+    g_SchedulerStats.LastTime = 0
+    g_SchedulerStats.TotalCount = 0
+    g_SchedulerStats.StartTime = Now
+
     ' 重置任务统计
-    If Not g_TaskLastTime Is Nothing Then g_TaskLastTime.RemoveAll
-    If Not g_TaskTotalTime Is Nothing Then g_TaskTotalTime.RemoveAll
-    If Not g_TaskRunCount Is Nothing Then g_TaskRunCount.RemoveAll
-    
+    If Not g_TaskStats Is Nothing Then g_TaskStats.RemoveAll
+
     ' 重置工作簿统计
-    If Not g_WorkbookLastTime Is Nothing Then g_WorkbookLastTime.RemoveAll
-    If Not g_WorkbookTotalTime Is Nothing Then g_WorkbookTotalTime.RemoveAll
-    If Not g_WorkbookTickCount_Stats Is Nothing Then g_WorkbookTickCount_Stats.RemoveAll
-    
+    If Not g_WorkbookStats Is Nothing Then g_WorkbookStats.RemoveAll
+
     MsgBox "所有性能统计数据已重置。", vbInformation, "重置完成"
 End Sub
 ' ============================================

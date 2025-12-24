@@ -84,6 +84,7 @@ Private g_MaxIterationsPerTick As Long
 Private g_NextScheduleTime As Date    '标记记下一次调度时间
 Private g_ScheduleMode As Integer  ' 0=按任务顺序, 1=按工作簿
 Private g_WorkbookTicks As Integer  ' 默认每个工作簿的tick数
+' 按工作簿调度的变量
 Private g_WorkbookCursor As Object  ' wbName -> cursor index (仅mode=1时使用)
 Private g_WorkbookTickCount As Object  ' workbookName -> tick count (仅mode=1时使用)
 ' ===== 配置常量 =====
@@ -93,18 +94,27 @@ Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代�
 Private Const DEFAULT_SCHEDULER_MODE As Integer = 0  ' 调度模式：0=按任务顺序, 1=按工作簿
 Private Const DEFAULT_WORKBOOK_TICKS As Integer = 1  ' 每个工作簿的默认tick数
 ' ===== 性能统计全局变量 =====
-Private g_SchedulerTotalTime As Double      ' 调度器总运行时间(ms)
-Private g_SchedulerLastTime As Double       ' 上次调度花费时间(ms)
-Private g_SchedulerTotalCount As Long       ' 总调度次数
-Private g_SchedulerStartTime As Date        ' 调度器启动时间
+Private Type SchedulerStats
+    TotalTime As Double
+    LastTime As Double
+    TotalCount As Long
+    StartTime As Date
+End Type
+Private g_SchedulerStats As SchedulerStats
 
-Private g_TaskLastTime As Object            ' taskId -> 上次运行时间(ms)
-Private g_TaskTotalTime As Object           ' taskId -> 总运行时间(ms)
-Private g_TaskRunCount As Object            ' taskId -> 调度次数
+Private Type TaskStats
+    LastTime As Double
+    TotalTime As Double
+    RunCount As Long
+End Type
+Private g_TaskStats As Object      ' taskId -> TaskStats
 
-Private g_WorkbookLastTime As Object        ' workbookName -> 上次调度时间(ms)
-Private g_WorkbookTotalTime As Object       ' workbookName -> 总运行时间(ms)
-Private g_WorkbookTickCount_Stats As Object ' workbookName -> 调度次数(统计用，与配置的g_WorkbookTickCount区分)
+Private Type WorkbookStats
+    LastTime As Double
+    TotalTime As Double
+    TickCount As Long     '调度次数(统计用，与配置的g_WorkbookTickCount区分)
+End Type
+Private g_Workbookstats As Object  ' wbName -> WorkbookStats
 ' ============================================
 ' 第一部分：核心初始化和清理
 ' ============================================
@@ -162,24 +172,18 @@ End Function
 Private Sub InitCoroutineSystem()
     g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
-    g_ScheduleMode = DEFAULT_SCHEDULER_MODE ' 默认按任务顺序调度
-    g_WorkbookTicks = DEFAULT_WORKBOOK_TICKS ' 按工作簿调度，默认每个工作簿1个tick
+    g_ScheduleMode = DEFAULT_SCHEDULER_MODE  ' 默认按任务顺序调度
+    g_WorkbookTicks = DEFAULT_WORKBOOK_TICKS ' 按工作簿调度下，默认每个工作簿1个tick
     Set g_WorkbookCursor = CreateObject("Scripting.Dictionary")
-    Set g_WorkbookTickCount = CreateObject("Scripting.Dictionary")
-
+    Set g_WorkbookStats = CreateObject("Scripting.Dictionary")
     ' 初始化性能统计
-    g_SchedulerTotalTime = 0
-    g_SchedulerLastTime = 0
-    g_SchedulerTotalCount = 0
-    g_SchedulerStartTime = Now
-    Set g_TaskLastTime = CreateObject("Scripting.Dictionary")
-    Set g_TaskTotalTime = CreateObject("Scripting.Dictionary")
-    Set g_TaskRunCount = CreateObject("Scripting.Dictionary")
-    
-    Set g_WorkbookLastTime = CreateObject("Scripting.Dictionary")
-    Set g_WorkbookTotalTime = CreateObject("Scripting.Dictionary")
-    Set g_WorkbookTickCount_Stats = CreateObject("Scripting.Dictionary")
-
+    g_SchedulerStats.TotalTime = 0
+    g_SchedulerStats.LastTime = 0
+    g_SchedulerStats.TotalCount = 0
+    g_SchedulerStats.StartTime = Now
+    Set g_TaskStats = CreateObject("Scripting.Dictionary")
+    Set g_WorkbookStats = CreateObject("Scripting.Dictionary")
+    ' 初始化任务系统
     Set g_TaskFunc = CreateObject("Scripting.Dictionary")
     Set g_TaskWorkbook = CreateObject("Scripting.Dictionary")
     Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
@@ -217,21 +221,16 @@ Public Sub CleanupLua()
             g_TaskError.RemoveAll
             g_TaskCoThread.RemoveAll
             g_TaskQueue.RemoveAll
-            
             ' 新增：清理性能统计
-            g_TaskLastTime.RemoveAll
-            g_TaskTotalTime.RemoveAll
-            g_TaskRunCount.RemoveAll
-            g_WorkbookLastTime.RemoveAll
-            g_WorkbookTotalTime.RemoveAll
-            g_WorkbookTickCount_Stats.RemoveAll
+            g_TaskStats.RemoveAll
+            g_WorkbookStats.RemoveAll
         End If
-        
+
         If g_LuaState <> 0 Then
             lua_close g_LuaState
             g_LuaState = 0
         End If
-        
+
         g_Initialized = False
     End If
 End Sub
@@ -730,12 +729,11 @@ Public Sub SchedulerTick()
     ' 性能计时统计
     Dim schedulerElapsed As Double
     schedulerElapsed = (Timer - schedulerStart) * 1000
-    g_SchedulerLastTime = schedulerElapsed
-    g_SchedulerTotalTime = g_SchedulerTotalTime + schedulerElapsed
-    g_SchedulerTotalCount = g_SchedulerTotalCount + 1
-    
-    Debug.Print "[PERF] Scheduler #" & g_SchedulerTotalCount & " 执行时间: " & Format(schedulerElapsed, "0.00") & " ms"
+    g_SchedulerStats.LastTime = schedulerElapsed
+    g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
+    g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
 
+    Debug.Print "[PERF] Scheduler #" & g_SchedulerStats.TotalCount & " 执行时间: " & Format(schedulerElapsed, "0.00") & " ms"
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
@@ -898,7 +896,7 @@ Private Sub ScheduleByWorkbook()
         ' ---- 工作簿级别计时结束 ----
         Dim wbElapsed As Double
         wbElapsed = (Timer - wbStart) * 1000
-        g_WorkbookLastTime(CStr(wb)) = wbElapsed
+        g_WorkbookStats(CStr(wb)).LastTime = wbElapsed
 
 NextWorkbook:
     Next wb
@@ -1004,23 +1002,23 @@ Private Sub ResumeCoroutine(taskId As String)
     taskElapsed = (Timer - taskStart) * 1000
     
     ' 更新任务统计
-    g_TaskLastTime(taskId) = taskElapsed
-    If Not g_TaskTotalTime.Exists(taskId) Then
-        g_TaskTotalTime(taskId) = 0
-        g_TaskRunCount(taskId) = 0
+    g_TaskStats(taskId).LastTime = taskElapsed
+    If Not g_TaskStats(taskId).TotalTime.Exists(taskId) Then
+        g_TaskStats(taskId).TotalTime = 0
+        g_TaskStats(taskId).RunCount = 0
     End If
-    g_TaskTotalTime(taskId) = g_TaskTotalTime(taskId) + taskElapsed
-    g_TaskRunCount(taskId) = g_TaskRunCount(taskId) + 1
+    g_TaskStats(taskId).TotalTime = g_TaskStats(taskId).TotalTime + taskElapsed
+    g_TaskStats(taskId).RunCount = g_TaskStats(taskId).RunCount + 1
     
     ' 更新工作簿统计
     If g_TaskWorkbook.Exists(taskId) Then
         wbName = g_TaskWorkbook(taskId)
-        If Not g_WorkbookTotalTime.Exists(wbName) Then
-            g_WorkbookTotalTime(wbName) = 0
-            g_WorkbookTickCount_Stats(wbName) = 0
+        If Not g_WorkbookStats.Exists(wbName) Then
+            g_WorkbookStats(wbName).TotalTime = 0
+            g_WorkbookStats(wbName).TickCount = 0
         End If
-        g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
-        g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
+        g_WorkbookStats(wbName).TotalTime = g_WorkbookStats(wbName).TotalTime + taskElapsed
+        g_WorkbookStats(wbName).TickCount = g_WorkbookStats(wbName).TickCount + 1
     End If
     
     Exit Sub
