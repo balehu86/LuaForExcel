@@ -697,6 +697,8 @@ Private Sub StartSchedulerIfNeeded()
     g_SchedulerRunning = True
     g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
     Application.OnTime g_NextScheduleTime, "SchedulerTick"
+
+    Debug.Print "[INFO] 调度器自动启动，队列任务数: " & g_TaskQueue.Count
 End Sub
 
 ' 调度器心跳
