@@ -44,7 +44,6 @@ Option Explicit
 #Else
     ' 32位版本声明（暂不提供）
 #End If
-
 ' ===== Lua 类型常量 =====
 Private Const LUA_TNIL = 0
 Private Const LUA_TBOOLEAN = 1
@@ -52,19 +51,16 @@ Private Const LUA_TNUMBER = 3
 Private Const LUA_TSTRING = 4
 Private Const LUA_TTABLE = 5
 Private Const LUA_TFUNCTION = 6
-
 ' ===== Lua 状态常量 =====
 Private Const LUA_OK = 0
 Private Const LUA_YIELD = 1
 Private Const LUA_ERRRUN = 2
-
 ' ===== 全局变量 =====
 Private g_LuaState As LongPtr
 Private g_Initialized As Boolean
 Private g_HotReloadEnabled As Boolean
 Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
-
 ' ===== 协程全局变量 =====
 Private g_TaskFunc As Object           ' taskId -> func name
 Private g_TaskWorkbook As Object       ' taskId -> workbook name
@@ -89,7 +85,6 @@ Private g_NextScheduleTime As Date    '标记记下一次调度时间
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
 Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代次数，默认1
-
 ' ============================================
 ' 第一部分：核心初始化和清理
 ' ============================================
@@ -130,12 +125,12 @@ Public Function InitLuaState() As Boolean
         If Not TryLoadFunctionsFile() Then
             MsgBox "functions.lua 加载失败。" & vbCrLf & _
                    "Lua 引擎已启动,但自定义函数不可用。", _
-                   vbExclamation, "初始化警告"
+                   vbExclamation, "InitLuaState_Warning"
         End If
     End If
     
     InitLuaState = True
-    MsgBox "Lua栈初始化完成",,"恭喜" 
+    MsgBox "Lua栈初始化完成",vbInformation,"InitLuaState_Info" 
     Exit Function
 
 ErrorHandler:
@@ -149,7 +144,7 @@ Private Sub InitCoroutineSystem()
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
 
     Set g_TaskFunc = CreateObject("Scripting.Dictionary")
-    Set g_TaskWorkbook = CreateObject("Scripting.Dictionary")  ' 新增
+    Set g_TaskWorkbook = CreateObject("Scripting.Dictionary")
     Set g_TaskStartArgs = CreateObject("Scripting.Dictionary")
     Set g_TaskResumeSpec = CreateObject("Scripting.Dictionary")
     Set g_TaskCell = CreateObject("Scripting.Dictionary")
@@ -174,7 +169,7 @@ Public Sub CleanupLua()
 
         If Not g_TaskFunc Is Nothing Then
             g_TaskFunc.RemoveAll
-            g_TaskWorkbook.RemoveAll  ' 新增
+            g_TaskWorkbook.RemoveAll
             g_TaskStartArgs.RemoveAll
             g_TaskResumeSpec.RemoveAll
             g_TaskCell.RemoveAll
@@ -195,7 +190,6 @@ Public Sub CleanupLua()
         g_Initialized = False
     End If
 End Sub
-
 ' ============================================
 ' 第二部分：functions.lua 加载和热重载
 ' ============================================
@@ -306,7 +300,6 @@ Private Sub CheckAutoReload()
 
     Call TryLoadFunctionsFile
 End Sub
-
 ' ============================================
 ' 第三部分：公共接口（基础功能）
 ' ============================================
@@ -508,8 +501,9 @@ Public Function LuaGet(taskId As String, field As String) As Variant
     ' 标记为 volatile，每次计算都会刷新
     Application.Volatile True
     
-    If g_TaskFunc Is Nothing Then
-        InitCoroutineSystem
+    If Not InitLuaState() Then
+        LuaEval = CVErr(xlErrValue)
+        Exit Function
     End If
     
     If Not g_TaskFunc.Exists(taskId) Then
@@ -715,7 +709,8 @@ Public Sub SchedulerTick()
     For i = 0 To tasksToRemove.Count - 1
         If g_TaskQueue.Exists(tasksToRemove(i)) Then
             g_TaskQueue.Remove tasksToRemove(i)
-            g_TaskWorkbook.Remove tasksToRemove(i)
+            'g_TaskWorkbook.Remove tasksToRemove(i)
+            'g_TaskStatus(tasksToRemove(i)) = "Terminated"
         End If
     Next i
 
@@ -791,18 +786,16 @@ Private Sub ResumeCoroutine(taskId As String)
             End If
         Next i
     End If
-    
+    ' 获取返回值
     Dim nargs As Long
     nargs = 0
     If IsArray(resumeSpec) Then
         nargs = UBound(resumeSpec) - LBound(resumeSpec) + 1
     End If
-    
     Dim nres As LongPtr
     Dim result As Long
-    ' 修改：g_LuaState.L -> g_LuaState
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-    
+    ' 处理结果
     HandleCoroutineResult taskId, result, CLng(nres)
     Exit Sub
 
@@ -912,6 +905,63 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
         Next j
         lua_rawseti L, -2, i - LBound(arr, 1) + 1
     Next i
+End Sub
+
+' 处理协程返回结果
+Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long)
+    On Error GoTo ErrorHandler
+    
+    Dim coThread As LongPtr
+    coThread = g_TaskCoThread(taskId)
+    
+    Dim topBefore As Long
+    topBefore = lua_gettop(coThread)
+    
+    Select Case result
+        Case LUA_OK
+            g_TaskStatus(taskId) = "done"
+            g_StateDirty = True
+            g_TaskProgress(taskId) = 100
+
+            If nres > 0 And topBefore > 0 Then
+                Dim retData As Variant
+                retData = GetValue(coThread, -1)
+                ParseYieldReturn taskId, retData, True
+            End If
+        Case LUA_YIELD
+            If nres > 0 And topBefore > 0 Then
+                Dim yieldData As Variant
+                yieldData = GetValue(coThread, -1)
+                ParseYieldReturn taskId, yieldData, False
+            End If
+            ' 注意:这里不要立即设置为yielded,让ParseYieldReturn根据返回值决定
+            If g_TaskStatus(taskId) <> "done" And g_TaskStatus(taskId) <> "error" Then
+                g_TaskStatus(taskId) = "yielded"
+            End If
+            g_StateDirty = True
+            
+        Case Else
+            g_TaskStatus(taskId) = "error"
+            g_StateDirty = True
+
+            If nres > 0 And topBefore > 0 Then
+                g_TaskError(taskId) = GetStringFromState(coThread, -1)
+            Else
+                g_TaskError(taskId) = "协程错误: 代码 " & result
+            End If
+    End Select
+    
+    ' 清理协程栈
+    lua_settop coThread, 0
+    
+    Exit Sub
+
+ErrorHandler:
+    g_TaskStatus(taskId) = "error"
+    g_TaskError(taskId) = "处理结果错误: " & Err.Description
+    ' 确保清理栈
+    On Error Resume Next
+    If coThread <> 0 Then lua_settop coThread, 0
 End Sub
 
 ' 从 Lua 栈获取字符串
@@ -1195,65 +1245,6 @@ Private Function TableToDictArray(ByVal L As LongPtr, ByVal idx As Long) As Vari
 ErrorHandler:
     TableToDictArray = "#DICT_ERROR: " & Err.Description
 End Function
-
-' 处理协程返回结果
-Private Sub HandleCoroutineResult(taskId As String, result As Long, nres As Long)
-    On Error GoTo ErrorHandler
-    
-    Dim coThread As LongPtr
-    coThread = g_TaskCoThread(taskId)
-    
-    Dim topBefore As Long
-    topBefore = lua_gettop(coThread)
-    
-    Select Case result
-        Case LUA_OK
-            g_TaskStatus(taskId) = "done"
-            g_StateDirty = True
-            g_TaskProgress(taskId) = 100
-            
-            If nres > 0 And topBefore > 0 Then
-                Dim retData As Variant
-                retData = GetValue(coThread, -1)
-                ParseYieldReturn taskId, retData, True
-            End If
-            
-        Case LUA_YIELD
-            If nres > 0 And topBefore > 0 Then
-                Dim yieldData As Variant
-                yieldData = GetValue(coThread, -1)
-                ParseYieldReturn taskId, yieldData, False
-            End If
-            
-            ' 注意:这里不要立即设置为yielded,让ParseYieldReturn根据返回值决定
-            If g_TaskStatus(taskId) <> "done" And g_TaskStatus(taskId) <> "error" Then
-                g_TaskStatus(taskId) = "yielded"
-            End If
-            g_StateDirty = True
-            
-        Case Else
-            g_TaskStatus(taskId) = "error"
-            g_StateDirty = True
-
-            If nres > 0 And topBefore > 0 Then
-                g_TaskError(taskId) = GetStringFromState(coThread, -1)
-            Else
-                g_TaskError(taskId) = "协程错误: 代码 " & result
-            End If
-    End Select
-    
-    ' 清理协程栈
-    lua_settop coThread, 0
-    
-    Exit Sub
-
-ErrorHandler:
-    g_TaskStatus(taskId) = "error"
-    g_TaskError(taskId) = "处理结果错误: " & Err.Description
-    ' 确保清理栈
-    On Error Resume Next
-    If coThread <> 0 Then lua_settop coThread, 0
-End Sub
 
 ' 解析 yield/return 字典
 Private Sub ParseYieldReturn(taskId As String, data As Variant, isFinal As Boolean)

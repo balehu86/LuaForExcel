@@ -92,7 +92,7 @@ Public Sub CleanupWorkbookTasks(wbName As String)
         g_TaskValue.Remove tid
         g_TaskError.Remove tid
         g_TaskCoThread.Remove tid
-    Next i
+    Next
 End Sub  
 ' ============================================
 ' 第七部分：可视化操作函数

@@ -14,12 +14,13 @@ Private Sub Workbook_Open()
     On Error GoTo ErrorHandler
     
     ' 初始化Lua引擎
-    If Not InitLuaState() Then
-        MsgBox "ThisWorkbook.Workbook_Open: Lua引擎初始化失败！" & vbCrLf & _
-               "部分功能可能不可用。", vbExclamation, "加载宏启动警告"
-    End If
+    'If Not InitLuaState() Then
+    '    MsgBox "ThisWorkbook.Workbook_Open: Lua引擎初始化失败！" & vbCrLf & _
+    '           "部分功能可能不可用。", vbExclamation, "Workbook_Open加载宏启动警告"
+    'End If
     
     ' 启用右键菜单
+    DisableLuaTaskMenu
     EnableLuaTaskMenu
     
     ' 注册应用程序级事件
