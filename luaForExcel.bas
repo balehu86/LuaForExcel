@@ -808,11 +808,11 @@ Private Sub ScheduleByWorkbook()
     Set wbTasks = CreateObject("Scripting.Dictionary")
     
     Dim taskId As Variant
-    Dim wbName As String  ' 只在这里声明一次
+    Dim wbName As String
     
     For Each taskId In g_TaskQueue.Keys
         If g_TaskWorkbook.Exists(CStr(taskId)) Then
-            wbName = g_TaskWorkbook(CStr(taskId))  ' 直接使用，不再声明
+            wbName = g_TaskWorkbook(CStr(taskId))
             
             If Not wbTasks.Exists(wbName) Then
                 Set wbTasks(wbName) = CreateObject("System.Collections.ArrayList")
@@ -824,7 +824,7 @@ Private Sub ScheduleByWorkbook()
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
     
-    Dim wb As Variant  ' 用于 For Each 循环
+    Dim wb As Variant
     For Each wb In wbTasks.Keys
         ' 工作簿级别计时开始
         Dim wbStart As Double
@@ -840,12 +840,23 @@ Private Sub ScheduleByWorkbook()
         Dim taskList As Object
         Set taskList = wbTasks(CStr(wb))
         
+        ' 修改：执行 tickCount 次任务，而不是索引 0 到 tickCount-1
+        Dim executedCount As Long
+        executedCount = 0
+        
         Dim i As Long
-        For i = 0 To Application.Min(tickCount - 1, taskList.Count - 1)
+        ' 从列表中依次执行，最多执行 tickCount 个任务
+        For i = 0 To taskList.Count - 1
+            If executedCount >= tickCount Then Exit For
+            
             taskId = taskList(i)
             
             If g_TaskFunc.Exists(CStr(taskId)) Then
-                ResumeCoroutine CStr(taskId)
+                ' 只执行 yielded 状态的任务
+                If g_TaskStatus(CStr(taskId)) = "yielded" Then
+                    ResumeCoroutine CStr(taskId)
+                    executedCount = executedCount + 1
+                End If
                 
                 Dim status As String
                 status = g_TaskStatus(CStr(taskId))
