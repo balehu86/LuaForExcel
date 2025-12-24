@@ -41,8 +41,7 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
     
     ' 停止调度器
     StopScheduler
-    MsgBox "调度器已停止。" & vbCrLf & _
-           "活跃任务将不会继续执行。" & vbCrLf & vbCrLf
+    
     ' 禁用右键菜单
     DisableLuaTaskMenu
     

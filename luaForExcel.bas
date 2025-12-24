@@ -301,7 +301,7 @@ Private Sub CheckAutoReload()
     Call TryLoadFunctionsFile
 End Sub
 ' ============================================
-' 第三部分：公共接口（基础功能）
+' 第三部分：公共UDF接口（基础功能）
 ' ============================================
 ' 执行 Lua 表达式
 Public Function LuaEval(expression As String) As Variant
@@ -399,9 +399,8 @@ ErrorHandler:
     LuaCall = "VBA错误: " & Err.Description
     If g_Initialized Then lua_settop g_LuaState, 0
 End Function
-
 ' ============================================
-' 第四部分：协程 UDF 接口
+' 第四部分：协程UDF接口
 ' ============================================
 ' 任务定义函数
 Public Function LuaTask(ParamArray params() As Variant) As String
@@ -469,14 +468,14 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     If startList.Count > 0 Then startArgs = startList.ToArray()
     If resumeList.Count > 0 Then resumeSpec = resumeList.ToArray()
 
-    ' 生成任务ID（包含工作簿名）
+    ' 生成任务ID(包含工作簿名)
     Dim taskId As String
     taskId = "TASK_" & g_NextTaskId & "_" & taskCell
     g_NextTaskId = g_NextTaskId + 1
 
     ' 注册任务
     g_TaskFunc(taskId) = funcName
-    g_TaskWorkbook(taskId) = wbName  ' 新增
+    g_TaskWorkbook(taskId) = wbName
     g_TaskStartArgs(taskId) = startArgs
     g_TaskResumeSpec(taskId) = resumeSpec
     g_TaskCell(taskId) = taskCell
@@ -539,7 +538,6 @@ Public Function LuaGet(taskId As String, field As String) As Variant
 ErrorHandler:
     LuaGet = "#ERROR: " & Err.Description
 End Function
-
 ' ============================================
 ' 第五部分：协程执行和调度
 ' ============================================
@@ -786,6 +784,7 @@ Private Sub ResumeCoroutine(taskId As String)
             End If
         Next i
     End If
+    
     ' 获取返回值
     Dim nargs As Long
     nargs = 0
@@ -795,6 +794,7 @@ Private Sub ResumeCoroutine(taskId As String)
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
+    
     ' 处理结果
     HandleCoroutineResult taskId, result, CLng(nres)
     Exit Sub
@@ -807,10 +807,14 @@ End Sub
 ' 手动停止调度器
 Public Sub StopScheduler()
     ' 停止调度标志
-    g_SchedulerRunning = False
-    ' 尝试取消所有 OnTime 调度
-    On Error Resume Next
-    Application.OnTime g_NextScheduleTime, "SchedulerTick", , False
+    If g_SchedulerRunning Then
+        g_SchedulerRunning = False
+        ' 尝试取消所有 OnTime 调度
+        On Error Resume Next
+        Application.OnTime g_NextScheduleTime, "SchedulerTick", , False
+        MsgBox "调度器已停止。" & vbCrLf & _
+            "活跃任务将不会继续执行。" & vbCrLf & vbCrLf
+    End If
 End Sub
 
 ' 恢复调度器
@@ -832,7 +836,6 @@ Private Sub ResumeScheduler()
     MsgBox "调度器已启动。" & vbCrLf & _
            "当前队列任务数: " & g_TaskQueue.Count, vbInformation, "调度器已启动"
 End Sub
-
 ' ============================================
 ' 第六部分：辅助函数（内部使用）
 ' ============================================
