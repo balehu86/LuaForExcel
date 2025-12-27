@@ -477,7 +477,7 @@ Private Sub LuaTaskMenu_StartAllWorkbookTasks()
                 End If
             End If
         End If
-    Next taskId
+    Next
 
     If count = 0 Then
         MsgBox "工作簿 [" & wbName & "] 没有 defined 状态的任务。", vbInformation, "提示"
@@ -525,7 +525,7 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
         If status = "done" Or status = "error" Then
             tasksToRemove.Add taskId
         End If
-    Next taskId
+    Next
     
     ' 清理任务
     Dim i As Long
@@ -649,7 +649,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
             Case "done": doneCount = doneCount + 1
             Case "error": errorCount = errorCount + 1
         End Select
-    Next taskId
+    Next
     
     msg = msg & "状态统计:" & vbCrLf
     msg = msg & "   运行中: " & runningCount & vbCrLf
@@ -689,7 +689,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         End If
         
         msg = msg & "----------------------------------------" & vbCrLf
-    Next taskId
+    Next
     
     ' 显示消息框
     MsgBox msg, vbInformation, "Lua 协程任务列表 (" & g_TaskFunc.Count & " 个任务)"
@@ -956,7 +956,7 @@ Private Sub LuaPerfMenu_ShowTaskStats()
         End If
         
         msg = msg & "----------------------------------------" & vbCrLf
-    Next taskId
+    Next
     
     MsgBox msg, vbInformation, "任务性能统计 (" & g_TaskFunc.Count & " 个任务)"
 End Sub
@@ -1024,7 +1024,7 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
         End If
         
         msg = msg & "----------------------------------------" & vbCrLf
-    Next wb
+    Next
     
     MsgBox msg, vbInformation, "工作簿性能统计 (" & wbTaskCount.Count & " 个工作簿)"
 End Sub

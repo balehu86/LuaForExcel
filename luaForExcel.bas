@@ -846,7 +846,7 @@ Private Sub ScheduleByWorkbook()
             End If
             wbTasks(wbName).Add taskId
         End If
-    Next taskId
+    Next
 
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
@@ -927,7 +927,7 @@ NextWorkbook:
         If g_TaskQueue.Exists(tasksToRemove(i)) Then
             g_TaskQueue.Remove tasksToRemove(i)
         End If
-    Next i
+    Next
 End Sub
 
 ' Resume 协程
