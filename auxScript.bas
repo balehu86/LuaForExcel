@@ -926,16 +926,16 @@ Private Sub LuaPerfMenu_ShowTaskStats()
         MsgBox "当前没有任何任务。", vbInformation, "任务性能统计"
         Exit Sub
     End If
-    
+
     Dim msg As String
     msg = "========================================" & vbCrLf
     msg = msg & "  任务性能统计" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
-    
+
     msg = msg & "任务总数: " & g_TaskFunc.Count & vbCrLf
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
-    
     Dim taskId As Variant
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+
     Dim taskNum As Long
     taskNum = 0
     
@@ -967,31 +967,31 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
         MsgBox "当前没有任何任务。", vbInformation, "工作簿性能统计"
         Exit Sub
     End If
-    
+
     ' 统计每个工作簿的任务数
     Dim wbTaskCount As Object
     Set wbTaskCount = CreateObject("Scripting.Dictionary")
-    
     Dim taskId As Variant
+
     For Each taskId In g_TaskWorkbook.Keys
         Dim wbName As String
         wbName = g_TaskWorkbook(CStr(taskId))
-        
+
         If Not wbTaskCount.Exists(wbName) Then
             wbTaskCount(wbName) = 0
         End If
         wbTaskCount(wbName) = wbTaskCount(wbName) + 1
     Next
-    
+
     Dim msg As String
     msg = "========================================" & vbCrLf
     msg = msg & "  工作簿性能统计" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
-    
+
     msg = msg & "工作簿总数: " & wbTaskCount.Count & vbCrLf
     msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
-    
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+
     Dim wb As Variant
     Dim wbNum As Long
     wbNum = 0
@@ -1043,7 +1043,7 @@ Private Sub LuaPerfMenu_ResetStats()
     g_SchedulerStats.LastTime = 0
     g_SchedulerStats.TotalCount = 0
     g_SchedulerStats.StartTime = Now
-    
+
     ' 重置任务统计
     If Not g_TaskLastTime Is Nothing Then g_TaskLastTime.RemoveAll
     If Not g_TaskTotalTime Is Nothing Then g_TaskTotalTime.RemoveAll

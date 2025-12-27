@@ -106,22 +106,34 @@ Private g_SchedulerStats As SchedulerStats
 Private g_TaskLastTime As Object            ' taskId -> 上次运行时间(ms)
 Private g_TaskTotalTime As Object           ' taskId -> 总运行时间(ms)
 Private g_TaskRunCount As Object            ' taskId -> 调度次数
+Private Type TaskStats
+    LastTime As Double       ' 任务上次运行时间(ms)
+    TotalTime As Double      ' 任务总运行时间(ms)
+    TickCount As Long        ' 任务调度次数
+End Type
+Private g_TaskStats As Object ' taskId -> TaskStats
 
 Private g_WorkbookLastTime As Object        ' workbookName -> 上次调度时间(ms)
 Private g_WorkbookTotalTime As Object       ' workbookName -> 总运行时间(ms)
 Private g_WorkbookTickCount_Stats As Object ' workbookName -> 调度次数(统计用，与配置的g_WorkbookTickCount区分)
+Private Type WorkbookStats
+    LastTime As Double       ' 工作簿上次运行时间(ms)
+    TotalTime As Double      ' 工作簿总运行时间(ms)
+    TickCount As Long        ' 工作簿调度次数
+End Type
+Private g_WorkbookStats As Object ' workbookName -> WorkbookStats
 ' ============================================
 ' 第一部分：核心初始化和清理
 ' ============================================
 ' 主初始化函数：创建空白 Lua 状态机
 Public Function InitLuaState() As Boolean
     On Error GoTo ErrorHandler
-    
+
     If g_Initialized Then
         InitLuaState = True
         Exit Function
     End If
-    
+
     ' 创建Lua状态机
     g_LuaState = luaL_newstate()
     If g_LuaState = 0 Then
@@ -130,22 +142,22 @@ Public Function InitLuaState() As Boolean
         InitLuaState = False
         Exit Function
     End If
-    
+
     luaL_openlibs g_LuaState
-    
+
     ' 固定为加载项目录下的functions.lua
     g_FunctionsPath = ThisWorkbook.Path & "\functions.lua"
     g_LastModified = #1/1/1900#
-    
+
     g_Initialized = True
     g_HotReloadEnabled = DEFAULT_HOT_RELOAD_ENABLED
-    
+
     InitCoroutineSystem
-    
+
     ' 尝试加载functions.lua
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
-    
+
     If fso.FileExists(g_FunctionsPath) Then
         If Not TryLoadFunctionsFile() Then
             MsgBox "functions.lua 加载失败。" & vbCrLf & _
@@ -153,7 +165,7 @@ Public Function InitLuaState() As Boolean
                    vbExclamation, "InitLuaState_Warning"
         End If
     End If
-    
+
     InitLuaState = True
     MsgBox "Lua栈初始化完成",vbInformation,"InitLuaState_Info" 
     Exit Function
@@ -183,6 +195,8 @@ Private Sub InitCoroutineSystem()
     Set g_WorkbookLastTime = CreateObject("Scripting.Dictionary")
     Set g_WorkbookTotalTime = CreateObject("Scripting.Dictionary")
     Set g_WorkbookTickCount_Stats = CreateObject("Scripting.Dictionary")
+    Set g_TaskStats = CreateObject("Scripting.Dictionary")
+    Set g_WorkbookStats = CreateObject("Scripting.Dictionary")
 
     Set g_TaskFunc = CreateObject("Scripting.Dictionary")
     Set g_TaskWorkbook = CreateObject("Scripting.Dictionary")
@@ -229,6 +243,8 @@ Public Sub CleanupLua()
             g_WorkbookLastTime.RemoveAll
             g_WorkbookTotalTime.RemoveAll
             g_WorkbookTickCount_Stats.RemoveAll
+            g_TaskStats.RemoveAll
+            g_WorkbookStats.RemoveAll
         End If
         
         If g_LuaState <> 0 Then
@@ -767,24 +783,24 @@ Private Sub ScheduleByTask()
         taskIds(idx) = taskId
         idx = idx + 1
     Next
-    
+
     Dim total As Long
     total = UBound(taskIds) + 1
     If total = 0 Then Exit Sub
-    
+
     Dim executed As Long, cur As Long
     cur = g_SchedulerCursorByTask Mod total
-    
+
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-    
+
     Do While executed < g_MaxIterationsPerTick And executed < total
         taskId = taskIds(cur)
         
         If g_TaskFunc.Exists(CStr(taskId)) Then
             ResumeCoroutine CStr(taskId)
             executed = executed + 1
-            
+
             Dim status As String
             status = g_TaskStatus(CStr(taskId))
             If status = "done" Or status = "error" Or status = "terminated" Then
@@ -793,12 +809,12 @@ Private Sub ScheduleByTask()
         Else
             tasksToRemove.Add taskId
         End If
-        
+
         cur = (cur + 1) Mod total
     Loop
-    
+
     g_SchedulerCursorByTask = cur
-    
+
     Dim i As Long
     For i = 0 To tasksToRemove.Count - 1
         If g_TaskQueue.Exists(tasksToRemove(i)) Then
@@ -807,7 +823,6 @@ Private Sub ScheduleByTask()
     Next i
 End Sub
 
-' 按工作簿调度,被SchedulerTick调用
 ' 按工作簿调度,被SchedulerTick调用
 Private Sub ScheduleByWorkbook()
     Dim wbTasks As Object
@@ -918,49 +933,49 @@ End Sub
 ' Resume 协程
 Private Sub ResumeCoroutine(taskId As String)
     On Error GoTo ErrorHandler
-    
+
     If g_TaskStatus(taskId) = "paused" Then Exit Sub
     If g_TaskStatus(taskId) <> "yielded" Then Exit Sub
-    
+
     ' 性能计时开始
     Dim taskStart As Double
     taskStart = Timer
-    
+
     ' 检查工作簿是否仍然打开
     If g_TaskWorkbook.Exists(taskId) Then
         Dim wbName As String
         wbName = g_TaskWorkbook(taskId)
-        
+
         Dim wb As Workbook
         Dim wbExists As Boolean
         wbExists = False
-        
+
         On Error Resume Next
         Set wb = Application.Workbooks(wbName)
         wbExists = Not (wb Is Nothing)
         On Error GoTo ErrorHandler
-        
+
         If Not wbExists Then
             g_TaskStatus(taskId) = "error"
             g_TaskError(taskId) = "工作簿已关闭: " & wbName
             Exit Sub
         End If
     End If
-    
+
     Dim coThread As LongPtr
     coThread = g_TaskCoThread(taskId)
-    
+
     lua_settop coThread, 0
-    
+
     Dim i As Long
     Dim resumeSpec As Variant
     resumeSpec = g_TaskResumeSpec(taskId)
-    
+
     If IsArray(resumeSpec) Then
         For i = LBound(resumeSpec) To UBound(resumeSpec)
             Dim param As Variant
             param = resumeSpec(i)
-            
+
             If VarType(param) = vbString Then
                 On Error Resume Next
                 Dim rng As Range
@@ -979,7 +994,7 @@ Private Sub ResumeCoroutine(taskId As String)
                 Set rng = wb.Range(param)
 
                 On Error GoTo ErrorHandler
-                
+
                 If Not rng Is Nothing Then
                     PushValue coThread, rng
                 Else
@@ -990,7 +1005,7 @@ Private Sub ResumeCoroutine(taskId As String)
             End If
         Next i
     End If
-    
+
     Dim nargs As Long
     nargs = 0
     If IsArray(resumeSpec) Then
@@ -999,9 +1014,9 @@ Private Sub ResumeCoroutine(taskId As String)
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-    
+
     HandleCoroutineResult taskId, result, CLng(nres)
-    
+
     ' 性能计时结束并统计
     Dim taskElapsed As Double
     taskElapsed = (Timer - taskStart) * 1000
@@ -1027,7 +1042,6 @@ Private Sub ResumeCoroutine(taskId As String)
     End If
     
     Exit Sub
-
 ErrorHandler:
     g_TaskStatus(taskId) = "error"
     g_TaskError(taskId) = "Resume错误: " & Err.Description
