@@ -76,16 +76,18 @@ Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean
-Private g_SchedulerCursor As Long   ' Round-Robin 游标
+Private g_SchedulerCursorByTask As Long   ' Round-Robin 游标
 Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
 Private g_NextTaskId As Long
-Private g_SchedulerIntervalMilliSec As Long
-Private g_MaxIterationsPerTick As Long
-Private g_NextScheduleTime As Date    '标记记下一次调度时间
-Private g_ScheduleMode As Integer  ' 0=按任务顺序, 1=按工作簿
-Private g_WorkbookTicks As Integer  ' 默认每个工作簿的tick数
-Private g_WorkbookCursor As Object  ' wbName -> cursor index (仅mode=1时使用)
-Private g_WorkbookTickCount As Object  ' workbookName -> tick count (仅mode=1时使用)
+Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
+
+Private g_NextScheduleTime As Date     '标记记下一次调度时间
+
+Private g_ScheduleMode As Integer         ' 0=按任务顺序, 1=按工作簿
+Private g_MaxIterationsPerTick As Integer ' 按任务时调度：每次调度迭代次数
+Private g_WorkbookTicks As Integer        ' 按工作簿调度：默认每个工作簿的tick数
+Private g_WorkbookCursor As Object        ' wbName -> cursor index (仅mode=1时使用)
+Private g_WorkbookTickCount As Object     ' workbookName -> tick count (仅mode=1时使用，若设置此值将覆盖此工作簿的g_WorkbookTicks)
 ' ===== 配置常量 =====
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
@@ -93,10 +95,13 @@ Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代�
 Private Const DEFAULT_SCHEDULER_MODE As Integer = 0  ' 调度模式：0=按任务顺序, 1=按工作簿
 Private Const DEFAULT_WORKBOOK_TICKS As Integer = 1  ' 每个工作簿的默认tick数
 ' ===== 性能统计全局变量 =====
-Private g_SchedulerTotalTime As Double      ' 调度器总运行时间(ms)
-Private g_SchedulerLastTime As Double       ' 上次调度花费时间(ms)
-Private g_SchedulerTotalCount As Long       ' 总调度次数
-Private g_SchedulerStartTime As Date        ' 调度器启动时间
+Private Type SchedulerStats
+    TotalTime As Double      ' 调度器总运行时间(ms)
+    LastTime As Double       ' 上次调度花费时间(ms)
+    TotalCount As Long       ' 总调度次数
+    StartTime As Date        ' 调度器启动时间
+End Type
+Private g_SchedulerStats As SchedulerStats
 
 Private g_TaskLastTime As Object            ' taskId -> 上次运行时间(ms)
 Private g_TaskTotalTime As Object           ' taskId -> 总运行时间(ms)
@@ -168,14 +173,13 @@ Private Sub InitCoroutineSystem()
     Set g_WorkbookTickCount = CreateObject("Scripting.Dictionary")
 
     ' 初始化性能统计
-    g_SchedulerTotalTime = 0
-    g_SchedulerLastTime = 0
-    g_SchedulerTotalCount = 0
-    g_SchedulerStartTime = Now
+    g_SchedulerStats.TotalTime = 0
+    g_SchedulerStats.LastTime = 0
+    g_SchedulerStats.TotalCount = 0
+    g_SchedulerStats.StartTime = Now
     Set g_TaskLastTime = CreateObject("Scripting.Dictionary")
     Set g_TaskTotalTime = CreateObject("Scripting.Dictionary")
     Set g_TaskRunCount = CreateObject("Scripting.Dictionary")
-    
     Set g_WorkbookLastTime = CreateObject("Scripting.Dictionary")
     Set g_WorkbookTotalTime = CreateObject("Scripting.Dictionary")
     Set g_WorkbookTickCount_Stats = CreateObject("Scripting.Dictionary")
@@ -194,7 +198,7 @@ Private Sub InitCoroutineSystem()
     Set g_TaskQueue = CreateObject("Scripting.Dictionary")
     
     g_NextTaskId = 1
-    g_SchedulerCursor = 0
+    g_SchedulerCursorByTask = 0
     g_StateDirty = False
 End Sub
 
@@ -730,12 +734,11 @@ Public Sub SchedulerTick()
     ' 性能计时统计
     Dim schedulerElapsed As Double
     schedulerElapsed = (Timer - schedulerStart) * 1000
-    g_SchedulerLastTime = schedulerElapsed
-    g_SchedulerTotalTime = g_SchedulerTotalTime + schedulerElapsed
-    g_SchedulerTotalCount = g_SchedulerTotalCount + 1
-    
-    Debug.Print "[PERF] Scheduler #" & g_SchedulerTotalCount & " 执行时间: " & Format(schedulerElapsed, "0.00") & " ms"
+    g_SchedulerStats.LastTime = schedulerElapsed
+    g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
+    g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
 
+    ' Debug.Print "[PERF] Scheduler #" & g_SchedulerStats.TotalCount & " 执行时间: " & Format(schedulerElapsed, "0.00") & " ms"
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
@@ -770,7 +773,7 @@ Private Sub ScheduleByTask()
     If total = 0 Then Exit Sub
     
     Dim executed As Long, cur As Long
-    cur = g_SchedulerCursor Mod total
+    cur = g_SchedulerCursorByTask Mod total
     
     Dim tasksToRemove As Object
     Set tasksToRemove = CreateObject("System.Collections.ArrayList")
@@ -794,7 +797,7 @@ Private Sub ScheduleByTask()
         cur = (cur + 1) Mod total
     Loop
     
-    g_SchedulerCursor = cur
+    g_SchedulerCursorByTask = cur
     
     Dim i As Long
     For i = 0 To tasksToRemove.Count - 1

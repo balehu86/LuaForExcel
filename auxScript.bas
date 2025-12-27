@@ -115,7 +115,6 @@ Public Sub EnableLuaTaskMenu()
     luaTaskMenu.Tag = "LuaTaskMenu"
     ' 添加单个任务的子菜单
     AddLuaMenuItem luaTaskMenu, "启动任务", "LuaTaskMenu_StartTask"
-    AddLuaMenuItem luaTaskMenu, "启动本簿所有任务", "LuaTaskMenu_StartAllWorkbookTasks"
     AddLuaMenuItem luaTaskMenu, "暂停任务", "LuaTaskMenu_PauseTask"
     AddLuaMenuItem luaTaskMenu, "恢复任务", "LuaTaskMenu_ResumeTask"
     AddLuaMenuItem luaTaskMenu, "终止任务", "LuaTaskMenu_TerminateTask"
@@ -129,6 +128,7 @@ Public Sub EnableLuaTaskMenu()
     ' 添加调度的子菜单
     AddLuaMenuItem luaSchedulerMenu, "启动调度器", "LuaSchedulerMenu_StartScheduler"
     AddLuaMenuItem luaSchedulerMenu, "停止调度器", "LuaSchedulerMenu_StopScheduler"
+    AddLuaMenuItem luaSchedulerMenu, "启动本簿所有任务", "LuaSchedulerMenu_StartAllWorkbookTasks"
     AddLuaMenuItem luaSchedulerMenu, "启动所有 defined 任务", "LuaSchedulerMenu_StartAllDefinedTasks"
     AddLuaMenuItem luaSchedulerMenu, "清理所有完成、错误任务", "LuaSchedulerMenu_CleanupFinishedTasks"
     AddLuaMenuItem luaSchedulerMenu, "删除此工作簿任务", "LuaSchedulerMenu_CleanupWorkbookTasks"
@@ -206,58 +206,6 @@ Private Sub LuaTaskMenu_StartTask()
     Else
         MsgBox "任务状态为 " & g_TaskStatus(taskId) & "，无法启动。", vbExclamation
     End If
-End Sub
-
-' 启动本工作簿的所有defined任务
-Private Sub LuaTaskMenu_StartAllWorkbookTasks()
-    On Error Resume Next
-
-    ' 获取当前工作簿名称
-    Dim wbName As String
-    On Error Resume Next
-    wbName = ActiveWorkbook.Name
-    On Error GoTo ErrorHandler
-
-    If wbName = "" Then
-        MsgBox "无法获取当前工作簿。", vbExclamation, "错误"
-        Exit Sub
-    End If
-
-    If g_TaskFunc Is Nothing Then
-        InitCoroutineSystem
-    End If
-
-    If g_TaskFunc.Count = 0 Then
-        MsgBox "当前没有任何任务。", vbInformation, "提示"
-        Exit Sub
-    End If
-
-    ' 收集本工作簿的所有defined任务
-    Dim taskId As Variant
-    Dim count As Long
-    count = 0
-
-    For Each taskId In g_TaskFunc.Keys
-        If g_TaskWorkbook.Exists(CStr(taskId)) Then
-            If g_TaskWorkbook(CStr(taskId)) = wbName Then
-                If g_TaskStatus(CStr(taskId)) = "defined" Then
-                    StartLuaCoroutine CStr(taskId)
-                    count = count + 1
-                End If
-            End If
-        End If
-    Next taskId
-
-    If count = 0 Then
-        MsgBox "工作簿 [" & wbName & "] 没有 defined 状态的任务。", vbInformation, "提示"
-    Else
-        MsgBox "已启动工作簿 [" & wbName & "] 的 " & count & " 个任务。", vbInformation, "启动完成"
-    End If
-    
-    Exit Sub
-
-ErrorHandler:
-    MsgBox "启动任务时出错: " & Err.Description, vbCritical, "错误"
 End Sub
 
 ' 暂停任务
@@ -489,6 +437,57 @@ Private Sub LuaSchedulerMenu_StopScheduler()
     If result = vbNo Then Exit Sub
     
     StopScheduler
+End Sub
+
+' 启动本工作簿的所有defined任务
+Private Sub LuaTaskMenu_StartAllWorkbookTasks()
+    On Error Resume Next
+
+    ' 获取当前工作簿名称
+    Dim wbName As String
+    On Error Resume Next
+    wbName = ActiveWorkbook.Name
+    On Error GoTo ErrorHandler
+
+    If wbName = "" Then
+        MsgBox "无法获取当前工作簿。", vbExclamation, "错误"
+        Exit Sub
+    End If
+
+    If g_TaskFunc Is Nothing Then
+        InitCoroutineSystem
+    End If
+
+    If g_TaskFunc.Count = 0 Then
+        MsgBox "当前没有任何任务。", vbInformation, "提示"
+        Exit Sub
+    End If
+
+    ' 收集本工作簿的所有defined任务
+    Dim taskId As Variant
+    Dim count As Long
+    count = 0
+
+    For Each taskId In g_TaskFunc.Keys
+        If g_TaskWorkbook.Exists(CStr(taskId)) Then
+            If g_TaskWorkbook(CStr(taskId)) = wbName Then
+                If g_TaskStatus(CStr(taskId)) = "defined" Then
+                    StartLuaCoroutine CStr(taskId)
+                    count = count + 1
+                End If
+            End If
+        End If
+    Next taskId
+
+    If count = 0 Then
+        MsgBox "工作簿 [" & wbName & "] 没有 defined 状态的任务。", vbInformation, "提示"
+    Else
+        MsgBox "已启动工作簿 [" & wbName & "] 的 " & count & " 个任务。", vbInformation, "启动完成"
+    End If
+
+    Exit Sub
+ErrorHandler:
+    MsgBox "启动任务时出错: " & Err.Description, vbCritical, "错误"
 End Sub
 
 ' 批量启动所有 defined 状态的任务
@@ -891,19 +890,19 @@ Private Sub LuaPerfMenu_ShowSchedulerStats()
     msg = "========================================" & vbCrLf
     msg = msg & "  调度器性能统计" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
-    
-    msg = msg & "启动时间: " & Format(g_SchedulerStartTime, "yyyy-mm-dd hh:nn:ss") & vbCrLf
-    msg = msg & "运行时长: " & Format(Now - g_SchedulerStartTime, "hh:nn:ss") & vbCrLf
+
+    msg = msg & "启动时间: " & Format(g_SchedulerStats.StartTime, "yyyy-mm-dd hh:nn:ss") & vbCrLf
+    msg = msg & "运行时长: " & Format(Now - g_SchedulerStats.StartTime, "hh:nn:ss") & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+
+    msg = msg & "总调度次数: " & g_SchedulerStats.TotalCount & vbCrLf
+    msg = msg & "总运行时间: " & Format(g_SchedulerStats.TotalTime, "0.00") & " ms" & vbCrLf
     
-    msg = msg & "总调度次数: " & g_SchedulerTotalCount & vbCrLf
-    msg = msg & "总运行时间: " & Format(g_SchedulerTotalTime, "0.00") & " ms" & vbCrLf
-    
-    If g_SchedulerTotalCount > 0 Then
-        msg = msg & "平均每次: " & Format(g_SchedulerTotalTime / g_SchedulerTotalCount, "0.00") & " ms" & vbCrLf
+    If g_SchedulerStats.TotalCount > 0 Then
+        msg = msg & "平均每次: " & Format(g_SchedulerStats.TotalTime / g_SchedulerStats.TotalCount, "0.00") & " ms" & vbCrLf
     End If
-    
-    msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerLastTime, "0.00") & " ms" & vbCrLf
+
+    msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerStats.LastTime, "0.00") & " ms" & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     
     msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
@@ -1040,10 +1039,10 @@ Private Sub LuaPerfMenu_ResetStats()
     If result = vbNo Then Exit Sub
     
     ' 重置调度器统计
-    g_SchedulerTotalTime = 0
-    g_SchedulerLastTime = 0
-    g_SchedulerTotalCount = 0
-    g_SchedulerStartTime = Now
+    g_SchedulerStats.TotalTime = 0
+    g_SchedulerStats.LastTime = 0
+    g_SchedulerStats.TotalCount = 0
+    g_SchedulerStats.StartTime = Now
     
     ' 重置任务统计
     If Not g_TaskLastTime Is Nothing Then g_TaskLastTime.RemoveAll
