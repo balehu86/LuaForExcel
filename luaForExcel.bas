@@ -76,10 +76,10 @@ Private g_TaskError As Object          ' taskId -> error message
 Private g_TaskCoThread As Object       ' taskId -> coThread LongPtr
 Private g_TaskQueue As Object          ' taskId -> True (active tasks)
 ' ===== 调度全局变量 =====
-Private g_SchedulerRunning As Boolean
-Private g_SchedulerCursorByTask As Long   ' Round-Robin 游标
-Private g_StateDirty As Boolean     ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
-Private g_NextTaskId As Long
+Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
+Private g_SchedulerCursorByTask As Long ' Round-Robin 游标
+Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
+Private g_NextTaskId As Long            ' 下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
 
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
