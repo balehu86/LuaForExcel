@@ -235,7 +235,7 @@ Public Sub CleanupLua()
             g_TaskError.RemoveAll
             g_TaskCoThread.RemoveAll
             g_TaskQueue.RemoveAll
-            
+
             ' 新增：清理性能统计
             g_TaskLastTime.RemoveAll
             g_TaskTotalTime.RemoveAll
@@ -246,12 +246,12 @@ Public Sub CleanupLua()
             g_TaskStats.RemoveAll
             g_WorkbookStats.RemoveAll
         End If
-        
+
         If g_LuaState <> 0 Then
             lua_close g_LuaState
             g_LuaState = 0
         End If
-        
+
         g_Initialized = False
     End If
 End Sub
@@ -371,17 +371,17 @@ End Sub
 ' 执行 Lua 表达式
 Public Function LuaEval(expression As String) As Variant
     On Error GoTo ErrorHandler
-    
+
     If Not InitLuaState() Then
         LuaEval = CVErr(xlErrValue)
         Exit Function
     End If
-    
+
     CheckAutoReload
-    
+
     Dim fullCode As String
     fullCode = "return " & expression
-    
+
     ' 修改：g_LuaState.L -> g_LuaState
     Dim result As Long
     result = luaL_loadstring(g_LuaState, fullCode)
@@ -390,14 +390,14 @@ Public Function LuaEval(expression As String) As Variant
         lua_settop g_LuaState, 0
         Exit Function
     End If
-    
+
     result = lua_pcallk(g_LuaState, 0, 1, 0, 0, 0)
     If result <> 0 Then
         LuaEval = "运行错误: " & GetStringFromState(g_LuaState, -1)
         lua_settop g_LuaState, 0
         Exit Function
     End If
-    
+
     LuaEval = GetValue(g_LuaState, -1)
     lua_settop g_LuaState, 0
     Exit Function
@@ -410,14 +410,14 @@ End Function
 ' 调用 functions.lua 中的函数
 Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Variant
     On Error GoTo ErrorHandler
-    
+
     If Not InitLuaState() Then
         LuaCall = CVErr(xlErrValue)
         Exit Function
     End If
-    
+
     CheckAutoReload
-    
+
     ' 修改：g_LuaState.L -> g_LuaState
     lua_getglobal g_LuaState, funcName
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
@@ -425,7 +425,7 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
         LuaCall = "错误: 函数 '" & funcName & "' 不存在"
         Exit Function
     End If
-    
+
     Dim i As Long, argCount As Long
     argCount = 0
     For i = LBound(args) To UBound(args)
@@ -485,27 +485,27 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     Dim taskCell As String
     Dim wbName As String
     Dim callerWb As Workbook
-    
+
     On Error Resume Next
     taskCell = Application.Caller.Address(External:=True)
     Set callerWb = Application.Caller.Worksheet.Parent
-    
+
     ' 关键修复:检查调用者工作簿是否为宏文件
     If callerWb Is Nothing Then
         LuaTask = "#ERROR: 无法获取调用工作簿"
         Exit Function
     End If
-    
+
     ' 防止在xlam文件中创建任务
     If callerWb.FileFormat = xlAddIn Then
         LuaTask = "#ERROR: 不能在宏文件中创建任务"
         MsgBox "禁止在宏文件里创建任务", vbCritical, "LuaTask:Waring"
         Exit Function
     End If
-    
+
     wbName = callerWb.Name
     On Error GoTo ErrorHandler
-    
+
     ' 检查是否已存在任务
     Dim existingTaskId As String
     existingTaskId = FindTaskByCell(taskCell)
@@ -580,20 +580,20 @@ End Function
 ' 读取任务状态
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
-    
+
     ' 标记为 volatile，每次计算都会刷新
     Application.Volatile True
-    
+
     If Not InitLuaState() Then
         LuaGet = CVErr(xlErrValue)
         Exit Function
     End If
-    
     If Not g_TaskFunc.Exists(taskId) Then
+
         LuaGet = "#ERROR: 任务不存在"
         Exit Function
     End If
-    
+
     Select Case LCase(field)
         Case "status"
             LuaGet = g_TaskStatus(taskId)
@@ -616,7 +616,7 @@ Public Function LuaGet(taskId As String, field As String) As Variant
         Case Else
             LuaGet = "#ERROR: 未知字段"
     End Select
-    
+
     Exit Function
 
 ErrorHandler:
@@ -628,17 +628,17 @@ End Function
 ' 启动协程
 Public Sub StartLuaCoroutine(taskId As String)
     On Error GoTo ErrorHandler
-    
     If g_TaskFunc Is Nothing Then
+
         InitCoroutineSystem
     End If
-    
     If Not g_TaskFunc.Exists(taskId) Then
+
         MsgBox "错误：任务 " & taskId & " 不存在", vbCritical
         Exit Sub
     End If
-    
     If g_TaskStatus(taskId) <> "defined" Then
+
         MsgBox "错误：任务已启动或已完成", vbExclamation
         Exit Sub
     End If
@@ -647,7 +647,7 @@ Public Sub StartLuaCoroutine(taskId As String)
         MsgBox "Lua主状态未初始化", vbCritical
         Exit Sub
     End If
-    
+
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
@@ -655,31 +655,31 @@ Public Sub StartLuaCoroutine(taskId As String)
         g_TaskError(taskId) = "无法创建协程线程"
         Exit Sub
     End If
-    
     g_TaskCoThread(taskId) = coThread
-    
+
+
     Dim funcName As String
     funcName = g_TaskFunc(taskId)
-    
+
     lua_getglobal g_LuaState, funcName
-    
+
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
         g_TaskStatus(taskId) = "error"
         g_TaskError(taskId) = "函数 '" & funcName & "' 不存在"
         lua_settop g_LuaState, 0
         Exit Sub
     End If
-    
+
     lua_xmove g_LuaState, coThread, 1
-    
     lua_pushstring coThread, g_TaskCell(taskId)
-    
+
+
     Dim nargs As Long
     nargs = 1
-    
+
     Dim startArgs As Variant
     startArgs = g_TaskStartArgs(taskId)
-    
+
     If IsArray(startArgs) Then
         Dim i As Long
         For i = LBound(startArgs) To UBound(startArgs)
@@ -687,19 +687,19 @@ Public Sub StartLuaCoroutine(taskId As String)
             nargs = nargs + 1
         Next i
     End If
-    
+
     Dim nres As LongPtr
     Dim result As Long
 
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-    
+
     HandleCoroutineResult taskId, result, CLng(nres)
-    
     If g_TaskStatus(taskId) = "yielded" Then
+
         g_TaskQueue(taskId) = True
         StartSchedulerIfNeeded
     End If
-    
+
     Exit Sub
 
 ErrorHandler:
@@ -796,8 +796,8 @@ Private Sub ScheduleByTask()
 
     Do While executed < g_MaxIterationsPerTick And executed < total
         taskId = taskIds(cur)
-        
         If g_TaskFunc.Exists(CStr(taskId)) Then
+
             ResumeCoroutine CStr(taskId)
             executed = executed + 1
 
@@ -1020,7 +1020,7 @@ Private Sub ResumeCoroutine(taskId As String)
     ' 性能计时结束并统计
     Dim taskElapsed As Double
     taskElapsed = (Timer - taskStart) * 1000
-    
+
     ' 更新任务统计
     g_TaskLastTime(taskId) = taskElapsed
     If Not g_TaskTotalTime.Exists(taskId) Then
@@ -1495,7 +1495,7 @@ End Function
 ' 解析 yield/return 字典
 Private Sub ParseYieldReturn(taskId As String, data As Variant, isFinal As Boolean)
     On Error Resume Next
-    
+
     ' 如果不是数组,直接作为value处理
     If Not IsArray(data) Then
         g_TaskValue(taskId) = data
@@ -1549,7 +1549,7 @@ Private Sub ParseYieldReturn(taskId As String, data As Variant, isFinal As Boole
                     
                 Case "value"
                     g_TaskValue(taskId) = value
-                    
+
                 Case "write"
                     ' 动态写入目标会在写入函数中处理
             End Select
