@@ -41,6 +41,7 @@ Option Explicit
     ' 系统 API
     Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
+    Private Declare PtrSafe Function GetTickCount Lib "kernel32" () As Long
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -738,7 +739,7 @@ Public Sub SchedulerTick()
     Application.Calculation = xlCalculationManual
 
     Dim schedulerStart As Double
-    schedulerStart = Timer
+    schedulerStart = GetTickCount()
 
     ' 根据调度模式选择不同的调度逻辑
     If g_ScheduleMode = 0 Then
@@ -749,7 +750,7 @@ Public Sub SchedulerTick()
 
     ' 性能计时统计
     Dim schedulerElapsed As Double
-    schedulerElapsed = (Timer - schedulerStart) * 1000
+    schedulerElapsed = GetTickCount() - schedulerStart
     g_SchedulerStats.LastTime = schedulerElapsed
     g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
     g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
@@ -854,8 +855,8 @@ Private Sub ScheduleByWorkbook()
     Dim wb As Variant
     For Each wb In wbTasks.Keys
         ' ---- 工作簿级别计时开始 ----
-        Dim wbStart As Double
-        wbStart = Timer
+        Dim wbStart As Long
+        wbStart = GetTickCount()
 
         ' 每个工作簿允许的 tick 数
         Dim tickCount As Long
@@ -915,7 +916,7 @@ Private Sub ScheduleByWorkbook()
 
         ' ---- 工作簿级别计时结束 ----
         Dim wbElapsed As Double
-        wbElapsed = (Timer - wbStart) * 1000
+        wbElapsed = GetTickCount() - wbStart
         g_WorkbookLastTime(CStr(wb)) = wbElapsed
 
 NextWorkbook:
@@ -938,8 +939,8 @@ Private Sub ResumeCoroutine(taskId As String)
     If g_TaskStatus(taskId) <> "yielded" Then Exit Sub
 
     ' 性能计时开始
-    Dim taskStart As Double
-    taskStart = Timer
+    Dim taskStart As Long
+    taskStart = GetTickCount()
 
     ' 检查工作簿是否仍然打开
     If g_TaskWorkbook.Exists(taskId) Then
@@ -1019,7 +1020,7 @@ Private Sub ResumeCoroutine(taskId As String)
 
     ' 性能计时结束并统计
     Dim taskElapsed As Double
-    taskElapsed = (Timer - taskStart) * 1000
+    taskElapsed = GetTickCount() - taskStart
 
     ' 更新任务统计
     g_TaskLastTime(taskId) = taskElapsed
