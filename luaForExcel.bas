@@ -1087,23 +1087,23 @@ ErrorHandler:
     errorDetails = "Resume错误:" & vbCrLf
     errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
     errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
-    
+
     If Err.Erl <> 0 Then
         errorDetails = errorDetails & "行号: " & Err.Erl & vbCrLf
     End If
-    
+
     errorDetails = errorDetails & "协程线程: " & coThread & vbCrLf
     errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
     errorDetails = errorDetails & "参数数量: " & nargs
-    
+
     task(TASK_STATUS) = "error"
     task(TASK_ERROR) = errorDetails
-    
+
     ' 输出到立即窗口便于调试
     Debug.Print "=== Resume 错误详情 ==="
     Debug.Print errorDetails
     Debug.Print "======================="
-    
+
     ResumeCoroutine = task
 End Function
 
