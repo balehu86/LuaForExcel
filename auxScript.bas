@@ -264,7 +264,6 @@ Private Sub LuaTaskMenu_terminateTask()
 
     ' 设置终止状态并标记为脏
     g_Tasks(taskId)(TASK_STATUS) = "terminated"
-    g_Tasks(taskId)(TASK_STATUS) = Empty
     g_StateDirty = True
 
     ' ' 删除所有数据
