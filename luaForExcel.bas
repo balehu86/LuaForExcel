@@ -691,18 +691,14 @@ Private Sub StartSchedulerIfNeeded()
     If g_SchedulerRunning Then Exit Sub
     If g_TaskQueue Is Nothing Then Exit Sub
     If g_TaskQueue.Count = 0 Then Exit Sub
-
     g_SchedulerRunning = True
     g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
-    Application.OnTime g_NextScheduleTime, "SchedulerTick"
-
-    Debug.Print "[INFO] 调度器自动启动，队列任务数: " & g_TaskQueue.Count
+    Application.OnTime g_NextScheduleTime, "SchedulerTick" 
 End Sub
 
-' 调度器心跳
+' 调度器心跳 - 主入口
 Public Sub SchedulerTick()
     On Error Resume Next
-
     If Not g_SchedulerRunning Then Exit Sub
     If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
@@ -716,17 +712,11 @@ Public Sub SchedulerTick()
     Dim schedulerStart As Double
     schedulerStart = GetTickCount()
 
-    ' 根据调度模式选择策略（核心改进点）
-    Dim taskList As Object
+    ' 根据调度模式分流执行
     If g_ScheduleMode = 0 Then
-        Set taskList = ScheduleByTask()  ' 返回待执行任务列表
+        Call ScheduleByTask  ' 按任务顺序调度
     Else
-        Set taskList = ScheduleByWorkbook()  ' 返回待执行任务列表
-    End If
-
-    ' 统一执行循环
-    If Not taskList Is Nothing And taskList.Count > 0 Then
-        Call ExecuteTasks(taskList)
+        Call ScheduleByWorkbook  ' 按工作簿调度
     End If
 
     ' 性能计时统计
@@ -744,6 +734,7 @@ Public Sub SchedulerTick()
         g_StateDirty = False
         ActiveSheet.Calculate
     End If
+
     ' 重新安排下一次调度
     If g_TaskQueue.Count > 0 Then
         g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
@@ -751,14 +742,11 @@ Public Sub SchedulerTick()
     Else
         g_SchedulerRunning = False
     End If
-
 End Sub
 
 ' 按任务顺序调度 - 返回待执行任务列表
-Private Function ScheduleByTask() As Object
-    Dim taskList As Object
-    Set taskList = CreateObject("System.Collections.ArrayList")
-
+' 按任务顺序调度 - 直接执行
+Private Sub ScheduleByTask()
     ' 构建任务ID数组
     Dim taskIds() As Variant
     ReDim taskIds(0 To g_TaskQueue.Count - 1)
@@ -772,17 +760,58 @@ Private Function ScheduleByTask() As Object
 
     Dim total As Long
     total = UBound(taskIds) + 1
-    If total = 0 Then
-        Set ScheduleByTask = taskList
-        Exit Function
-    End If
+    If total = 0 Then Exit Sub
 
-    ' Round-Robin 选择任务
+    ' Round-Robin 直接执行
     Dim executed As Long, cur As Long
+    Dim task As Variant
+    Dim taskStart As Long, taskElapsed As Double
+    Dim wbName As String
+    Dim tasksToRemove As Object
+    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
+
     cur = g_SchedulerCursorByTask Mod total
 
     Do While executed < g_MaxIterationsPerTick And executed < total
-        taskList.Add taskIds(cur)
+        taskId = CStr(taskIds(cur))
+
+        If g_Tasks.Exists(taskId) Then
+            task = g_Tasks(taskId)
+
+            ' 只调度 yielded 状态的任务
+            If task(TASK_STATUS) = "yielded" Then
+                ' 任务级别计时开始
+                taskStart = GetTickCount()
+                wbName = task(TASK_WORKBOOK)
+
+                ' 直接执行任务
+                task = ResumeCoroutine(task)
+                g_Tasks(taskId) = task
+
+                ' 任务级别计时结束
+                taskElapsed = GetTickCount() - taskStart
+
+                ' 更新工作簿统计
+                If Not g_WorkbookTotalTime.Exists(wbName) Then
+                    g_WorkbookLastTime(wbName) = 0
+                    g_WorkbookTotalTime(wbName) = 0
+                    g_WorkbookTickCount_Stats(wbName) = 0
+                End If
+                g_WorkbookLastTime(wbName) = taskElapsed
+                g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
+                g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
+
+                ' 检查任务是否完成
+                Dim status As String
+                status = task(TASK_STATUS)
+                If status = "done" Or status = "error" Or status = "terminated" Then
+                    tasksToRemove.Add taskId
+                End If
+            End If
+        Else
+            tasksToRemove.Add taskId
+        End If
+
         executed = executed + 1
         cur = (cur + 1) Mod total
     Loop
@@ -790,14 +819,17 @@ Private Function ScheduleByTask() As Object
     ' 更新游标
     g_SchedulerCursorByTask = cur
 
-    Set ScheduleByTask = taskList
-End Function
+    ' 清理已完成任务
+    Dim i As Long
+    For i = 0 To tasksToRemove.Count - 1
+        If g_TaskQueue.Exists(tasksToRemove(i)) Then
+            g_TaskQueue.Remove tasksToRemove(i)
+        End If
+    Next
+End Sub
 
-' 按工作簿调度 - 返回待执行任务列表
-Private Function ScheduleByWorkbook() As Object
-    Dim taskList As Object
-    Set taskList = CreateObject("System.Collections.ArrayList")
-
+' 按工作簿调度 - 直接执行
+Private Sub ScheduleByWorkbook()
     ' 按工作簿分组任务
     Dim wbTasks As Object
     Set wbTasks = CreateObject("Scripting.Dictionary")
@@ -822,8 +854,13 @@ Private Function ScheduleByWorkbook() As Object
         End If
     Next
 
-    ' 为每个工作簿选择任务
+    ' 为每个工作簿执行任务
     Dim wb As Variant
+    Dim task As Variant
+    Dim taskStart As Long, taskElapsed As Double
+    Dim tasksToRemove As Object
+    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
+
     For Each wb In wbTasks.Keys
         ' 每个工作簿允许的 tick 数
         Dim tickCount As Long
@@ -852,16 +889,46 @@ Private Function ScheduleByWorkbook() As Object
         executedCount = 0
         stepCount = 0
 
-        ' Round-Robin 选择任务
+        ' Round-Robin 直接执行
         Do While executedCount < tickCount And stepCount < total
-            taskId = wbTaskList(cursor)
+            taskId = CStr(wbTaskList(cursor))
 
-            ' 只添加 yielded 状态的任务
-            If g_Tasks.Exists(CStr(taskId)) Then
-                If g_Tasks(CStr(taskId))(TASK_STATUS) = "yielded" Then
-                    taskList.Add taskId
+            If g_Tasks.Exists(taskId) Then
+                task = g_Tasks(taskId)
+
+                ' 只执行 yielded 状态的任务
+                If task(TASK_STATUS) = "yielded" Then
+                    ' 任务级别计时开始
+                    taskStart = GetTickCount()
+
+                    ' 直接执行任务
+                    task = ResumeCoroutine(task)
+                    g_Tasks(taskId) = task
+
+                    ' 任务级别计时结束
+                    taskElapsed = GetTickCount() - taskStart
+
+                    ' 更新工作簿统计
+                    If Not g_WorkbookTotalTime.Exists(CStr(wb)) Then
+                        g_WorkbookLastTime(CStr(wb)) = 0
+                        g_WorkbookTotalTime(CStr(wb)) = 0
+                        g_WorkbookTickCount_Stats(CStr(wb)) = 0
+                    End If
+                    g_WorkbookLastTime(CStr(wb)) = taskElapsed
+                    g_WorkbookTotalTime(CStr(wb)) = g_WorkbookTotalTime(CStr(wb)) + taskElapsed
+                    g_WorkbookTickCount_Stats(CStr(wb)) = g_WorkbookTickCount_Stats(CStr(wb)) + 1
+
                     executedCount = executedCount + 1
+
+                    ' 检查任务是否完成
+                    Dim status As String
+                    status = task(TASK_STATUS)
+                    If status = "done" Or status = "error" Or status = "terminated" Then
+                        tasksToRemove.Add taskId
+                    End If
                 End If
+            Else
+                tasksToRemove.Add taskId
             End If
 
             cursor = (cursor + 1) Mod total
@@ -873,61 +940,6 @@ Private Function ScheduleByWorkbook() As Object
 
 NextWorkbook:
     Next wb
-    Set ScheduleByWorkbook = taskList
-End Function
-
-' 统一执行任务的核心循环
-Private Sub ExecuteTasks(taskList As Object)
-    Dim tasksToRemove As Object
-    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-
-    Dim taskId As Variant
-    Dim task As Variant
-    Dim taskStart As Long
-    Dim wbName As String
-    Dim taskElapsed As Double
-    For Each taskId In taskList
-        taskId = CStr(taskId)
-
-        If g_Tasks.Exists(taskId) Then
-            task = g_Tasks(taskId)
-
-            ' 只调度 yielded 状态的任务
-            If task(TASK_STATUS) = "yielded" Then
-                ' 工作簿级别计时开始
-                taskStart = GetTickCount()
-
-                wbName = task(TASK_WORKBOOK)
-
-                ' 执行任务
-                task = ResumeCoroutine(task)
-                g_Tasks(taskId) = task
-
-                ' 工作簿级别计时结束
-                taskElapsed = GetTickCount() - taskStart
-
-                ' 更新工作簿统计
-                If Not g_WorkbookTotalTime.Exists(wbName) Then
-                    g_WorkbookLastTime(wbName) = 0
-                    g_WorkbookTotalTime(wbName) = 0
-                    g_WorkbookTickCount_Stats(wbName) = 0
-                End If
-                    g_WorkbookLastTime(wbName) = taskElapsed
-                    g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
-                    g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
-                End If
-
-            ' 检查任务是否完成
-            Dim status As String
-            status = task(TASK_STATUS)
-            If status = "done" Or status = "error" Or status = "terminated" Then
-                tasksToRemove.Add taskId
-            End If
-        Else
-            tasksToRemove.Add taskId
-        End If
-    Next
-
     ' 清理已完成任务
     Dim i As Long
     For i = 0 To tasksToRemove.Count - 1
@@ -953,14 +965,14 @@ Private Function ResumeCoroutine(task As Variant) As Variant
     ' 检查协程线程是否有效
     Dim coThread As LongPtr
     coThread = task(TASK_CO_THREAD)
-
+    
     If coThread = 0 Then
         task(TASK_STATUS) = "error"
         task(TASK_ERROR) = "协程线程无效(coThread=0)"
         ResumeCoroutine = task
         Exit Function
     End If
-
+    
     ' 检查协程状态
     Dim coStatus As Long
     coStatus = lua_status(coThread)
@@ -974,7 +986,7 @@ Private Function ResumeCoroutine(task As Variant) As Variant
     ' 检查工作簿是否仍然打开
     Dim wbName As String
     wbName = task(TASK_WORKBOOK)
-
+    
     If Not IsEmpty(wbName) And wbName <> vbNullString And wbName <> "" Then
         Dim wb As Workbook
         Dim wbExists As Boolean
@@ -1002,7 +1014,7 @@ Private Function ResumeCoroutine(task As Variant) As Variant
     ' 准备 resume 参数
     Dim resumeSpec As Variant
     resumeSpec = task(TASK_RESUME_SPEC)
-
+    
     Dim nargs As Long
     nargs = 0
 
@@ -1016,20 +1028,20 @@ Private Function ResumeCoroutine(task As Variant) As Variant
             If VarType(param) = vbString Then
                 Dim paramStr As String
                 paramStr = Trim(CStr(param))
-
+                
                 ' 尝试作为单元格地址解析
                 If Len(paramStr) > 0 And Not wb Is Nothing Then
                     On Error Resume Next
                     Dim rng As Range
                     Set rng = Nothing
                     Set rng = wb.Range(paramStr)
-
+                    
                     If Err.Number = 0 And Not rng Is Nothing Then
                         ' 成功解析为单元格,传递值
                         If rng.Cells.Count = 1 Then
                             PushValue coThread, rng.Value
                         Else
-                            PushValue coThread, rng.Value ' 多单元格返回数组
+                            PushValue coThread, rng.Value
                         End If
                     Else
                         ' 不是有效的单元格地址,作为普通字符串
@@ -1045,7 +1057,7 @@ Private Function ResumeCoroutine(task As Variant) As Variant
                 ' 非字符串参数直接传递
                 PushValue coThread, param
             End If
-
+            
             nargs = nargs + 1
         Next i
     End If
@@ -1067,18 +1079,6 @@ Private Function ResumeCoroutine(task As Variant) As Variant
     task(TASK_TOTAL_TIME) = task(TASK_TOTAL_TIME) + taskElapsed
     task(TASK_TICK_COUNT) = task(TASK_TICK_COUNT) + 1
 
-    ' 更新工作簿统计
-    If wbName <> vbNullString Then
-        If Not g_WorkbookTotalTime.Exists(wbName) Then
-            g_WorkbookLastTime(wbName) = 0
-            g_WorkbookTotalTime(wbName) = 0
-            g_WorkbookTickCount_Stats(wbName) = 0
-        End If
-        g_WorkbookLastTime(wbName) = taskElapsed
-        g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
-        g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
-    End If
-
     ResumeCoroutine = task
     Exit Function
 
@@ -1087,22 +1087,23 @@ ErrorHandler:
     errorDetails = "Resume错误:" & vbCrLf
     errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
     errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
-
+    
     If Err.Erl <> 0 Then
         errorDetails = errorDetails & "行号: " & Err.Erl & vbCrLf
     End If
-
+    
     errorDetails = errorDetails & "协程线程: " & coThread & vbCrLf
     errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
     errorDetails = errorDetails & "参数数量: " & nargs
-
+    
     task(TASK_STATUS) = "error"
     task(TASK_ERROR) = errorDetails
-
+    
     ' 输出到立即窗口便于调试
     Debug.Print "=== Resume 错误详情 ==="
     Debug.Print errorDetails
     Debug.Print "======================="
+    
     ResumeCoroutine = task
 End Function
 
@@ -1589,13 +1590,11 @@ End Function
 Private Function FindTaskByCell(taskCell As String) As String
     Dim tid As Variant
     If g_Tasks Is Nothing Then Exit Function
-
     For Each tid In g_Tasks.Keys
         If g_Tasks(tid)(TASK_CELL) = taskCell Then
             FindTaskByCell = CStr(tid)
             Exit Function
         End If
     Next
-
     FindTaskByCell = vbNullString
 End Function

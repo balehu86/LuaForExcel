@@ -52,10 +52,8 @@ Private Function GetTasksByWorkbook(wbName As String) As Object
     Set result = CreateObject("System.Collections.ArrayList")
 
     Dim taskId As Variant
-    Dim task As Variant
     For Each task In g_Tasks.Items
-        task = g_Tasks(CStr(taskId))
-        If task(TASK_WORKBOOK) = wbName Then
+        If g_Tasks(CStr(taskId))(TASK_WORKBOOK) = wbName Then
             result.Add taskId
         End If
     Next
@@ -72,7 +70,7 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     Set tasksToRemove = GetTasksByWorkbook(wbName)
     Dim task As Variant
 
-    Dim i As Long
+    Dim i As Integer
     For i = 0 To tasksToRemove.Count - 1
         Dim tid As String
         tid = CStr(tasksToRemove(i))

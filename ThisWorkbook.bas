@@ -62,10 +62,10 @@ End Sub
 ' 工作簿关闭前事件 - 清理该工作簿的任务
 Private Sub App_WorkbookBeforeClose(ByVal Wb As Workbook, Cancel As Boolean)
     On Error Resume Next
-    
+
     ' 跳过加载宏自身
     If Wb.Name = ThisWorkbook.Name Then Exit Sub
-    
+
     ' 清理该工作簿的所有任务
     CleanupWorkbookTasks Wb.Name
     ' 显示退出信息（可选）
