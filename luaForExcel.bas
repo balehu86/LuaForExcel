@@ -950,10 +950,32 @@ Private Function ResumeCoroutine(task As Variant) As Variant
     Dim taskStart As Long
     taskStart = GetTickCount()
 
+    ' 检查协程线程是否有效
+    Dim coThread As LongPtr
+    coThread = task(TASK_CO_THREAD)
+
+    If coThread = 0 Then
+        task(TASK_STATUS) = "error"
+        task(TASK_ERROR) = "协程线程无效(coThread=0)"
+        ResumeCoroutine = task
+        Exit Function
+    End If
+
+    ' 检查协程状态
+    Dim coStatus As Long
+    coStatus = lua_status(coThread)
+    If coStatus <> LUA_OK And coStatus <> LUA_YIELD Then
+        task(TASK_STATUS) = "error"
+        task(TASK_ERROR) = "协程状态异常: " & coStatus & " (期望: " & LUA_YIELD & ")"
+        ResumeCoroutine = task
+        Exit Function
+    End If
+
     ' 检查工作簿是否仍然打开
     Dim wbName As String
     wbName = task(TASK_WORKBOOK)
-    If task(TASK_WORKBOOK) <> vbNull Then
+
+    If Not IsEmpty(wbName) And wbName <> vbNullString And wbName <> "" Then
         Dim wb As Workbook
         Dim wbExists As Boolean
         wbExists = False
@@ -971,49 +993,69 @@ Private Function ResumeCoroutine(task As Variant) As Variant
         End If
     Else
         wbName = vbNullString
+        Set wb = Nothing
     End If
 
-    Dim coThread As LongPtr
-    coThread = task(TASK_CO_THREAD)
-
+    ' 清空协程栈
     lua_settop coThread, 0
 
-    Dim i As Long
+    ' 准备 resume 参数
     Dim resumeSpec As Variant
     resumeSpec = task(TASK_RESUME_SPEC)
 
+    Dim nargs As Long
+    nargs = 0
+
     If IsArray(resumeSpec) Then
+        Dim i As Long
         For i = LBound(resumeSpec) To UBound(resumeSpec)
             Dim param As Variant
             param = resumeSpec(i)
 
+            ' 处理字符串参数(可能是单元格地址)
             If VarType(param) = vbString Then
-                On Error Resume Next
-                Dim rng As Range
-                Set wb = Application.Workbooks(task(TASK_WORKBOOK))
-                Set rng = wb.Range(param)
-                On Error GoTo ErrorHandler
+                Dim paramStr As String
+                paramStr = Trim(CStr(param))
 
-                If Not rng Is Nothing Then
-                    PushValue coThread, rng
+                ' 尝试作为单元格地址解析
+                If Len(paramStr) > 0 And Not wb Is Nothing Then
+                    On Error Resume Next
+                    Dim rng As Range
+                    Set rng = Nothing
+                    Set rng = wb.Range(paramStr)
+
+                    If Err.Number = 0 And Not rng Is Nothing Then
+                        ' 成功解析为单元格,传递值
+                        If rng.Cells.Count = 1 Then
+                            PushValue coThread, rng.Value
+                        Else
+                            PushValue coThread, rng.Value ' 多单元格返回数组
+                        End If
+                    Else
+                        ' 不是有效的单元格地址,作为普通字符串
+                        PushValue coThread, paramStr
+                    End If
+                    Err.Clear
+                    On Error GoTo ErrorHandler
                 Else
-                    PushValue coThread, param
+                    ' 空字符串或无工作簿
+                    PushValue coThread, paramStr
                 End If
             Else
+                ' 非字符串参数直接传递
                 PushValue coThread, param
             End If
+
+            nargs = nargs + 1
         Next i
     End If
 
-    Dim nargs As Long
-    nargs = 0
-    If IsArray(resumeSpec) Then
-        nargs = UBound(resumeSpec) - LBound(resumeSpec) + 1
-    End If
+    ' 执行 resume
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
 
+    ' 处理结果
     task = HandleCoroutineResult(task, result, CLng(nres))
 
     ' 性能计时结束并统计
@@ -1026,21 +1068,44 @@ Private Function ResumeCoroutine(task As Variant) As Variant
     task(TASK_TICK_COUNT) = task(TASK_TICK_COUNT) + 1
 
     ' 更新工作簿统计
-    If Not g_WorkbookTotalTime.Exists(wbName) Then
-        g_WorkbookLastTime(wbName) = 0
-        g_WorkbookTotalTime(wbName) = 0
-        g_WorkbookTickCount_Stats(wbName) = 0
+    If wbName <> vbNullString Then
+        If Not g_WorkbookTotalTime.Exists(wbName) Then
+            g_WorkbookLastTime(wbName) = 0
+            g_WorkbookTotalTime(wbName) = 0
+            g_WorkbookTickCount_Stats(wbName) = 0
+        End If
+        g_WorkbookLastTime(wbName) = taskElapsed
+        g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
+        g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
     End If
-    g_WorkbookLastTime(wbName) = taskElapsed
-    g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
-    g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
 
     ResumeCoroutine = task
+    Exit Function
+
 ErrorHandler:
+    Dim errorDetails As String
+    errorDetails = "Resume错误:" & vbCrLf
+    errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
+    errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
+
+    If Err.Erl <> 0 Then
+        errorDetails = errorDetails & "行号: " & Err.Erl & vbCrLf
+    End If
+
+    errorDetails = errorDetails & "协程线程: " & coThread & vbCrLf
+    errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
+    errorDetails = errorDetails & "参数数量: " & nargs
+
     task(TASK_STATUS) = "error"
-    task(TASK_ERROR) = "Resume错误: " & Err.Description
+    task(TASK_ERROR) = errorDetails
+
+    ' 输出到立即窗口便于调试
+    Debug.Print "=== Resume 错误详情 ==="
+    Debug.Print errorDetails
+    Debug.Print "======================="
     ResumeCoroutine = task
 End Function
+
 ' 手动停止调度器
 Public Sub StopScheduler()
     ' 停止调度标志
