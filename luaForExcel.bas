@@ -240,7 +240,6 @@ Private Function ValidateFunctionsFile() As Boolean
         Exit Function
     End If
     
-    ' 创建临时状态验证
     Dim tempL As LongPtr
     tempL = luaL_newstate()
     If tempL = 0 Then
@@ -250,6 +249,9 @@ Private Function ValidateFunctionsFile() As Boolean
     
     luaL_openlibs tempL
     
+    Dim stackTop As Long
+    stackTop = SaveStack(tempL)  ' 入口保存
+    
     Dim result As Long
     result = luaL_loadfilex(tempL, g_FunctionsPath, 0)
     If result = 0 Then result = lua_pcallk(tempL, 0, 0, 0, 0, 0)
@@ -257,6 +259,7 @@ Private Function ValidateFunctionsFile() As Boolean
     If result <> 0 Then
         Dim errMsg As String
         errMsg = GetStringFromState(tempL, -1)
+        RestoreStack tempL, stackTop
         lua_close tempL
         
         MsgBox "functions.lua 存在语法错误:" & vbCrLf & vbCrLf & _
@@ -265,12 +268,16 @@ Private Function ValidateFunctionsFile() As Boolean
         Exit Function
     End If
     
+    RestoreStack tempL, stackTop
     lua_close tempL
     ValidateFunctionsFile = True
     Exit Function
 
 ErrorHandler:
-    If tempL <> 0 Then lua_close tempL
+    If tempL <> 0 Then
+        RestoreStack tempL, stackTop
+        lua_close tempL
+    End If
     ValidateFunctionsFile = False
 End Function
 
@@ -278,19 +285,17 @@ End Function
 Private Function LoadFunctionsIntoMainState() As Boolean
     On Error GoTo ErrorHandler
     
-    Dim topBefore As Long
-    topBefore = lua_gettop(g_LuaState)
+    Dim stackTop As Long
+    stackTop = SaveStack(g_LuaState)  ' 入口保存
     
     Dim result As Long
     result = luaL_loadfilex(g_LuaState, g_FunctionsPath, 0)
     If result = 0 Then result = lua_pcallk(g_LuaState, 0, 0, 0, 0, 0)
     
-    lua_settop g_LuaState, topBefore
-    
     If result <> 0 Then
         Dim errMsg As String
         errMsg = GetStringFromState(g_LuaState, -1)
-        lua_settop g_LuaState, topBefore
+        RestoreStack g_LuaState, stackTop  ' 统一恢复
         
         MsgBox "主状态加载 functions.lua 失败:" & vbCrLf & vbCrLf & _
                errMsg, vbCritical, "加载失败"
@@ -298,13 +303,14 @@ Private Function LoadFunctionsIntoMainState() As Boolean
         Exit Function
     End If
     
-    ' 更新时间戳
     g_LastModified = FileDateTime(g_FunctionsPath)
+    RestoreStack g_LuaState, stackTop  ' 统一恢复
     LoadFunctionsIntoMainState = True
     Exit Function
 
 ErrorHandler:
     MsgBox "加载过程发生 VBA 错误: " & Err.Description, vbCritical, "严重错误"
+    If g_Initialized Then RestoreStack g_LuaState, stackTop
     LoadFunctionsIntoMainState = False
 End Function
 
@@ -349,6 +355,9 @@ Public Function LuaEval(expression As String) As Variant
 
     CheckAutoReload
 
+    Dim stackTop As Long
+    stackTop = SaveStack(g_LuaState)  ' 入口保存
+
     Dim fullCode As String
     fullCode = "return " & expression
 
@@ -356,24 +365,24 @@ Public Function LuaEval(expression As String) As Variant
     result = luaL_loadstring(g_LuaState, fullCode)
     If result <> 0 Then
         LuaEval = "语法错误: " & GetStringFromState(g_LuaState, -1)
-        lua_settop g_LuaState, 0
+        RestoreStack g_LuaState, stackTop  ' 统一恢复
         Exit Function
     End If
 
     result = lua_pcallk(g_LuaState, 0, 1, 0, 0, 0)
     If result <> 0 Then
         LuaEval = "运行错误: " & GetStringFromState(g_LuaState, -1)
-        lua_settop g_LuaState, 0
+        RestoreStack g_LuaState, stackTop  ' 统一恢复
         Exit Function
     End If
 
     LuaEval = GetValue(g_LuaState, -1)
-    lua_settop g_LuaState, 0
+    RestoreStack g_LuaState, stackTop  ' 统一恢复
     Exit Function
 
 ErrorHandler:
     LuaEval = "VBA错误: " & Err.Description
-    If g_Initialized Then lua_settop g_LuaState, 0
+    If g_Initialized Then RestoreStack g_LuaState, stackTop  ' 统一恢复
 End Function
 
 ' 调用 functions.lua 中的函数
@@ -386,12 +395,14 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
     End If
 
     CheckAutoReload
+    
+    Dim stackTop As Long
+    stackTop = SaveStack(g_LuaState)  ' 入口保存
 
-    ' 修改：g_LuaState.L -> g_LuaState
     lua_getglobal g_LuaState, funcName
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
-        lua_settop g_LuaState, 0
         LuaCall = "错误: 函数 '" & funcName & "' 不存在"
+        RestoreStack g_LuaState, stackTop  ' 统一恢复
         Exit Function
     End If
 
@@ -406,12 +417,12 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
     result = lua_pcallk(g_LuaState, argCount, -1, 0, 0, 0)
     If result <> 0 Then
         LuaCall = "运行错误: " & GetStringFromState(g_LuaState, -1)
-        lua_settop g_LuaState, 0
+        RestoreStack g_LuaState, stackTop  ' 统一恢复
         Exit Function
     End If
     
     Dim nResults As Long
-    nResults = lua_gettop(g_LuaState)
+    nResults = lua_gettop(g_LuaState) - stackTop  ' 相对计算结果数
     
     If nResults = 0 Then
         LuaCall = Empty
@@ -421,17 +432,17 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
         Dim results() As Variant
         ReDim results(1 To 1, 1 To nResults)
         For i = 1 To nResults
-            results(1, i) = GetValue(g_LuaState, i)
+            results(1, i) = GetValue(g_LuaState, stackTop + i)
         Next i
         LuaCall = results
     End If
     
-    lua_settop g_LuaState, 0
+    RestoreStack g_LuaState, stackTop  ' 统一恢复
     Exit Function
 
 ErrorHandler:
     LuaCall = "VBA错误: " & Err.Description
-    If g_Initialized Then lua_settop g_LuaState, 0
+    If g_Initialized Then RestoreStack g_LuaState, stackTop  ' 统一恢复
 End Function
 ' ============================================
 ' 第四部分：协程UDF接口
@@ -1115,14 +1126,14 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
 End Sub
 
 ' 处理协程返回结果
-Private Function HandleCoroutineResult(task As Variant, result As Long, nres As Long)
+Private Function HandleCoroutineResult(task As Variant, result As Long, nres As Long) As Variant
     On Error GoTo ErrorHandler
 
     Dim coThread As LongPtr
     coThread = task(TASK_CO_THREAD)
 
-    Dim topBefore As Long
-    topBefore = lua_gettop(coThread)
+    Dim stackTop As Long
+    stackTop = SaveStack(coThread)  ' 入口保存
 
     Select Case result
         Case LUA_OK
@@ -1130,18 +1141,18 @@ Private Function HandleCoroutineResult(task As Variant, result As Long, nres As 
             g_StateDirty = True
             task(TASK_PROGRESS) = 100
 
-            If nres > 0 And topBefore > 0 Then
+            If nres > 0 And stackTop > 0 Then
                 Dim retData As Variant
                 retData = GetValue(coThread, -1)
                 task = ParseYieldReturn(task, retData, True)
             End If
+            
         Case LUA_YIELD
-            If nres > 0 And topBefore > 0 Then
+            If nres > 0 And stackTop > 0 Then
                 Dim yieldData As Variant
                 yieldData = GetValue(coThread, -1)
                 task = ParseYieldReturn(task, yieldData, False)
             End If
-            ' 注意:这里不要立即设置为yielded,让ParseYieldReturn根据返回值决定
             If task(TASK_STATUS) <> "done" And task(TASK_STATUS) <> "error" Then
                 task(TASK_STATUS) = "yielded"
             End If
@@ -1151,25 +1162,22 @@ Private Function HandleCoroutineResult(task As Variant, result As Long, nres As 
             task(TASK_STATUS) = "error"
             g_StateDirty = True
 
-            If nres > 0 And topBefore > 0 Then
+            If nres > 0 And stackTop > 0 Then
                 task(TASK_ERROR) = GetStringFromState(coThread, -1)
             Else
                 task(TASK_ERROR) = "协程错误: 代码 " & result
             End If
     End Select
 
-    ' 清理协程栈
-    lua_settop coThread, 0
-
+    RestoreStack coThread, stackTop  ' 统一恢复
     HandleCoroutineResult = task
     Exit Function
 
 ErrorHandler:
     task(TASK_STATUS) = "error"
     task(TASK_ERROR) = "处理结果错误: " & Err.Description
+    If coThread <> 0 Then RestoreStack coThread, stackTop
     HandleCoroutineResult = task
-    ' 确保清理栈
-    If coThread <> 0 Then lua_settop coThread, 0
 End Function
 
 ' 从 Lua 栈获取字符串
