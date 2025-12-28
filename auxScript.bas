@@ -66,8 +66,7 @@ End Function
 ' 辅助函数：清理特定工作簿的任务
 Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
-    If g_TaskWorkbook Is Nothing Then Exit Sub
-
+    If g_Tasks Is Nothing Then Exit Sub
 
     Dim tasksToRemove As Object
     Set tasksToRemove = GetTasksByWorkbook(wbName)
@@ -81,17 +80,9 @@ Public Sub CleanupWorkbookTasks(wbName As String)
         If g_TaskQueue.Exists(tid) Then g_TaskQueue.Remove tid
 
         ' 删除所有相关数据
-        g_TaskFunc.Remove tid
-        g_TaskWorkbook.Remove tid
-        g_TaskStartArgs.Remove tid
-        g_TaskResumeSpec.Remove tid
-        g_TaskCell.Remove tid
-        g_TaskStatus.Remove tid
-        g_TaskProgress.Remove tid
-        g_TaskMessage.Remove tid
-        g_TaskValue.Remove tid
-        g_TaskError.Remove tid
-        g_TaskCoThread.Remove tid
+        task = g_Tasks(tid)
+        task(TASK_WORKBOOK) = vbNull
+        g_Tasks(tid) = task
     Next
 End Sub  
 ' ============================================
