@@ -52,7 +52,7 @@ Private Function GetTasksByWorkbook(wbName As String) As Object
     Set result = CreateObject("System.Collections.ArrayList")
 
     Dim taskId As Variant
-    For Each task In g_Tasks.Items
+    For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId))(TASK_WORKBOOK) = wbName Then
             result.Add taskId
         End If
@@ -68,20 +68,15 @@ Public Sub CleanupWorkbookTasks(wbName As String)
 
     Dim tasksToRemove As Object
     Set tasksToRemove = GetTasksByWorkbook(wbName)
-    Dim task As Variant
 
     Dim i As Integer
     For i = 0 To tasksToRemove.Count - 1
         Dim tid As String
         tid = CStr(tasksToRemove(i))
-
         ' 从队列中移除
         If g_TaskQueue.Exists(tid) Then g_TaskQueue.Remove tid
-
         ' 删除所有相关数据
-        task = g_Tasks(tid)
-        task(TASK_WORKBOOK) = vbNull
-        g_Tasks(tid) = task
+        g_Tasks(tid)(TASK_WORKBOOK) = vbNull
     Next
 End Sub  
 ' ============================================
@@ -213,10 +208,7 @@ Private Sub LuaTaskMenu_PauseTask()
 
     If g_TaskQueue.Exists(taskId) Then
         g_TaskQueue.Remove taskId
-        Dim task As Variant
-        task = g_Tasks(taskId)
-        task(TASK_STATUS) = "paused"
-        g_Tasks(taskId) = task
+        g_Tasks(taskId)(TASK_STATUS) = "paused"
         MsgBox "任务 " & taskId & " 已暂停。" & vbCrLf & _
                "使用 ResumeTask 恢复。", vbInformation, "任务已暂停"
     Else
@@ -260,7 +252,7 @@ Private Sub LuaTaskMenu_terminateTask()
 
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
-    If taskId = vbNullString Or Not g_Tasks.Exists(taskId) Then
+    If taskId = vbNullString Then
         MsgBox "任务不存在或已删除", vbExclamation
         Exit Sub
     End If
@@ -271,10 +263,8 @@ Private Sub LuaTaskMenu_terminateTask()
     End If
 
     ' 设置终止状态并标记为脏
-    Dim task As Variant
-    task = g_Tasks(taskId)
-    task(TASK_STATUS) = "terminated"
-    task(TASK_START_ARGS) = Empty
+    g_Tasks(taskId)(TASK_STATUS) = "terminated"
+    g_Tasks(taskId)(TASK_STATUS) = Empty
     g_StateDirty = True
 
     ' ' 删除所有数据
@@ -490,7 +480,11 @@ End Sub
 ' 批量启动所有 defined 状态的任务
 Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
     Dim taskId As Variant
-    Dim count As Long
+    Dim count As Long 
+    count = 0
+    If g_Tasks Is Nothing Then
+        InitCoroutineSystem
+    End If
     For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId))(TASK_STATUS) = "defined" Then
             StartLuaCoroutine CStr(taskId)
@@ -527,16 +521,6 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     For i = 0 To tasksToRemove.Count - 1
         Dim tid As String
         tid = CStr(tasksToRemove(i))
-        ' g_TaskFunc.Remove tid
-        ' g_TaskStartArgs.Remove tid
-        ' g_TaskResumeSpec.Remove tid
-        ' g_TaskCell.Remove tid
-        ' g_TaskStatus.Remove tid
-        ' g_TaskProgress.Remove tid
-        ' g_TaskMessage.Remove tid
-        ' g_TaskValue.Remove tid
-        ' g_TaskError.Remove tid
-        ' g_TaskCoThread.Remove tid
         If g_TaskQueue.Exists(tid) Then
             g_TaskQueue.Remove tid
         End If
@@ -568,16 +552,7 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
 
     ' 清空所有 Dictionary
     If Not g_Tasks Is Nothing Then
-        ' g_TaskFunc.RemoveAll
-        ' g_TaskStartArgs.RemoveAll
-        ' g_TaskResumeSpec.RemoveAll
-        ' g_TaskCell.RemoveAll
-        ' g_TaskStatus.RemoveAll
-        ' g_TaskProgress.RemoveAll
-        ' g_TaskMessage.RemoveAll
-        ' g_TaskValue.RemoveAll
-        ' g_TaskError.RemoveAll
-        ' g_TaskCoThread.RemoveAll
+        g_Tasks.RemoveAll
         g_TaskQueue.RemoveAll
     End If
 

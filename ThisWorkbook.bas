@@ -12,23 +12,23 @@ Option Explicit
 ' 加载宏打开时自动运行
 Private Sub Workbook_Open()
     On Error GoTo ErrorHandler
-    
+
     ' 初始化Lua引擎
     'If Not InitLuaState() Then
     '    MsgBox "ThisWorkbook.Workbook_Open: Lua引擎初始化失败！" & vbCrLf & _
     '           "部分功能可能不可用。", vbExclamation, "Workbook_Open加载宏启动警告"
     'End If
-    
+
     ' 启用右键菜单
     DisableLuaTaskMenu
     EnableLuaTaskMenu
-    
+
     ' 注册应用程序级事件
     ' RegisterApplicationEvents
-    
+
     ' 显示欢迎信息（可选）
     ' MsgBox "Excel-Lua 5.4 加载宏已加载！", vbInformation, "欢迎"
-    
+
     Exit Sub
 
 ErrorHandler:
@@ -38,19 +38,19 @@ End Sub
 ' 加载宏关闭前清理
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
-    
+
     ' 停止调度器
     StopScheduler
-    
+
     ' 禁用右键菜单
     DisableLuaTaskMenu
-    
+
     ' 注销应用程序级事件
     ' UnregisterApplicationEvents
-    
+
     ' 清理Lua引擎（但保留其他工作簿的任务）
     ' 注意：这里不调用 CleanupLua，因为其他工作簿可能还在使用
-    
+
     ' 显示退出信息（可选）
     MsgBox "Excel-Lua 5.4 加载宏已卸载。", vbInformation, "再见"
 End Sub
