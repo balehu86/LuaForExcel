@@ -553,9 +553,7 @@ End Sub
 
 ' 清理特定工作簿的任务
 Private Sub LuaSchedulerMenu_CleanupWorkbookTasks()
-    Dim taskCell As String
     Dim wbName As String
-    taskCell = Application.Caller.Address(External:=True)
     wbName = Application.Caller.Worksheet.Parent.Name
     CleanupWorkbookTasks wbName
     MsgBox "已清理工作簿 " & wbName & " 的任务。", vbInformation

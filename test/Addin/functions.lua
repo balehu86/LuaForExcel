@@ -369,7 +369,7 @@ function progress_simulator(taskCell, maxSteps)
             status = "yielded",
             progress = progress,
             message = string.format(
-                "progress: %d/%d (%.1f%%)",
+                "progress: 进度 %d/%d (%.1f%%)",
                 currentStep, steps, progress
             ),
             value = {{currentStep, steps, progress}}

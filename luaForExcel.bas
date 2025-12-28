@@ -42,6 +42,7 @@ Option Explicit
     Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
     Private Declare PtrSafe Function GetTickCount Lib "kernel32" () As Long
+    Private Declare PtrSafe Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long) As Long
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -63,6 +64,20 @@ Private g_HotReloadEnabled As Boolean
 Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
 ' ===== 协程全局变量 =====
+Private Enum Task
+    Func
+    Workbook
+    StartArgs
+    ResumeSpec
+    Cell
+    Status
+    Progress
+    Message
+    Value
+    Errors
+    CoThread
+    DATA_SIZE
+End Enum
 Private g_TaskFunc As Object           ' taskId -> func name
 Private g_TaskWorkbook As Object       ' taskId -> workbook name
 Private g_TaskStartArgs As Object      ' taskId -> startArgs array
@@ -90,6 +105,7 @@ Private g_WorkbookTicks As Integer        ' 按工作簿调度：默认每个工
 Private g_WorkbookCursor As Object        ' wbName -> cursor index (仅mode=1时使用)
 Private g_WorkbookTickCount As Object     ' workbookName -> tick count (仅mode=1时使用，若设置此值将覆盖此工作簿的g_WorkbookTicks)
 ' ===== 配置常量 =====
+Private Const CP_UTF8 As Long = 65001
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
 Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代次数，默认1
@@ -1233,39 +1249,17 @@ End Function
 
 ' UTF8 to UTF16
 Private Function UTF8ToVBAString(ByVal ptr As LongPtr, ByVal byteLen As Long) As String
-    On Error GoTo ErrorHandler
-    
-    If ptr = 0 Or byteLen = 0 Then
-        UTF8ToVBAString = vbNullString
-        Exit Function
-    End If
-    
-    ' 复制字节到VBA数组
-    Dim bytes() As Byte
-    ReDim bytes(0 To byteLen - 1)
-    CopyMemory bytes(0), ByVal ptr, byteLen
-    
-    ' 使用ADODB.Stream转换UTF-8
-    Dim stream As Object
-    Set stream = CreateObject("ADODB.Stream")
-    
-    stream.Type = 1 ' adTypeBinary
-    stream.Open
-    stream.Write bytes
-    stream.Position = 0
-    stream.Type = 2 ' adTypeText
-    stream.Charset = "UTF-8"
-    
-    UTF8ToVBAString = stream.ReadText
-    stream.Close
-    
-    Exit Function
+    If ptr = 0 Or byteLen = 0 Then Exit Function
 
-ErrorHandler:
-    UTF8ToVBAString = vbNullString
-    If Not stream Is Nothing Then
-        On Error Resume Next
-        stream.Close
+    ' 计算需要的缓冲区大小
+    Dim nChars As Long
+    nChars = MultiByteToWideChar(CP_UTF8, 0, ptr, byteLen, 0, 0)
+
+    If nChars > 0 Then
+        ' 分配字符串缓冲区
+        UTF8ToVBAString = String$(nChars, 0)
+        ' 执行转换
+        MultiByteToWideChar CP_UTF8, 0, ptr, byteLen, StrPtr(UTF8ToVBAString), nChars
     End If
 End Function
 
