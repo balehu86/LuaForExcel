@@ -1,7 +1,8 @@
 Option Explicit
 
+Public Id As Integer         ' taskId int
 Public Func As String        ' taskId -> func name
-Public Workbook As String    ' taskId -> workbook name
+Public Workbook As Object    ' taskId -> workbook name
 Public StartArgs As Variant  ' taskId -> startArgs array
 Public ResumeSpec As Variant ' taskId -> resumeSpec array
 Public Cell As String        ' taskId -> taskCell address
