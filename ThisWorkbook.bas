@@ -52,7 +52,7 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
     ' 注意：这里不调用 CleanupLua，因为其他工作簿可能还在使用
 
     ' 显示退出信息（可选）
-    MsgBox "Excel-Lua 5.4 加载宏已卸载。", vbInformation, "再见"
+    ' MsgBox "Excel-Lua 5.4 加载宏已卸载。", vbInformation, "再见"
 End Sub
 
 ' ============================================
@@ -69,12 +69,16 @@ Private Sub App_WorkbookBeforeClose(ByVal Wb As Workbook, Cancel As Boolean)
     ' 清理该工作簿的所有任务
     CleanupWorkbookTasks Wb.Name
     ' 显示退出信息（可选）
-    MsgBox "已清理该工作簿的所有任务", vbInformation, "再见"
+    ' MsgBox "已清理该工作簿的所有任务", vbInformation, "再见"
 End Sub
 
 ' 新建工作簿时的处理（可选）
 Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
     On Error Resume Next
+    Dim wbInfo As New WorkbookInfo
+    Set wbInfo.Workbook = Wb
+    wbInfo.Name = Wb.Name
+    g_Workbooks.Add wbInfo
     ' 可以在这里为新打开的工作簿做一些初始化
     ' 例如：自动检查是否需要functions.lua
 End Sub
