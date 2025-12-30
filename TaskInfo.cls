@@ -16,3 +16,7 @@ Public CoThread As LongPtr   ' taskId -> coThread LongPtr
 Public LastTime As Double    ' 任务上次运行时间(ms)
 Public TotalTime As Double   ' 任务总运行时间(ms)
 Public TickCount As Long     ' 任务调度次数
+
+Private Sub Class_Initialize()
+    Debug.Print "[INFO] " & "一个新的TaskInfo实例被创建"
+End Sub
