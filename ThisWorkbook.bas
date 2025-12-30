@@ -22,6 +22,7 @@ Private Sub Workbook_Open()
     ' 启用右键菜单
     DisableLuaTaskMenu
     EnableLuaTaskMenu
+    Set g_Workbooks = CreateObject("Scripting.Dictionary")
 
     ' 注册应用程序级事件
     ' RegisterApplicationEvents
@@ -68,6 +69,7 @@ Private Sub App_WorkbookBeforeClose(ByVal Wb As Workbook, Cancel As Boolean)
 
     ' 清理该工作簿的所有任务
     CleanupWorkbookTasks Wb.Name
+    g_Workbooks.Remove Wb.Name
     ' 显示退出信息（可选）
     ' MsgBox "已清理该工作簿的所有任务", vbInformation, "再见"
 End Sub
@@ -78,7 +80,7 @@ Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
     Dim wbInfo As New WorkbookInfo
     Set wbInfo.Workbook = Wb
     wbInfo.Name = Wb.Name
-    g_Workbooks.Add wbInfo
+    g_Workbooks.Add Wb.Name, wbInfo
     ' 可以在这里为新打开的工作簿做一些初始化
     ' 例如：自动检查是否需要functions.lua
 End Sub
