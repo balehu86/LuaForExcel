@@ -5,15 +5,14 @@ Public Workbook As Object ' workbookName -> Workbook instance
 Public LastTime As Double    ' 上次调度时间(ms)
 Public TotalTime As Double   ' 总运行时间(ms)
 Public TickCount As Integer   ' 调度次数(统计用)
-Private m_Tasks As Collection
-
+Private m_Tasks As Object
 Private Sub Class_Initialize()
     Cursor = 0
     AllowedTickCount = -1 ' 默认不覆盖
     LastTime = 0
     TotalTime = 0
     TickCount = 0
-    Set m_Tasks = New Collection
+    Set m_Tasks = CreateObject("Scripting.Dictionary")
 End Sub
 
 ' 属性访问器
