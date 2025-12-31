@@ -584,7 +584,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
 
     Dim wb As WorkbookInfo
     For Each wb In g_Workbooks.Items
-        msg = msg & "  [" & wb.WBName & "]: " & wb.Tasks.Count & " 个任务" & vbCrLf
+        msg = msg & "  [" & wb.wbName & "]: " & wb.Tasks.Count & " 个任务" & vbCrLf
     Next
 
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
@@ -758,15 +758,15 @@ Private Sub LuaConfigMenu_SetWorkbookTicks()
 
         Dim wbTicks As Variant
         Dim currentTicks As Integer
-        If Not g_Workbooks(wbName).AllowedTickCount < 0 Then
-            currentTicks = g_Workbooks(wbName).AllowedTickCount
+        If Not g_Workbooks(wbName).wbAllowedTickCount < 0 Then
+            currentTicks = g_Workbooks(wbName).wbAllowedTickCount
         Else
             currentTicks = g_WorkbookTicks
         End If
 
         wbTicks = Application.InputBox("设置工作簿 [" & wbName & "] 的tick数，负数为将不会调度工作簿。", "工作簿设置", currentTicks, Type:=1)
         If wbTicks = False Then Exit Sub
-        g_Workbooks(wbName).AllowedTickCount = CLng(wbTicks)
+        g_Workbooks(wbName).wbAllowedTickCount = CLng(wbTicks)
         MsgBox "工作簿 [" & wbName & "] tick数已设置为: " & wbTicks, vbInformation
     End If
 End Sub
@@ -908,12 +908,12 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
     For Each wb In g_Workbooks.Items
         wbNum = wbNum + 1
         msg = msg & "【工作簿 #" & wbNum & "】" & vbCrLf
-        msg = msg & "  名称: " & wb.WbName & vbCrLf
+        msg = msg & "  名称: " & wb.wbName & vbCrLf
         msg = msg & "  任务数: " & wb.Tasks.Count & vbCrLf
-        msg = msg & "  总调度次数: " & wb.WbTickCount & vbCrLf
-        msg = msg & "  总运行时间: " & Format(wb.WbTotalTime, "0.00") & " ms" & vbCrLf
-        msg = msg & "  平均时间: " & Format(wb.WbTotalTime / wb.WbTickCount, "0.00") & " ms" & vbCrLf
-        msg = msg & "  上次调度: " & Format(wb.WbLastTime, "0.00") & " ms" & vbCrLf
+        msg = msg & "  总调度次数: " & wb.wbTickCount & vbCrLf
+        msg = msg & "  总运行时间: " & Format(wb.wbTotalTime, "0.00") & " ms" & vbCrLf
+        msg = msg & "  平均时间: " & Format(wb.wbTotalTime / wb.wbTickCount, "0.00") & " ms" & vbCrLf
+        msg = msg & "  上次调度: " & Format(wb.wbLastTime, "0.00") & " ms" & vbCrLf
 
         ' 显示配置的tick数（仅在按工作簿调度模式下）
         ' If g_ScheduleMode = 1 Then
@@ -956,9 +956,9 @@ Private Sub LuaPerfMenu_ResetStats()
     ' 重置工作簿统计
     Dim wb As WorkbookInfo
     For Each wb In g_Workbooks.Items
-        wb.WbLastTime = 0
-        wb.WbTotalTime = 0
-        wb.WbTickCount = 0
+        wb.wbLastTime = 0
+        wb.wbTotalTime = 0
+        wb.wbTickCount = 0
     Next
 
     MsgBox "所有性能统计数据已重置。", vbInformation, "重置完成"

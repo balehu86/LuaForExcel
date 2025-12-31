@@ -53,7 +53,7 @@ Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
     ' 自动注册工作簿
     If Not g_Workbooks.Exists(Wb.Name) Then
         Dim wbInfo As New WorkbookInfo
-        wbInfo.WbName = Wb.Name
+        wbInfo.wbName = Wb.Name
         g_Workbooks.Add Wb.Name, wbInfo
         Debug.Print "App自动注册工作簿: " & Wb.Name
     End If

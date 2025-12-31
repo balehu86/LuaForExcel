@@ -447,7 +447,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     ' 自动注册工作簿
     If Not g_Workbooks.Exists(wbName) Then
         Dim wbInfo As New WorkbookInfo
-        wbInfo.WbName = wbName
+        wbInfo.wbName = wbName
         g_Workbooks.Add wbName, wbInfo
         Debug.Print "LuaTask自动注册工作簿: " & wbName
     End If
@@ -809,8 +809,8 @@ Private Sub ScheduleByWorkbook()
 
         ' 确定此工作簿的tick数
         Dim tickCount As Integer
-        If wb.WbAllowedTickCount > -1 Then
-            tickCount = wb.WbAllowedTickCount
+        If wb.wbAllowedTickCount > -1 Then
+            tickCount = wb.wbAllowedTickCount
         Else
             tickCount = g_WorkbookTicks
         End If
@@ -826,7 +826,7 @@ Private Sub ScheduleByWorkbook()
 
         ' Round-Robin 调度
         Dim cursor As Integer
-        cursor = wb.WbCursor
+        cursor = wb.wbCursor
 
         Dim executedCount As Long
         Dim stepCount As Long
@@ -848,13 +848,13 @@ Private Sub ScheduleByWorkbook()
                     ' 执行任务
                     ResumeCoroutine task
 
-                    ' 性能计时结束
+                    ' 性能计时结束`
                     taskElapsed = GetTickCount() - taskStart
 
                     ' 更新工作簿统计
-                    wb.WbLastTime = taskElapsed
-                    wb.WbTotalTime = wb.WbTotalTime + taskElapsed
-                    wb.WbTickCount = wb.WbTickCount + 1
+                    wb.wbLastTime = taskElapsed
+                    wb.wbTotalTime = wb.wbTotalTime + taskElapsed
+                    wb.wbTickCount = wb.wbTickCount + 1
 
                     ' 更新任务统计
                     task.taskLastTime = taskElapsed
@@ -882,7 +882,7 @@ Private Sub ScheduleByWorkbook()
         Loop
 
         ' 保存游标
-        wb.WbCursor = cursor
+        wb.wbCursor = cursor
 
 NextWorkbook:
     Next wb
@@ -1517,11 +1517,11 @@ End Sub
 
 ' 根据调用单元格地址查找已存在的任务
 Private Function FindTaskByCell(taskCell As String) As String
-    Dim taskId As Variant
+    Dim task As TaskInfo
     If g_Tasks Is Nothing Then Exit Function
-    For Each taskId In g_Tasks.Keys
-        If g_Tasks(taskId).Cell = taskCell Then
-            FindTaskByCell = CStr(taskId)
+    For Each task In g_Tasks.Items
+        If task.taskCell = taskCell Then
+            FindTaskByCell = CStr(task.taskId)
             Exit Function
         End If
     Next
