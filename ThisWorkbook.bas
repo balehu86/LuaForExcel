@@ -23,7 +23,6 @@ Private Sub Workbook_Open()
     ' MsgBox "Excel-Lua 5.4 加载宏已加载！", vbInformation, "欢迎"
 
     Exit Sub
-
 ErrorHandler:
     MsgBox "ThisWorkbook.Workbook_Open: 加载宏启动失败: " & Err.Description, vbCritical, "严重错误"
 End Sub
@@ -51,10 +50,13 @@ Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
     On Error GoTo SafeExit
     If Wb Is ThisWorkbook Then Exit Sub
 
-    Dim wbInfo As New WorkbookInfo
-    wbInfo.Name = Wb.Name
-
-    g_Workbooks.Add Wb.Name, wbInfo
+    ' 自动注册工作簿
+    If Not g_Workbooks.Exists(Wb.Name) Then
+        Dim wbInfo As New WorkbookInfo
+        wbInfo.Name = Wb.Name
+        g_Workbooks.Add Wb.Name, wbInfo
+        Debug.Print "App自动注册工作簿: " & Wb.Name
+    End If
     Exit Sub
 SafeExit:
     MsgBox "ThisWorkbook.App_WorkbookOpen: 打开工作簿出错: " & Err.Description, vbCritical, "错误"
