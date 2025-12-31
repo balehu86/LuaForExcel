@@ -2,7 +2,7 @@ Option Explicit
 
 Public Id As Integer         ' taskId int
 Public Func As String        ' taskId -> func name
-Public Workbook As WorkbookInfo ' taskId -> workbookInfo instance
+Private m_Workbook As WorkbookInfo ' taskId -> workbookInfo instance
 Public StartArgs As Variant  ' taskId -> startArgs array
 Public ResumeSpec As Variant ' taskId -> resumeSpec array
 Public Cell As String        ' taskId -> taskCell address
@@ -20,3 +20,18 @@ Public TickCount As Long     ' 任务调度次数
 Private Sub Class_Initialize()
     Debug.Print "[INFO] " & "一个新的TaskInfo实例被创建"
 End Sub
+
+Public Property Get Workbook() As WorkbookInfo
+    Set Workbook = m_Workbook
+End Property
+
+Public Property Set Workbook(ByVal wb As WorkbookInfo)
+    Set m_Workbook = wb
+End Property
+
+Public Sub ResetStats()
+    LastTime = 0
+    TotalTime = 0
+    TickCount = 0
+End Sub
+
