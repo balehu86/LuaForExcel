@@ -727,77 +727,53 @@ End Sub
 
 ' 按任务顺序调度 - 直接执行
 Private Sub ScheduleByTask()
-    ' 构建任务ID数组
-    Dim taskIds() As Variant
-    ReDim taskIds(0 To g_TaskQueue.Count - 1)
-
-    Dim idx As Long, taskId As Variant
-    idx = 0
-    For Each taskId In g_TaskQueue.Keys
-        taskIds(idx) = taskId
-        idx = idx + 1
-    Next
-
-    Dim total As Long
-    total = UBound(taskIds) + 1
+    Dim total As Integer
+    total = g_TaskQueue.Count
     If total = 0 Then Exit Sub
 
-    ' Round-Robin 直接执行
-    Dim executed As Long, cur As Long
+    Dim executed As Integer
+    Dim taskId As String
     Dim task As TaskInfo
     Dim taskStart As Double, taskElapsed As Double
-    Dim wb As String
 
-    cur = g_SchedulerCursorByTask Mod total
+    executed = 0
+    Do While executed < g_MaxIterationsPerTick And g_TaskQueue.Count > 0
+        taskId = g_TaskQueue.Keys()(g_SchedulerCursorByTask)
 
-    Do While executed < g_MaxIterationsPerTick And executed < total
-        taskId = CStr(taskIds(cur))
+        Set task = g_Tasks(taskId)
 
-        If g_Tasks.Exists(taskId) Then
-            Set task = g_Tasks(taskId)
+        ' 只调度 yielded 状态
+        If task.taskStatus = "yielded" Then
+            taskStart = GetTickCount()
 
-            ' 只调度 yielded 状态的任务
-            If task.taskStatus = "yielded" Then
-                ' 任务级别计时开始
-                taskStart = GetTickCount()
-                wb = task.taskWorkbook
+            ResumeCoroutine task
 
-                ' 直接执行任务
-                ResumeCoroutine task
+            taskElapsed = GetTickCount() - taskStart
+            ' --- 工作簿统计 ---
+            With g_Workbooks(task.taskWorkbook)
+                .LastTime = taskElapsed
+                .TotalTime = .TotalTime + taskElapsed
+                .TickCount = .TickCount + 1
+            End With
 
-                ' 任务级别计时结束
-                taskElapsed = GetTickCount() - taskStart
-
-                ' 更新工作簿统计
-                g_Workbooks(wb).LastTime = taskElapsed
-                g_Workbooks(wb).TotalTime = g_Workbooks(wb).TotalTime + taskElapsed
-                g_Workbooks(wb).TickCount = g_Workbooks(wb).TickCount + 1
-                ' 检查任务是否完成
-                Dim status As String
-                status = task.taskStatus
-                If status = "done" Or status = "error" Or status = "terminated" Then
+            ' --- 终止态清理 ---
+            Select Case task.taskStatus
+                Case "done", "error", "terminated"
                     g_TaskQueue.Remove taskId
-                End If
-            End If
-        Else
-            g_TaskQueue.Remove taskId
+            End Select
         End If
 
         executed = executed + 1
-        cur = (cur + 1) Mod total
+
+        If g_TaskQueue.Count > 0 Then
+            g_SchedulerCursorByTask = (g_SchedulerCursorByTask + 1) Mod g_TaskQueue.Count
+        End If
     Loop
-
-    ' 更新游标
-    g_SchedulerCursorByTask = cur
-
 End Sub
 
 ' 按工作簿调度 - 直接执行
 Private Sub ScheduleByWorkbook()
     On Error GoTo ErrorHandler
-
-    If g_Workbooks Is Nothing Then Exit Sub
-    If g_Workbooks.Count = 0 Then Exit Sub
 
     Dim wbName As Variant
     Dim wb As WorkbookInfo
@@ -808,6 +784,8 @@ Private Sub ScheduleByWorkbook()
     ' 遍历所有工作簿
     For Each wbName In g_Workbooks.Keys
         Set wb = g_Workbooks(wbName)
+        ' 如果没有任务或tick数为0，跳过
+        If wb.Tasks.Count = 0 Or tickCount <= 0 Then GoTo NextWorkbook
 
         ' 确定此工作簿的tick数
         Dim tickCount As Integer
@@ -817,26 +795,19 @@ Private Sub ScheduleByWorkbook()
             tickCount = g_WorkbookTicks
         End If
 
-        ' 如果没有任务或tick数为0，跳过
-        If wb.Tasks.Count = 0 Or tickCount <= 0 Then GoTo NextWorkbook
-
-        ' 获取任务列表
-        Dim taskList As Variant
-        taskList = wb.Tasks.Keys
-        Dim totalTasks As Long
-        totalTasks = UBound(taskList) + 1
-
         ' Round-Robin 调度
-        Dim cursor As Integer
-        cursor = wb.wbCursor
-
-        Dim executedCount As Long
+        Dim cur As Integer
+        cur = wb.wbCursor
+        If cur < 0 Or cur >= total Then cur = 0
+        Dim executed As Long
         Dim stepCount As Long
-        executedCount = 0
+        executed = 0
         stepCount = 0
 
-        Do While executedCount < tickCount And stepCount < totalTasks
-            taskId = CStr(taskList(cursor))
+        Do While executed < tickCount And wb.Tasks.Count > 0
+            If cur >= wb.Tasks.Count Then cur = 0
+
+            taskId = wb.Tasks.Keys()(cur)
 
             ' 检查任务是否仍在全局队列中
             If g_Tasks.Exists(taskId) Then
@@ -854,24 +825,17 @@ Private Sub ScheduleByWorkbook()
                     taskElapsed = GetTickCount() - taskStart
 
                     ' 更新工作簿统计
-                    wb.wbLastTime = taskElapsed
-                    wb.wbTotalTime = wb.wbTotalTime + taskElapsed
-                    wb.wbTickCount = wb.wbTickCount + 1
+                    With wb
+                        .wbLastTime = taskElapsed
+                        .wbTotalTime = .wbTotalTime + taskElapsed
+                        .wbTickCount = .wbTickCount + 1
+                    End With
 
-                    ' 更新任务统计
-                    task.taskLastTime = taskElapsed
-                    task.taskTotalTime = task.taskTotalTime + taskElapsed
-                    task.taskTickCount = task.taskTickCount + 1
-
-                    executedCount = executedCount + 1
-
-                    ' 检查任务是否完成
-                    Dim status As String
-                    status = task.taskStatus
-                    If status = "done" Or status = "error" Or status = "terminated" Then
-                        g_TaskQueue.Remove taskId
-                        wb.Tasks.Remove taskId  ' 从工作簿任务列表移除
-                    End If
+                    ' --- 终止态清理 ---
+                    Select Case task.taskStatus
+                        Case "done", "error", "terminated"
+                            ' g_TaskQueue.Remove taskId
+                    End Select
                 End If
             Else
                 ' 任务不存在，从队列和工作簿移除
@@ -879,12 +843,14 @@ Private Sub ScheduleByWorkbook()
                 If wb.Tasks.Exists(taskId) Then wb.Tasks.Remove taskId
             End If
 
-            cursor = (cursor + 1) Mod totalTasks
+            executed = executed + 1
+
+            cur = (cur + 1) Mod wb.Tasks.Count
             stepCount = stepCount + 1
         Loop
 
         ' 保存游标
-        wb.wbCursor = cursor
+        wb.wbCursor = cur
 
 NextWorkbook:
     Next wbName
