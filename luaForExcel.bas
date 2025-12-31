@@ -71,7 +71,7 @@ Private g_TaskQueue As Object     ' taskId -> True (active tasks)
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_SchedulerCursorByTask As Long ' Round-Robin 游标
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
-Private g_NextTaskId As Integer            ' 新建下一个任务ID计数器
+Private g_NextTaskId As Integer         ' 新建下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
 
@@ -162,7 +162,7 @@ Private Sub InitCoroutineSystem()
     If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
     If g_TaskQueue Is Nothing Then Set g_TaskQueue = CreateObject("Scripting.Dictionary")
 
-    If g_NextTaskId = 1 Then g_NextTaskId = 1
+    If g_NextTaskId = 0 Then g_NextTaskId = 1
     g_SchedulerCursorByTask = 0
     g_StateDirty = False
 End Sub
