@@ -15,13 +15,14 @@ Private Sub Workbook_Open()
     ' 绑定 Application 事件
     Set App = Application
 
-    DisableLuaTaskMenu
-    EnableLuaTaskMenu
     ' 初始化必要的全局变量
     g_NextTaskId = 1
     If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
     If g_TaskQueue Is Nothing Then Set g_TaskQueue = CreateObject("Scripting.Dictionary")
+
+    DisableLuaTaskMenu
+    EnableLuaTaskMenu
     ' MsgBox "Excel-Lua 5.4 加载宏已加载！", vbInformation, "欢迎"
 
     Exit Sub
@@ -37,9 +38,9 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
 
     ' 注销应用程序级事件
     Set App = Nothing
-    If Not g_Workbooks Is Nothing Then
-        g_Workbooks.RemoveAll
-    End If
+    If Not g_Workbooks Is Nothing Then g_Workbooks.RemoveAll
+    If Not g_Tasks Is Nothing Then g_Tasks.RemoveAll
+    If Not g_TaskQueue Is Nothing Then g_TaskQueue.RemoveAll
     ' MsgBox "Excel-Lua 5.4 加载宏已卸载。", vbInformation, "再见"
 End Sub
 
