@@ -18,6 +18,8 @@ Private Sub Workbook_Open()
     DisableLuaTaskMenu
     EnableLuaTaskMenu
     ' 初始化全局工作簿字典
+    InitLuaState
+
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
 
     ' MsgBox "Excel-Lua 5.4 加载宏已加载！", vbInformation, "欢迎"

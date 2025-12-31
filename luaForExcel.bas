@@ -64,14 +64,14 @@ Private g_HotReloadEnabled As Boolean
 Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
 ' ===== 协程全局变量 =====
-Private g_Tasks As Object       ' task Id -> task Instance
+Public g_Tasks As Object       ' task Id -> task Instance
 Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
 Private g_TaskQueue As Object     ' taskId -> True (active tasks)
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_SchedulerCursorByTask As Long ' Round-Robin 游标
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
-Private g_NextTaskId As Long            ' 新建下一个任务ID计数器
+Private g_NextTaskId As Integer            ' 新建下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
 
@@ -799,13 +799,15 @@ Private Sub ScheduleByWorkbook()
     If g_Workbooks Is Nothing Then Exit Sub
     If g_Workbooks.Count = 0 Then Exit Sub
 
+    Dim wbName As Variant
     Dim wb As WorkbookInfo
     Dim task As TaskInfo
     Dim taskId As String
     Dim taskStart As Double, taskElapsed As Double
 
     ' 遍历所有工作簿
-    For Each wb In g_Workbooks.Items
+    For Each wbName In g_Workbooks.Keys
+        Set wb = g_Workbooks(wbName)
 
         ' 确定此工作簿的tick数
         Dim tickCount As Integer
@@ -885,7 +887,7 @@ Private Sub ScheduleByWorkbook()
         wb.wbCursor = cursor
 
 NextWorkbook:
-    Next wb
+    Next wbName
     Exit Sub
 ErrorHandler:
     Debug.Print "ScheduleByWorkbook错误: " & Err.Description
@@ -1325,27 +1327,27 @@ Private Function TableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Varian
     Dim firstIsTable As Boolean
     firstIsTable = (lua_type(L, -1) = LUA_TTABLE)
     lua_settop L, -2
-    
+
     If firstIsTable Then
         ' 二维数组
         lua_rawgeti L, idx, 1
         Dim cols As LongPtr
         cols = lua_rawlen(L, -1)
         lua_settop L, -2
-        
+
         If cols = 0 Then cols = 1  ' 防止空子表
-        
+
         Dim arr2D() As Variant
         ReDim arr2D(1 To CLng(length), 1 To CLng(cols))
-        
+
         Dim i As Long, j As Long
         For i = 1 To CLng(length)
             lua_rawgeti L, idx, CLng(i)
-            
+
             If lua_type(L, -1) = LUA_TTABLE Then
                 Dim subLen As LongPtr
                 subLen = lua_rawlen(L, -1)
-                
+
                 For j = 1 To CLng(cols)
                     If j <= subLen Then
                         lua_rawgeti L, -1, CLng(j)
@@ -1358,25 +1360,25 @@ Private Function TableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Varian
             Else
                 arr2D(i, 1) = GetValue(L, -1)
             End If
-            
+
             lua_settop L, -2
         Next i
-        
+
         TableToVariant = arr2D
     Else
         ' 一维数组（转为单行二维）
         Dim arr1D() As Variant
         ReDim arr1D(1 To 1, 1 To CLng(length))
-        
+
         For i = 1 To CLng(length)
             lua_rawgeti L, idx, CLng(i)
             arr1D(1, i) = GetValue(L, -1)
             lua_settop L, -2
         Next i
-        
+
         TableToVariant = arr1D
     End If
-    
+
     Exit Function
 
 ErrorHandler:
@@ -1517,11 +1519,11 @@ End Sub
 
 ' 根据调用单元格地址查找已存在的任务
 Private Function FindTaskByCell(taskCell As String) As String
-    Dim task As TaskInfo
+    Dim taskId As Variant
     If g_Tasks Is Nothing Then Exit Function
-    For Each task In g_Tasks.Items
-        If task.taskCell = taskCell Then
-            FindTaskByCell = CStr(task.taskId)
+    For Each taskId In g_Tasks.Keys
+        If g_Tasks(taskId).taskCell = taskCell Then
+            FindTaskByCell = CStr(taskId)
             Exit Function
         End If
     Next

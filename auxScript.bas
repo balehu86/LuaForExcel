@@ -52,20 +52,16 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     If g_Tasks Is Nothing Then Exit Sub
     If Not g_Workbooks.Exists(wbName) Then Exit Sub
 
-    Dim taskId As String
-    Dim task As TaskInfo
-    For Each task In g_Tasks.Items
-        If task.taskWorkbook = wbName Then
-        taskId = "Task_" & CStr(task.taskId)
+    Dim taskId As Variant
+    For Each taskId In g_Tasks.Keys
+        If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
         ' 从队列中移除
-        If g_TaskQueue.Exists(TaskId) Then g_TaskQueue.Remove TaskId
-        g_Tasks(taskId).taskWorkbook = vbNull
+        If g_TaskQueue.Exists(CStr(taskId)) Then g_TaskQueue.Remove taskId
+        g_Tasks(CStr(taskId)).taskWorkbook = vbNull
         End If
     Next
-
-    For Each task In g_Workbooks(wbName).Tasks
-        g_Workbooks(wbName).Tasks.RemoveAll
-    Next
+    ' 清理工作簿记录
+    g_Workbooks(wbName).Tasks.RemoveAll
 End Sub
 ' ============================================
 ' 第七部分：可视化操作函数
@@ -172,11 +168,11 @@ Private Sub LuaTaskMenu_StartTask()
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
         Exit Sub
     End If
-    If g_Tasks(taskId).Status = "defined" Then
+    If g_Tasks(taskId).taskStatus = "defined" Then
         StartLuaCoroutine taskId
         MsgBox "任务已启动: " & taskId, vbInformation
     Else
-        MsgBox "任务状态为 " & g_Tasks(taskId).Status & "，无法启动。", vbExclamation
+        MsgBox "任务状态为 " & g_Tasks(taskId).taskStatus & "，无法启动。", vbExclamation
     End If
 End Sub
 
@@ -221,7 +217,7 @@ Private Sub LuaTaskMenu_ResumeTask()
     End If
 
     Dim status As String
-    status = g_Tasks(taskId).Status
+    status = g_Tasks(taskId).taskStatus
     If status <> "yielded" And status <> "paused" Then
         MsgBox "任务 " & taskId & " 状态为 " & status & "，无法恢复。", vbExclamation, "无法恢复"
         Exit Sub
@@ -254,7 +250,7 @@ Private Sub LuaTaskMenu_terminateTask()
     End If
 
     ' 设置终止状态并标记为脏
-    g_Tasks(taskId).Status = "terminated"
+    g_Tasks(taskId).taskStatus = "terminated"
     g_StateDirty = True
 
     ' ' 删除所有数据
@@ -442,11 +438,11 @@ Private Sub LuaTaskMenu_StartAllWorkbookTasks()
     count = 0
     Dim task As TaskInfo
 
-    For Each task In g_Tasks.Items
-        task = g_Tasks(CStr(taskId))
+    For Each taskId In g_Tasks.Keys
+        Set task = g_Tasks(taskId)
         If task.taskWorkbook = wbName Then
             If task.taskStatus = "defined" Then
-                StartLuaCoroutine CStr(taskId)
+                StartLuaCoroutine "Task_" & CStr(task.taskId)
                 count = count + 1
             End If
         End If
@@ -467,7 +463,7 @@ End Sub
 ' 批量启动所有 defined 状态的任务
 Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
     Dim task As TaskInfo
-    Dim taskId As String
+    Dim taskId As Variant
     Dim count As Integer
     count = 0
     If g_Tasks Is Nothing Then
@@ -477,7 +473,8 @@ Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
         MsgBox "当前没有任何任务。", vbInformation, "提示"
         Exit Sub
     End If
-    For Each task In g_Tasks.Items
+    For Each taskId In g_Tasks.Keys
+        Set task = g_Tasks(taskId)
         If task.taskStatus = "defined" Then
             StartLuaCoroutine "Task_" & CStr(task.taskId)
             count = count + 1
@@ -506,7 +503,7 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     count = 0
     Dim status As String
     For Each taskId In g_Tasks.Keys
-        status = g_Tasks(taskId).Status
+        status = g_Tasks(taskId).taskStatus
         If status = "done" Or status = "error" Then
             g_TaskQueue.Remove taskId
             count = count +1
@@ -556,10 +553,12 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     End If
 
     ' 按工作簿分组统计
+    Dim taskId As Variant
     Dim task As TaskInfo
     Dim definedCount As Integer, runningCount As Integer, yieldedCount As Integer, doneCount As Integer, errorCount As Integer, pausedCount As Integer
     ' 统计各状态任务数
-    For Each task In g_Tasks.Items
+    For Each taskId In g_Tasks.Keys
+        Set task = g_Tasks(taskId)
         Select Case task.taskStatus
             Case "defined": definedCount = definedCount + 1
             Case "running": runningCount = runningCount + 1
@@ -582,23 +581,24 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
     msg = msg & vbCrLf & "按工作簿分组:" & vbCrLf
 
-    Dim wb As WorkbookInfo
-    For Each wb In g_Workbooks.Items
-        msg = msg & "  [" & wb.wbName & "]: " & wb.Tasks.Count & " 个任务" & vbCrLf
+    Dim wbName As Variant
+    For Each wbName In g_Workbooks.Keys
+        msg = msg & "  [" & wbName & "]: " & g_Workbooks(wbName).Tasks.Count & " 个任务" & vbCrLf
     Next
 
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     msg = msg & "状态统计:" & vbCrLf
+    msg = msg & "   已定义: " & definedCount & vbCrLf
     msg = msg & "   运行中: " & runningCount & vbCrLf
-    msg = msg & "   暂停中: " & yieldedCount & vbCrLf
+    msg = msg & "   中止中: " & yieldedCount & vbCrLf
     msg = msg & "   已完成: " & doneCount & vbCrLf
     msg = msg & "   错误: " & errorCount & vbCrLf
+    msg = msg & "   已暂停: " & pausedCount & vbCrLf
     msg = msg & vbCrLf & "========================================" & vbCrLf & vbCrLf
 
     ' 详细列出每个任务
-    Dim taskId As Variant
     For Each taskId In g_Tasks.Keys
-        task = g_Tasks(CStr(taskId))
+        Set task = g_Tasks(CStr(taskId))
         msg = msg & "【任务 #" & task.taskId & "】" & vbCrLf
         msg = msg & "  ID: " & CStr(taskId) & vbCrLf
         msg = msg & "  函数: " & task.taskFunc & vbCrLf
@@ -633,7 +633,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
 
     Exit Sub
 ErrorHandler:
-    MsgBox "显示任务信息时出错: " & Err.Description, vbCritical, "错误"
+    MsgBox "显示任务信息时出错: " & Err.Description & msg, vbCritical, "错误"
 End Sub
 
 ' ====插件设置功能====
@@ -672,10 +672,6 @@ End Sub
 
 ' 设置调度间隔（毫秒）
 Private Sub LuaConfigMenu_SetSchedulerInterval()
-    If g_SchedulerRunning Then
-        StopScheduler
-    End If
-
     Dim seconds As Long
     seconds = Application.InputBox( _
             "请输入调度的间隔时间（>=10ms且<=60000ms）", _
@@ -685,13 +681,12 @@ Private Sub LuaConfigMenu_SetSchedulerInterval()
         )
 
     If seconds = False Then Exit Sub
-    If seconds < 10 Or seconds > 60 Then
+    If seconds < 10 Or seconds > 60000 Then
         MsgBox "间隔不能小于 10 ms。且不能大于 60 秒。", vbExclamation, "无效值"
         Exit Sub
     End If
 
     g_SchedulerIntervalMilliSec = seconds
-    ResumeScheduler
 End Sub
 
 ' 按任务调度时，设置调度步数 
@@ -864,9 +859,11 @@ Private Sub LuaPerfMenu_ShowTaskStats()
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     Dim taskNum As Long
     taskNum = 0
+    Dim taskId As Variant
     Dim task As TaskInfo
-    For Each task In g_Tasks.Items
+    For Each taskId In g_Tasks.Keys
         taskNum = taskNum + 1
+        Set task = g_Tasks(taskId)
         msg = msg & "【任务 #" & taskNum & "】" & vbCrLf
         msg = msg & "  ID: " & "Task_" & CStr(task.taskId) & vbCrLf
         msg = msg & "  函数: " & task.taskFunc & vbCrLf
@@ -903,18 +900,20 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
 
     Dim wb As WorkbookInfo
+    Dim wbName As Variant
     Dim wbNum As Integer
     wbNum = 0
-    For Each wb In g_Workbooks.Items
+    For Each wbName In g_Workbooks.Keys
+        Set wb = g_Workbooks(wbName)
+
         wbNum = wbNum + 1
         msg = msg & "【工作簿 #" & wbNum & "】" & vbCrLf
-        msg = msg & "  名称: " & wb.wbName & vbCrLf
+        msg = msg & "  名称: " & wbName & vbCrLf
         msg = msg & "  任务数: " & wb.Tasks.Count & vbCrLf
         msg = msg & "  总调度次数: " & wb.wbTickCount & vbCrLf
         msg = msg & "  总运行时间: " & Format(wb.wbTotalTime, "0.00") & " ms" & vbCrLf
         msg = msg & "  平均时间: " & Format(wb.wbTotalTime / wb.wbTickCount, "0.00") & " ms" & vbCrLf
         msg = msg & "  上次调度: " & Format(wb.wbLastTime, "0.00") & " ms" & vbCrLf
-
         ' 显示配置的tick数（仅在按工作簿调度模式下）
         ' If g_ScheduleMode = 1 Then
         '     If g_WorkbookTickCount.Exists(CStr(wb)) Then
@@ -946,16 +945,20 @@ Private Sub LuaPerfMenu_ResetStats()
     g_SchedulerStats.StartTime = Now
 
     ' 重置任务统计
+    Dim taskId As Variant
     Dim task As TaskInfo
-    For Each task In g_Tasks.Items
+    For Each taskId In g_Tasks.Keys
+        Set task = g_Tasks(taskId)
         task.taskLastTime = 0
         task.TaskTotalTime = 0
         task.taskTickCount = 0
     Next
 
     ' 重置工作簿统计
+    Dim wbName As Variant
     Dim wb As WorkbookInfo
-    For Each wb In g_Workbooks.Items
+    For Each wbName In g_Workbooks.Keys
+        Set wb = g_Workbooks(wbName)
         wb.wbLastTime = 0
         wb.wbTotalTime = 0
         wb.wbTickCount = 0
