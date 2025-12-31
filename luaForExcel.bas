@@ -64,37 +64,20 @@ Private g_HotReloadEnabled As Boolean
 Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
 ' ===== 协程全局变量 =====
-Private Const TASK_FUNC As Integer = 0
-Private Const TASK_WORKBOOK As Integer = 1
-Private Const TASK_START_ARGS As Integer = 2
-Private Const TASK_RESUME_SPEC As Integer = 3
-Private Const TASK_CELL As Integer = 4
-Private Const TASK_STATUS As Integer = 5
-Private Const TASK_PROGRESS As Integer = 6
-Private Const TASK_MESSAGE As Integer = 7
-Private Const TASK_VALUE As Integer = 8
-Private Const TASK_ERROR As Integer = 9
-Private Const TASK_CO_THREAD As Integer = 10
-Private Const TASK_LAST_TIME As Integer = 11
-Private Const TASK_TOTAL_TIME As Integer = 12
-Private Const TASK_TICK_COUNT As Integer = 13
-Private Const TASK_DATA_SIZE As Integer = 14
-Private  g_Tasks As Object             ' taskId -> task data array
-Private g_TaskQueue As Object          ' taskId -> True (active tasks)
+Private g_Tasks As Object       ' task Id -> task Instance
+Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
+Private g_TaskQueue As Object     ' taskId -> True (active tasks)
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_SchedulerCursorByTask As Long ' Round-Robin 游标
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
-Private g_NextTaskId As Long            ' 下一个任务ID计数器
+Private g_NextTaskId As Long            ' 新建下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
-
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
 
 Private g_ScheduleMode As Integer         ' 0=按任务顺序, 1=按工作簿
 Private g_MaxIterationsPerTick As Integer ' 按任务时调度：每次调度迭代次数
 Private g_WorkbookTicks As Integer        ' 按工作簿调度：默认每个工作簿的tick数
-Private g_WorkbookCursor As Object        ' wbName -> cursor index (仅mode=1时使用)
-Private g_WorkbookTickCount As Object     ' workbookName -> tick count (仅mode=1时使用，若设置此值将覆盖此工作簿的g_WorkbookTicks)
 ' ===== 配置常量 =====
 Private Const CP_UTF8 As Long = 65001
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
@@ -110,10 +93,6 @@ Private Type SchedulerStats
     StartTime As Date        ' 调度器启动时间
 End Type
 Private g_SchedulerStats As SchedulerStats
-
-Private g_WorkbookLastTime As Object        ' workbookName -> 上次调度时间(ms)
-Private g_WorkbookTotalTime As Object       ' workbookName -> 总运行时间(ms)
-Private g_WorkbookTickCount_Stats As Object ' workbookName -> 调度次数(统计用，与配置的g_WorkbookTickCount区分)
 ' ============================================
 ' 第一部分：核心初始化和清理
 ' ============================================
@@ -159,7 +138,7 @@ Public Function InitLuaState() As Boolean
     End If
 
     InitLuaState = True
-    MsgBox "Lua栈初始化完成",vbInformation,"InitLuaState_Info" 
+    ' MsgBox "Lua栈初始化完成",vbInformation,"InitLuaState_Info" 
     Exit Function
 
 ErrorHandler:
@@ -173,22 +152,17 @@ Private Sub InitCoroutineSystem()
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
     g_ScheduleMode = DEFAULT_SCHEDULER_MODE ' 默认按任务顺序调度
     g_WorkbookTicks = DEFAULT_WORKBOOK_TICKS ' 按工作簿调度，默认每个工作簿1个tick
-    Set g_WorkbookCursor = CreateObject("Scripting.Dictionary")
-    Set g_WorkbookTickCount = CreateObject("Scripting.Dictionary")
 
     ' 初始化性能统计
     g_SchedulerStats.TotalTime = 0
     g_SchedulerStats.LastTime = 0
     g_SchedulerStats.TotalCount = 0
     g_SchedulerStats.StartTime = Now
-    Set g_WorkbookLastTime = CreateObject("Scripting.Dictionary")
-    Set g_WorkbookTotalTime = CreateObject("Scripting.Dictionary")
-    Set g_WorkbookTickCount_Stats = CreateObject("Scripting.Dictionary")
+    If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
+    If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
+    If g_TaskQueue Is Nothing Then Set g_TaskQueue = CreateObject("Scripting.Dictionary")
 
-    Set g_Tasks = CreateObject("Scripting.Dictionary")
-    Set g_TaskQueue = CreateObject("Scripting.Dictionary")
-
-    g_NextTaskId = 1
+    If g_NextTaskId = 1 Then g_NextTaskId = 1
     g_SchedulerCursorByTask = 0
     g_StateDirty = False
 End Sub
@@ -202,11 +176,6 @@ Public Sub CleanupLua()
         If Not g_Tasks Is Nothing Then
             g_Tasks.RemoveAll
             g_TaskQueue.RemoveAll
-
-            ' 新增：清理性能统计
-            g_WorkbookLastTime.RemoveAll
-            g_WorkbookTotalTime.RemoveAll
-            g_WorkbookTickCount_Stats.RemoveAll
         End If
 
         If g_LuaState <> 0 Then
@@ -371,7 +340,6 @@ Public Function LuaEval(expression As String) As Variant
     LuaEval = GetValue(g_LuaState, -1)
     lua_settop g_LuaState, stackTop  ' 统一恢复
     Exit Function
-
 ErrorHandler:
     LuaEval = "VBA错误: " & Err.Description
     If g_Initialized Then lua_settop g_LuaState, stackTop  ' 统一恢复
@@ -387,7 +355,7 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
     End If
 
     CheckAutoReload
-    
+
     Dim stackTop As Long
     stackTop = lua_gettop(g_LuaState)  ' 入口保存
 
@@ -404,7 +372,7 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
         PushValue g_LuaState, args(i)
         argCount = argCount + 1
     Next i
-    
+
     Dim result As Long
     result = lua_pcallk(g_LuaState, argCount, -1, 0, 0, 0)
     If result <> 0 Then
@@ -412,10 +380,10 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
         lua_settop g_LuaState, stackTop  ' 统一恢复
         Exit Function
     End If
-    
+
     Dim nResults As Long
     nResults = lua_gettop(g_LuaState) - stackTop  ' 相对计算结果数
-    
+
     If nResults = 0 Then
         LuaCall = Empty
     ElseIf nResults = 1 Then
@@ -428,10 +396,9 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
         Next i
         LuaCall = results
     End If
-    
+
     lua_settop g_LuaState, stackTop  ' 统一恢复
     Exit Function
-
 ErrorHandler:
     LuaCall = "VBA错误: " & Err.Description
     If g_Initialized Then lua_settop g_LuaState, stackTop  ' 统一恢复
@@ -477,6 +444,13 @@ Public Function LuaTask(ParamArray params() As Variant) As String
 
     wbName = callerWb.Name
     On Error GoTo ErrorHandler
+    ' 自动注册工作簿
+    If Not g_Workbooks.Exists(wbName) Then
+        Dim wbInfo As New WorkbookInfo
+        wbInfo.WbName = wbName
+        g_Workbooks.Add wbName, wbInfo
+        Debug.Print "LuaTask自动注册工作簿: " & wbName
+    End If
 
     ' 检查是否已存在任务
     Dim existingTaskId As String
@@ -524,34 +498,48 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     If startList.Count > 0 Then startArgs = startList.ToArray()
     If resumeList.Count > 0 Then resumeSpec = resumeList.ToArray()
 
-    ' 生成任务ID(包含工作簿名)
     Dim taskId As String
-    taskId = "TASK_" & g_NextTaskId & "_" & taskCell
-    g_NextTaskId = g_NextTaskId + 1
+    taskId = "Task_" & CStr(g_NextTaskId)
 
     ' 注册任务
-    Dim task(TASK_DATA_SIZE) As Variant
-    task(TASK_FUNC) = funcName
-    task(TASK_WORKBOOK) = wbName
-    task(TASK_START_ARGS) = startArgs
-    task(TASK_RESUME_SPEC) = resumeSpec
-    task(TASK_CELL) = taskCell
-    task(TASK_STATUS) = "defined"
-    task(TASK_PROGRESS) = 0
-    task(TASK_MESSAGE) = Empty
-    task(TASK_VALUE) = Empty
-    task(TASK_ERROR) = vbNullString
-    task(TASK_CO_THREAD) = 0
-    task(TASK_LAST_TIME) = 0
-    task(TASK_TOTAL_TIME) = 0
-    task(TASK_TICK_COUNT) = 0
+    Dim task As New TaskInfo
+    task.taskId = g_NextTaskId
+    task.taskFunc = funcName
+    task.taskWorkbook = wbName
+    task.taskStartArgs = startArgs
+    task.taskResumeSpec = resumeSpec
+    task.taskCell = taskCell
+    task.taskStatus = "defined"
+    task.taskProgress = 0
+    task.taskMessage = vbNullString
+    task.taskValue = vbNull
+    task.taskError = vbNullString
+    task.taskCoThread = 0
+    task.taskLastTime = 0
+    task.taskTotalTime = 0
+    task.taskTickCount = 0
     g_Tasks.Add taskId, task
+    g_Workbooks(wbName).AddTask taskId, task
 
     LuaTask = taskId
+    g_NextTaskId = g_NextTaskId + 1
     Exit Function
-
 ErrorHandler:
-    LuaTask = "#ERROR: " & Err.Description
+    Dim errorDetails As String
+    errorDetails = "Task错误:" & vbCrLf
+    errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
+    errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
+    ' If Err.Erl <> 0 Then
+    '     errorDetails = errorDetails & "行号: " & Err.Erl & vbCrLf
+    ' End If
+    ' LuaTask = "#ERROR: " & errorDetails
+    ' 'errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
+    ' 'errorDetails = errorDetails & "对比名称: " & g_Workbooks(wbName).Name & vbCrLf
+    ' ' 输出到立即窗口便于调试
+    Debug.Print "=== Task错误详情 ==="
+    Debug.Print errorDetails
+    Debug.Print "======================="
+    LuaTask = "#ERROR: Task" & Err.Description
 End Function
 
 ' 读取任务状态
@@ -565,28 +553,31 @@ Public Function LuaGet(taskId As String, field As String) As Variant
         LuaGet = CVErr(xlErrValue)
         Exit Function
     End If
+
     If Not g_Tasks.Exists(taskId) Then
         LuaGet = "#ERROR: 任务不存在"
         Exit Function
     End If
+    Dim task As TaskInfo
+    Set task = g_Tasks(taskId)
 
     Select Case LCase(field)
         Case "status"
-            LuaGet = g_Tasks(taskId)(TASK_STATUS)
+            LuaGet = task.taskStatus
         Case "progress"
-            LuaGet = g_Tasks(taskId)(TASK_PROGRESS)
+            LuaGet = task.taskProgress
         Case "message"
-            LuaGet = g_Tasks(taskId)(TASK_MESSAGE)
+            LuaGet = task.taskMessage
         Case "value"
-            LuaGet = g_Tasks(taskId)(TASK_VALUE)
+            LuaGet = task.taskValue
         Case "error"
-            LuaGet = g_Tasks(taskId)(TASK_ERROR)
+            LuaGet = task.taskError
         Case "summary"
             Dim summary As String
-            summary = "状态:" & g_Tasks(taskId)(TASK_STATUS)
-            summary = summary & " | 进度:" & Format(g_Tasks(taskId)(TASK_PROGRESS), "0.0") & "%"
-            If g_Tasks(taskId)(TASK_STATUS) = "error" Then
-                summary = summary & " | 错误:" & Left(g_Tasks(taskId)(TASK_ERROR), 30)
+            summary = "状态:" & task.taskStatus
+            summary = summary & " | 进度:" & Format(task.taskProgress, "0.0") & "%"
+            If task.taskStatus = "error" Then
+                summary = summary & " | 错误:" & Left(task.taskError, 30)
             End If
             LuaGet = summary
         Case Else
@@ -594,7 +585,6 @@ Public Function LuaGet(taskId As String, field As String) As Variant
     End Select
 
     Exit Function
-
 ErrorHandler:
     LuaGet = "#ERROR: " & Err.Description
 End Function
@@ -613,10 +603,10 @@ Public Sub StartLuaCoroutine(taskId As String)
         Exit Sub
     End If
 
-    Dim task As Variant
-    task = g_Tasks(taskId)
+    Dim task As TaskInfo
+    Set task = g_Tasks(taskId)
 
-    If task(TASK_STATUS) <> "defined" Then
+    If task.taskStatus <> "defined" Then
         MsgBox "错误：任务已启动或已完成", vbExclamation
         Exit Sub
     End If
@@ -628,34 +618,29 @@ Public Sub StartLuaCoroutine(taskId As String)
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
-        task(TASK_STATUS) = "error"
-        task(TASK_ERROR) = "无法创建协程线程"
-        g_Tasks(taskId) = task
+        task.taskStatus = "error"
+        task.taskError = "无法创建协程线程"
         Exit Sub
     End If
-    task(TASK_CO_THREAD) = coThread
+    task.taskCoThread = coThread
 
-    Dim funcName As String
-    funcName = task(TASK_FUNC)
-
-    lua_getglobal g_LuaState, funcName
+    lua_getglobal g_LuaState, task.taskFunc
 
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
-        task(TASK_STATUS) = "error"
-        task(TASK_ERROR) = "函数 '" & funcName & "' 不存在"
-        g_Tasks(taskId) = task
+        task.taskStatus = "error"
+        task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         lua_settop g_LuaState, 0
         Exit Sub
     End If
 
     lua_xmove g_LuaState, coThread, 1
-    lua_pushstring coThread, task(TASK_CELL)
+    lua_pushstring coThread, task.taskCell
 
     Dim nargs As Long
     nargs = 1
 
     Dim startArgs As Variant
-    startArgs = task(TASK_START_ARGS)
+    startArgs = task.taskStartArgs
 
     If IsArray(startArgs) Then
         Dim i As Long
@@ -670,19 +655,15 @@ Public Sub StartLuaCoroutine(taskId As String)
 
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
 
-    task = HandleCoroutineResult(task, result, CLng(nres))
-    If task(TASK_STATUS) = "yielded" Then
+    HandleCoroutineResult task, result, CLng(nres)
+    If task.taskStatus = "yielded" Then
         g_TaskQueue(taskId) = True
-        StartSchedulerIfNeeded
     End If
 
-    g_Tasks(taskId) = task
     Exit Sub
-
 ErrorHandler:
-    task(TASK_STATUS) = "error"
-    task(TASK_ERROR) = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
-    g_Tasks(taskId) = task
+    task.taskStatus = "error"
+    task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
     MsgBox "启动协程失败: " & Err.Description, vbCritical
 End Sub
 
@@ -744,7 +725,6 @@ Public Sub SchedulerTick()
     End If
 End Sub
 
-' 按任务顺序调度 - 返回待执行任务列表
 ' 按任务顺序调度 - 直接执行
 Private Sub ScheduleByTask()
     ' 构建任务ID数组
@@ -764,11 +744,9 @@ Private Sub ScheduleByTask()
 
     ' Round-Robin 直接执行
     Dim executed As Long, cur As Long
-    Dim task As Variant
-    Dim taskStart As Long, taskElapsed As Double
-    Dim wbName As String
-    Dim tasksToRemove As Object
-    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
+    Dim task As TaskInfo
+    Dim taskStart As Double, taskElapsed As Double
+    Dim wb As String
 
     cur = g_SchedulerCursorByTask Mod total
 
@@ -776,40 +754,33 @@ Private Sub ScheduleByTask()
         taskId = CStr(taskIds(cur))
 
         If g_Tasks.Exists(taskId) Then
-            task = g_Tasks(taskId)
+            Set task = g_Tasks(taskId)
 
             ' 只调度 yielded 状态的任务
-            If task(TASK_STATUS) = "yielded" Then
+            If task.taskStatus = "yielded" Then
                 ' 任务级别计时开始
                 taskStart = GetTickCount()
-                wbName = task(TASK_WORKBOOK)
+                wb = task.taskWorkbook
 
                 ' 直接执行任务
-                task = ResumeCoroutine(task)
-                g_Tasks(taskId) = task
+                ResumeCoroutine task
 
                 ' 任务级别计时结束
                 taskElapsed = GetTickCount() - taskStart
 
                 ' 更新工作簿统计
-                If Not g_WorkbookTotalTime.Exists(wbName) Then
-                    g_WorkbookLastTime(wbName) = 0
-                    g_WorkbookTotalTime(wbName) = 0
-                    g_WorkbookTickCount_Stats(wbName) = 0
-                End If
-                g_WorkbookLastTime(wbName) = taskElapsed
-                g_WorkbookTotalTime(wbName) = g_WorkbookTotalTime(wbName) + taskElapsed
-                g_WorkbookTickCount_Stats(wbName) = g_WorkbookTickCount_Stats(wbName) + 1
-
+                g_Workbooks(wb).LastTime = taskElapsed
+                g_Workbooks(wb).TotalTime = g_Workbooks(wb).TotalTime + taskElapsed
+                g_Workbooks(wb).TickCount = g_Workbooks(wb).TickCount + 1
                 ' 检查任务是否完成
                 Dim status As String
-                status = task(TASK_STATUS)
+                status = task.taskStatus
                 If status = "done" Or status = "error" Or status = "terminated" Then
-                    tasksToRemove.Add taskId
+                    g_TaskQueue.Remove taskId
                 End If
             End If
         Else
-            tasksToRemove.Add taskId
+            g_TaskQueue.Remove taskId
         End If
 
         executed = executed + 1
@@ -819,143 +790,113 @@ Private Sub ScheduleByTask()
     ' 更新游标
     g_SchedulerCursorByTask = cur
 
-    ' 清理已完成任务
-    Dim i As Long
-    For i = 0 To tasksToRemove.Count - 1
-        If g_TaskQueue.Exists(tasksToRemove(i)) Then
-            g_TaskQueue.Remove tasksToRemove(i)
-        End If
-    Next
 End Sub
 
 ' 按工作簿调度 - 直接执行
 Private Sub ScheduleByWorkbook()
-    ' 按工作簿分组任务
-    Dim wbTasks As Object
-    Set wbTasks = CreateObject("Scripting.Dictionary")
+    On Error GoTo ErrorHandler
 
-    ' 初始化工作簿游标表
-    If g_WorkbookCursor Is Nothing Then
-        Set g_WorkbookCursor = CreateObject("Scripting.Dictionary")
-    End If
+    If g_Workbooks Is Nothing Then Exit Sub
+    If g_Workbooks.Count = 0 Then Exit Sub
 
-    Dim taskId As Variant
-    Dim wbName As String
+    Dim wb As WorkbookInfo
+    Dim task As TaskInfo
+    Dim taskId As String
+    Dim taskStart As Double, taskElapsed As Double
 
-    ' 按工作簿分组
-    For Each taskId In g_TaskQueue.Keys
-        If g_Tasks.Exists(CStr(taskId)) Then
-            wbName = g_Tasks(CStr(taskId))(TASK_WORKBOOK)
+    ' 遍历所有工作簿
+    For Each wb In g_Workbooks.Items
 
-            If Not wbTasks.Exists(wbName) Then
-                Set wbTasks(wbName) = CreateObject("System.Collections.ArrayList")
-            End If
-            wbTasks(wbName).Add taskId
-        End If
-    Next
-
-    ' 为每个工作簿执行任务
-    Dim wb As Variant
-    Dim task As Variant
-    Dim taskStart As Long, taskElapsed As Double
-    Dim tasksToRemove As Object
-    Set tasksToRemove = CreateObject("System.Collections.ArrayList")
-
-    For Each wb In wbTasks.Keys
-        ' 每个工作簿允许的 tick 数
-        Dim tickCount As Long
-        If g_WorkbookTickCount.Exists(CStr(wb)) Then
-            tickCount = g_WorkbookTickCount(CStr(wb))
+        ' 确定此工作簿的tick数
+        Dim tickCount As Integer
+        If wb.WbAllowedTickCount > -1 Then
+            tickCount = wb.WbAllowedTickCount
         Else
             tickCount = g_WorkbookTicks
         End If
 
-        Dim wbTaskList As Object
-        Set wbTaskList = wbTasks(CStr(wb))
+        ' 如果没有任务或tick数为0，跳过
+        If wb.Tasks.Count = 0 Or tickCount <= 0 Then GoTo NextWorkbook
 
-        Dim total As Long
-        total = wbTaskList.Count
-        If total = 0 Or tickCount <= 0 Then GoTo NextWorkbook
+        ' 获取任务列表
+        Dim taskList As Variant
+        taskList = wb.Tasks.Keys
+        Dim totalTasks As Long
+        totalTasks = UBound(taskList) + 1
 
-        ' 获取该工作簿的调度游标
-        Dim cursor As Long
-        If g_WorkbookCursor.Exists(CStr(wb)) Then
-            cursor = g_WorkbookCursor(CStr(wb))
-        Else
-            cursor = 0
-        End If
+        ' Round-Robin 调度
+        Dim cursor As Integer
+        cursor = wb.WbCursor
 
-        Dim executedCount As Long, stepCount As Long
+        Dim executedCount As Long
+        Dim stepCount As Long
         executedCount = 0
         stepCount = 0
 
-        ' Round-Robin 直接执行
-        Do While executedCount < tickCount And stepCount < total
-            taskId = CStr(wbTaskList(cursor))
+        Do While executedCount < tickCount And stepCount < totalTasks
+            taskId = CStr(taskList(cursor))
 
+            ' 检查任务是否仍在全局队列中
             If g_Tasks.Exists(taskId) Then
-                task = g_Tasks(taskId)
+                Set task = g_Tasks(taskId)
 
                 ' 只执行 yielded 状态的任务
-                If task(TASK_STATUS) = "yielded" Then
-                    ' 任务级别计时开始
+                If task.taskStatus = "yielded" Then
+                    ' 性能计时开始
                     taskStart = GetTickCount()
 
-                    ' 直接执行任务
-                    task = ResumeCoroutine(task)
-                    g_Tasks(taskId) = task
+                    ' 执行任务
+                    ResumeCoroutine task
 
-                    ' 任务级别计时结束
+                    ' 性能计时结束
                     taskElapsed = GetTickCount() - taskStart
 
                     ' 更新工作簿统计
-                    If Not g_WorkbookTotalTime.Exists(CStr(wb)) Then
-                        g_WorkbookLastTime(CStr(wb)) = 0
-                        g_WorkbookTotalTime(CStr(wb)) = 0
-                        g_WorkbookTickCount_Stats(CStr(wb)) = 0
-                    End If
-                    g_WorkbookLastTime(CStr(wb)) = taskElapsed
-                    g_WorkbookTotalTime(CStr(wb)) = g_WorkbookTotalTime(CStr(wb)) + taskElapsed
-                    g_WorkbookTickCount_Stats(CStr(wb)) = g_WorkbookTickCount_Stats(CStr(wb)) + 1
+                    wb.WbLastTime = taskElapsed
+                    wb.WbTotalTime = wb.WbTotalTime + taskElapsed
+                    wb.WbTickCount = wb.WbTickCount + 1
+
+                    ' 更新任务统计
+                    task.taskLastTime = taskElapsed
+                    task.taskTotalTime = task.taskTotalTime + taskElapsed
+                    task.taskTickCount = task.taskTickCount + 1
 
                     executedCount = executedCount + 1
 
                     ' 检查任务是否完成
                     Dim status As String
-                    status = task(TASK_STATUS)
+                    status = task.taskStatus
                     If status = "done" Or status = "error" Or status = "terminated" Then
-                        tasksToRemove.Add taskId
+                        g_TaskQueue.Remove taskId
+                        wb.Tasks.Remove taskId  ' 从工作簿任务列表移除
                     End If
                 End If
             Else
-                tasksToRemove.Add taskId
+                ' 任务不存在，从队列和工作簿移除
+                If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
+                If wb.Tasks.Exists(taskId) Then wb.Tasks.Remove taskId
             End If
 
-            cursor = (cursor + 1) Mod total
+            cursor = (cursor + 1) Mod totalTasks
             stepCount = stepCount + 1
         Loop
 
         ' 保存游标
-        g_WorkbookCursor(CStr(wb)) = cursor
+        wb.WbCursor = cursor
 
 NextWorkbook:
     Next wb
-    ' 清理已完成任务
-    Dim i As Long
-    For i = 0 To tasksToRemove.Count - 1
-        If g_TaskQueue.Exists(tasksToRemove(i)) Then
-            g_TaskQueue.Remove tasksToRemove(i)
-        End If
-    Next
+    Exit Sub
+ErrorHandler:
+    Debug.Print "ScheduleByWorkbook错误: " & Err.Description
 End Sub
 
 ' Resume 协程
-Private Function ResumeCoroutine(task As Variant) As Variant
+Private Sub ResumeCoroutine(task As TaskInfo)
     On Error GoTo ErrorHandler
 
-    If task(TASK_STATUS) <> "yielded" Then
-        ResumeCoroutine = task
-        Exit Function
+    If task.taskStatus <> "yielded" Then
+        Exit Sub
     End If
 
     ' 性能计时开始
@@ -964,29 +905,27 @@ Private Function ResumeCoroutine(task As Variant) As Variant
 
     ' 检查协程线程是否有效
     Dim coThread As LongPtr
-    coThread = task(TASK_CO_THREAD)
-    
+    coThread = task.taskCoThread
+
     If coThread = 0 Then
-        task(TASK_STATUS) = "error"
-        task(TASK_ERROR) = "协程线程无效(coThread=0)"
-        ResumeCoroutine = task
-        Exit Function
+        task.taskStatus = "error"
+        task.taskError = "协程线程无效(coThread=0)"
+        Exit Sub
     End If
-    
+
     ' 检查协程状态
     Dim coStatus As Long
     coStatus = lua_status(coThread)
     If coStatus <> LUA_OK And coStatus <> LUA_YIELD Then
-        task(TASK_STATUS) = "error"
-        task(TASK_ERROR) = "协程状态异常: " & coStatus & " (期望: " & LUA_YIELD & ")"
-        ResumeCoroutine = task
-        Exit Function
+        task.taskStatus = "error"
+        task.taskError = "协程状态异常: " & coStatus & " (期望: " & LUA_YIELD & ")"
+        Exit Sub
     End If
 
     ' 检查工作簿是否仍然打开
     Dim wbName As String
-    wbName = task(TASK_WORKBOOK)
-    
+    wbName = task.taskWorkbook
+
     If Not IsEmpty(wbName) And wbName <> vbNullString And wbName <> "" Then
         Dim wb As Workbook
         Dim wbExists As Boolean
@@ -998,10 +937,9 @@ Private Function ResumeCoroutine(task As Variant) As Variant
         On Error GoTo ErrorHandler
 
         If Not wbExists Then
-            task(TASK_STATUS) = "error"
-            task(TASK_ERROR) = "工作簿已关闭: " & wbName
-            ResumeCoroutine = task
-            Exit Function
+            task.taskStatus = "error"
+            task.taskError = "工作簿已关闭: " & wbName
+            Exit Sub
         End If
     Else
         wbName = vbNullString
@@ -1013,8 +951,8 @@ Private Function ResumeCoroutine(task As Variant) As Variant
 
     ' 准备 resume 参数
     Dim resumeSpec As Variant
-    resumeSpec = task(TASK_RESUME_SPEC)
-    
+    resumeSpec = task.taskResumeSpec
+
     Dim nargs As Long
     nargs = 0
 
@@ -1028,14 +966,14 @@ Private Function ResumeCoroutine(task As Variant) As Variant
             If VarType(param) = vbString Then
                 Dim paramStr As String
                 paramStr = Trim(CStr(param))
-                
+
                 ' 尝试作为单元格地址解析
                 If Len(paramStr) > 0 And Not wb Is Nothing Then
                     On Error Resume Next
                     Dim rng As Range
                     Set rng = Nothing
                     Set rng = wb.Range(paramStr)
-                    
+
                     If Err.Number = 0 And Not rng Is Nothing Then
                         ' 成功解析为单元格,传递值
                         If rng.Cells.Count = 1 Then
@@ -1057,9 +995,9 @@ Private Function ResumeCoroutine(task As Variant) As Variant
                 ' 非字符串参数直接传递
                 PushValue coThread, param
             End If
-            
+
             nargs = nargs + 1
-        Next i
+        Next
     End If
 
     ' 执行 resume
@@ -1068,20 +1006,17 @@ Private Function ResumeCoroutine(task As Variant) As Variant
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
 
     ' 处理结果
-    task = HandleCoroutineResult(task, result, CLng(nres))
+    HandleCoroutineResult task, result, CLng(nres)
 
     ' 性能计时结束并统计
     Dim taskElapsed As Double
     taskElapsed = GetTickCount() - taskStart
 
     ' 更新任务统计
-    task(TASK_LAST_TIME) = taskElapsed
-    task(TASK_TOTAL_TIME) = task(TASK_TOTAL_TIME) + taskElapsed
-    task(TASK_TICK_COUNT) = task(TASK_TICK_COUNT) + 1
-
-    ResumeCoroutine = task
-    Exit Function
-
+    task.taskLastTime = taskElapsed
+    task.taskTotalTime = task.taskTotalTime + taskElapsed
+    task.taskTickCount = task.taskTickCount + 1
+    Exit Sub
 ErrorHandler:
     Dim errorDetails As String
     errorDetails = "Resume错误:" & vbCrLf
@@ -1096,16 +1031,14 @@ ErrorHandler:
     errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
     errorDetails = errorDetails & "参数数量: " & nargs
 
-    task(TASK_STATUS) = "error"
-    task(TASK_ERROR) = errorDetails
+    task.taskStatus = "error"
+    task.taskError = errorDetails
 
     ' 输出到立即窗口便于调试
     Debug.Print "=== Resume 错误详情 ==="
     Debug.Print errorDetails
     Debug.Print "======================="
-
-    ResumeCoroutine = task
-End Function
+End Sub
 
 ' 手动停止调度器
 Public Sub StopScheduler()
@@ -1180,18 +1113,18 @@ End Sub
 Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
     Dim i As Long, j As Long
     Dim rows As Long, cols As Long
-    
+
     ' 处理一维数组
     On Error Resume Next
     rows = UBound(arr, 1) - LBound(arr, 1) + 1
     cols = UBound(arr, 2) - LBound(arr, 2) + 1
-    
+
     If Err.Number <> 0 Then
         ' 一维数组
         Err.Clear
         On Error GoTo 0
         rows = UBound(arr) - LBound(arr) + 1
-        
+
         lua_createtable L, rows, 0
         For i = LBound(arr) To UBound(arr)
             PushValue L, arr(i)  ' 递归调用 PushValue
@@ -1200,7 +1133,7 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
         Exit Sub
     End If
     On Error GoTo 0
-    
+
     ' 二维数组
     lua_createtable L, rows, 0
     For i = LBound(arr, 1) To UBound(arr, 1)
@@ -1214,59 +1147,57 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
 End Sub
 
 ' 处理协程返回结果
-Private Function HandleCoroutineResult(task As Variant, result As Long, nres As Long) As Variant
+Private Sub HandleCoroutineResult(task As TaskInfo, result As Long, nres As Long)
     On Error GoTo ErrorHandler
 
     Dim coThread As LongPtr
-    coThread = task(TASK_CO_THREAD)
+    coThread = task.taskCoThread
 
     Dim stackTop As Long
     stackTop = lua_gettop(coThread)  ' 入口保存
 
     Select Case result
         Case LUA_OK
-            task(TASK_STATUS) = "done"
+            task.taskStatus = "done"
             g_StateDirty = True
-            task(TASK_PROGRESS) = 100
+            task.taskProgress = 100
 
             If nres > 0 And stackTop > 0 Then
                 Dim retData As Variant
                 retData = GetValue(coThread, -1)
-                task = ParseYieldReturn(task, retData, True)
+                ParseYieldReturn task, retData, True
             End If
-            
+
         Case LUA_YIELD
             If nres > 0 And stackTop > 0 Then
                 Dim yieldData As Variant
                 yieldData = GetValue(coThread, -1)
-                task = ParseYieldReturn(task, yieldData, False)
+                ParseYieldReturn task, yieldData, False
             End If
-            If task(TASK_STATUS) <> "done" And task(TASK_STATUS) <> "error" Then
-                task(TASK_STATUS) = "yielded"
+            If task.taskStatus <> "done" And task.taskStatus <> "error" Then
+                task.taskStatus = "yielded"
             End If
             g_StateDirty = True
 
         Case Else
-            task(TASK_STATUS) = "error"
+            task.taskStatus = "error"
             g_StateDirty = True
 
             If nres > 0 And stackTop > 0 Then
-                task(TASK_ERROR) = GetStringFromState(coThread, -1)
+                task.taskError = GetStringFromState(coThread, -1)
             Else
-                task(TASK_ERROR) = "协程错误: 代码 " & result
+                task.taskError = "协程错误: 代码 " & result
             End If
     End Select
 
     lua_settop coThread, stackTop  ' 统一恢复
-    HandleCoroutineResult = task
-    Exit Function
+    Exit Sub
 
 ErrorHandler:
-    task(TASK_STATUS) = "error"
-    task(TASK_ERROR) = "处理结果错误: " & Err.Description
+    task.taskStatus = "error"
+    task.taskError = "处理结果错误: " & Err.Description
     If coThread <> 0 Then lua_settop coThread, stackTop
-    HandleCoroutineResult = task
-End Function
+End Sub
 
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
@@ -1301,7 +1232,7 @@ End Function
 Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
     Dim luaType As Long
     luaType = lua_type(L, idx)
-    
+
     Select Case luaType
         Case LUA_TNIL
             GetValue = Empty
@@ -1321,22 +1252,22 @@ End Function
 ' 将 Lua table 转换为 VBA Variant (字典或数组)
 Private Function TableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Variant
     On Error GoTo ErrorHandler
-    
+
     ' 标准化索引为正数
     If idx < 0 Then
         idx = lua_gettop(L) + idx + 1
     End If
-    
+
     ' 检查数组长度
     Dim length As LongPtr
     length = lua_rawlen(L, idx)
-    
+
     ' 如果长度为0，尝试判断是否为字典
     If length = 0 Then
         ' 尝试获取第一个键值对
         Dim topBefore As Long
         topBefore = lua_gettop(L)
-        
+
         lua_pushnil L
         If lua_next(L, idx) <> 0 Then
             ' 有内容，是字典
@@ -1348,46 +1279,46 @@ Private Function TableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Varian
         End If
         Exit Function
     End If
-    
+
     ' 检查是否为纯数组（所有键都是1到length的连续整数）
     Dim isPureArray As Boolean
     isPureArray = True
-    
+
     Dim testTop As Long
     testTop = lua_gettop(L)
-    
+
     lua_pushnil L
     Do While lua_next(L, idx) <> 0
         Dim keyType As Long
         keyType = lua_type(L, -2)
-        
+
         If keyType <> LUA_TNUMBER Then
             isPureArray = False
             lua_settop L, testTop  ' 立即恢复栈
             Exit Do
         End If
-        
+
         Dim keyNum As Double
         keyNum = lua_tonumberx(L, -2, 0)
-        
+
         ' 检查是否为整数且在范围内
         If keyNum <> CLng(keyNum) Or keyNum < 1 Or keyNum > length Then
             isPureArray = False
             lua_settop L, testTop
             Exit Do
         End If
-        
+
         lua_settop L, -2  ' 只弹出value，保留key
     Loop
-    
+
     lua_settop L, testTop  ' 确保栈恢复
-    
+
     ' 如果不是纯数组，按字典处理
     If Not isPureArray Then
         TableToVariant = TableToDictArray(L, idx)
         Exit Function
     End If
-    
+
     ' 纯数组处理
     ' 检查第一个元素
     lua_rawgeti L, idx, 1
@@ -1455,45 +1386,45 @@ End Function
 ' 辅助函数：将表转换为字典数组
 Private Function TableToDictArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
     On Error GoTo ErrorHandler
-    
+
     ' 标准化索引
     If idx < 0 Then
         idx = lua_gettop(L) + idx + 1
     End If
-    
+
     ' 第一遍：计数
     Dim count As Long
     count = 0
-    
+
     Dim topBefore As Long
     topBefore = lua_gettop(L)
-    
+
     lua_pushnil L
     Do While lua_next(L, idx) <> 0
         count = count + 1
         lua_settop L, -2  ' 弹出value，保留key
     Loop
-    
+
     lua_settop L, topBefore
-    
+
     If count = 0 Then
         TableToDictArray = Empty
         Exit Function
     End If
-    
+
     ' 第二遍：提取数据
     Dim result() As Variant
     ReDim result(1 To count, 1 To 2)
-    
+
     Dim i As Long
     i = 1
-    
+
     lua_pushnil L
     Do While lua_next(L, idx) <> 0
         ' 获取键（在栈顶-1）
         Dim keyType As Long
         keyType = lua_type(L, -2)
-        
+
         Select Case keyType
             Case LUA_TSTRING
                 result(i, 1) = GetStringFromState(L, -2)
@@ -1504,16 +1435,16 @@ Private Function TableToDictArray(ByVal L As LongPtr, ByVal idx As Long) As Vari
             Case Else
                 result(i, 1) = "#KEY_TYPE_" & keyType
         End Select
-        
+
         ' 获取值（在栈顶）
         result(i, 2) = GetValue(L, -1)
-        
+
         i = i + 1
         lua_settop L, -2  ' 弹出value，保留key用于下次迭代
     Loop
-    
+
     lua_settop L, topBefore
-    
+
     TableToDictArray = result
     Exit Function
 
@@ -1522,13 +1453,12 @@ ErrorHandler:
 End Function
 
 ' 解析 yield/return 字典
-Private Function ParseYieldReturn(task As Variant, data As Variant, isFinal As Boolean) As Variant
+Private Sub ParseYieldReturn(task As TaskInfo, data As Variant, isFinal As Boolean)
     On Error Resume Next
     ' 如果不是数组,直接作为value处理
     If Not IsArray(data) Then
-        task(TASK_VALUE) = data
-        ParseYieldReturn = task
-        Exit Function
+        task.taskValue = data
+        Exit Sub
     End If
 
     ' 检查是否为字典格式(二维数组,第二维为2列)
@@ -1562,37 +1492,36 @@ Private Function ParseYieldReturn(task As Variant, data As Variant, isFinal As B
                         ' yield时,根据返回的status字段决定协程状态
                         Select Case statusVal
                             Case "yielded", "done", "error"
-                                task(TASK_STATUS) = statusVal
+                                task.taskStatus = statusVal
                             Case Else
-                                task(TASK_STATUS) = "yielded" ' 默认为yielded
+                                task.taskStatus = "yielded" ' 默认为yielded
                         End Select
                     End If
                 Case "progress"
                     On Error Resume Next
-                    task(TASK_PROGRESS) = CDbl(value)
+                    task.taskProgress = CDbl(value)
                     On Error GoTo 0
                 Case "message"
-                    task(TASK_MESSAGE) = value
+                    task.taskMessage = value
                 Case "value"
-                    task(TASK_VALUE) = value
+                    task.taskValue = value
                 Case "write"
                     ' 动态写入目标会在写入函数中处理
             End Select
-        Next i
+        Next
     Else
         ' 如果不是字典格式,整个数组作为value
-        task(TASK_VALUE) = data
+        task.taskValue = data
     End If
-    ParseYieldReturn = task
-End Function
+End Sub
 
 ' 根据调用单元格地址查找已存在的任务
 Private Function FindTaskByCell(taskCell As String) As String
-    Dim tid As Variant
+    Dim taskId As Variant
     If g_Tasks Is Nothing Then Exit Function
-    For Each tid In g_Tasks.Keys
-        If g_Tasks(tid)(TASK_CELL) = taskCell Then
-            FindTaskByCell = CStr(tid)
+    For Each taskId In g_Tasks.Keys
+        If g_Tasks(taskId).Cell = taskCell Then
+            FindTaskByCell = CStr(taskId)
             Exit Function
         End If
     Next
