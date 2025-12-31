@@ -34,11 +34,6 @@ Public Property Get Tasks() As Object
     Set Tasks = m_Tasks
 End Property
 
-' ' 可选：设置器
-' Public Property Set Dictionary(ByVal dict As Object)
-'     Set pDict = dict
-' End Property
-
 Public Sub AddTask(task As TaskInfo)
     m_Tasks.Add TaskId, task
 End Sub
