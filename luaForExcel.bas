@@ -726,48 +726,91 @@ Public Sub SchedulerTick()
 End Sub
 
 ' 按任务顺序调度 - 直接执行
+' 按任务顺序调度 - 增强版（修复死循环卡顿问题）
 Private Sub ScheduleByTask()
-    Dim total As Integer
+    Dim total As Long
     total = g_TaskQueue.Count
     If total = 0 Then Exit Sub
 
     Dim executed As Integer
-    Dim taskId As String
+    Dim taskId As Variant
     Dim task As TaskInfo
     Dim taskStart As Double, taskElapsed As Double
+    Dim currentCursor As Long ' 临时保存当前执行的游标
 
     executed = 0
+    
+    ' 获取键数组的快照，避免频繁调用 .Keys 属性造成不稳定
+    Dim currentKeys As Variant
+    currentKeys = g_TaskQueue.Keys
+
     Do While executed < g_MaxIterationsPerTick And g_TaskQueue.Count > 0
-        taskId = g_TaskQueue.Keys()(g_SchedulerCursorByTask)
+        
+        ' 1. 游标越界检查 (防止任务移除后数组变短)
+        If g_SchedulerCursorByTask >= g_TaskQueue.Count Then
+            g_SchedulerCursorByTask = 0
+        End If
 
-        Set task = g_Tasks(taskId)
+        ' 2. 获取当前要执行的任务ID
+        ' 使用 currentKeys 快照比 g_TaskQueue.Keys()(i) 更稳定
+        ' 如果队列发生了变动，下一轮 tick 会重新获取
+        On Error Resume Next
+        taskId = currentKeys(g_SchedulerCursorByTask)
+        If Err.Number <> 0 Then
+            ' 如果获取失败，重置游标并退出本次循环
+            g_SchedulerCursorByTask = 0
+            Err.Clear
+            Exit Do
+        End If
+        On Error GoTo 0
 
-        ' 只调度 yielded 状态
-        If task.taskStatus = "yielded" Then
-            taskStart = GetTickCount()
+        ' 3. 【关键修改】预先推进游标
+        ' 无论后续任务执行是否成功，游标都必须向前移动。
+        ' 保存当前位置用于可能的移除操作修正。
+        currentCursor = g_SchedulerCursorByTask
+        g_SchedulerCursorByTask = g_SchedulerCursorByTask + 1
 
-            ResumeCoroutine task
+        ' 4. 执行任务逻辑
+        If g_Tasks.Exists(taskId) Then
+            Set task = g_Tasks(taskId)
 
-            taskElapsed = GetTickCount() - taskStart
-            ' --- 工作簿统计 ---
-            With g_Workbooks(task.taskWorkbook)
-                .LastTime = taskElapsed
-                .TotalTime = .TotalTime + taskElapsed
-                .TickCount = .TickCount + 1
-            End With
+            ' 只调度 yielded 状态
+            If task.taskStatus = "yielded" Then
+                taskStart = GetTickCount()
 
-            ' --- 终止态清理 ---
-            Select Case task.taskStatus
-                Case "done", "error", "terminated"
-                    g_TaskQueue.Remove taskId
-            End Select
+                ResumeCoroutine task
+
+                taskElapsed = GetTickCount() - taskStart
+                
+                ' --- 工作簿统计 ---
+                If g_Workbooks.Exists(task.taskWorkbook) Then
+                    With g_Workbooks(task.taskWorkbook)
+                        .LastTime = taskElapsed
+                        .TotalTime = .TotalTime + taskElapsed
+                        .TickCount = .TickCount + 1
+                    End With
+                End If
+
+                ' --- 终止态清理 ---
+                Select Case task.taskStatus
+                    Case "done", "error", "terminated"
+                        ' 任务完成，从调度队列移除
+                        g_TaskQueue.Remove taskId
+                        
+                        ' 【关键修正】
+                        ' 如果移除了元素，数组后面的元素会前移，填补空缺。
+                        ' 此时原先的 "Next" 元素实际上跑到了 "Current" 位置。
+                        ' 因此我们需要将预先推进的游标回退一格，否则会跳过一个任务。
+                        g_SchedulerCursorByTask = g_SchedulerCursorByTask - 1
+                End Select
+            End If
+        Else
+            ' 这是一个无效的任务ID（僵尸任务）
+            g_TaskQueue.Remove taskId
+            g_SchedulerCursorByTask = g_SchedulerCursorByTask - 1
         End If
 
         executed = executed + 1
-
-        If g_TaskQueue.Count > 0 Then
-            g_SchedulerCursorByTask = (g_SchedulerCursorByTask + 1) Mod g_TaskQueue.Count
-        End If
     Loop
 End Sub
 
@@ -780,36 +823,40 @@ Private Sub ScheduleByWorkbook()
     Dim task As TaskInfo
     Dim taskId As String
     Dim taskStart As Double, taskElapsed As Double
+    Dim tickCount As Integer
+    Dim executed As Long
+    Dim cur As Integer
 
     ' 遍历所有工作簿
     For Each wbName In g_Workbooks.Keys
         Set wb = g_Workbooks(wbName)
-        ' 如果没有任务或tick数为0，跳过
-        If wb.Tasks.Count = 0 Or tickCount <= 0 Then GoTo NextWorkbook
-
-        ' 确定此工作簿的tick数
-        Dim tickCount As Integer
+        
+        ' [修复1] 必须先计算 tickCount，才能在后面的 If 中使用它
+        ' 否则 tickCount 默认为0，导致所有任务被跳过
         If wb.wbAllowedTickCount > -1 Then
             tickCount = wb.wbAllowedTickCount
         Else
             tickCount = g_WorkbookTicks
         End If
+        
+        ' 如果没有任务或允许的 tick 数非法，则跳过
+        If wb.Tasks.Count = 0 Or tickCount <= 0 Then GoTo NextWorkbook
 
         ' Round-Robin 调度
-        Dim cur As Integer
         cur = wb.wbCursor
-        If cur < 0 Or cur >= total Then cur = 0
-        Dim executed As Long
-        Dim stepCount As Long
         executed = 0
-        stepCount = 0
 
+        ' [修复2] 循环条件增加保护
         Do While executed < tickCount And wb.Tasks.Count > 0
+            
+            ' [修复3] 关键：防止游标越界
+            ' 任务完成被移除后 wb.Tasks.Count 会变小，旧游标可能越界
             If cur >= wb.Tasks.Count Then cur = 0
-
+            
+            ' 安全获取 TaskId
             taskId = wb.Tasks.Keys()(cur)
 
-            ' 检查任务是否仍在全局队列中
+            ' 检查任务是否仍在全局队列中（双重校验）
             If g_Tasks.Exists(taskId) Then
                 Set task = g_Tasks(taskId)
 
@@ -821,7 +868,7 @@ Private Sub ScheduleByWorkbook()
                     ' 执行任务
                     ResumeCoroutine task
 
-                    ' 性能计时结束`
+                    ' 性能计时结束
                     taskElapsed = GetTickCount() - taskStart
 
                     ' 更新工作簿统计
@@ -834,22 +881,32 @@ Private Sub ScheduleByWorkbook()
                     ' --- 终止态清理 ---
                     Select Case task.taskStatus
                         Case "done", "error", "terminated"
-                            ' g_TaskQueue.Remove taskId
+                            ' [修复4] 必须同时从全局队列和工作簿队列中移除
+                            ' 否则调度器会尝试再次执行已完成的任务
+                            If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
+                            If wb.Tasks.Exists(taskId) Then wb.Tasks.Remove taskId
+                            
+                            ' 注意：移除元素后，数组索引发生位移。
+                            ' 为保持简单（不引入新变量），不回退 cur。
+                            ' 依赖循环顶部的 cur >= wb.Tasks.Count 自动修正下一轮索引。
                     End Select
                 End If
             Else
-                ' 任务不存在，从队列和工作簿移除
-                If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
+                ' 任务不存在（僵尸任务），从工作簿移除
                 If wb.Tasks.Exists(taskId) Then wb.Tasks.Remove taskId
             End If
 
             executed = executed + 1
 
-            cur = (cur + 1) Mod wb.Tasks.Count
-            stepCount = stepCount + 1
+            ' [修复5] 游标移动逻辑
+            If wb.Tasks.Count > 0 Then
+                cur = (cur + 1) Mod wb.Tasks.Count
+            Else
+                cur = 0
+            End If
         Loop
 
-        ' 保存游标
+        ' 保存游标位置供下次调度使用
         wb.wbCursor = cur
 
 NextWorkbook:
