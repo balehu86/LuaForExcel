@@ -55,6 +55,7 @@ Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
     wbInfo.Name = Wb.Name
 
     g_Workbooks.Add Wb.Name, wbInfo
+    Exit Sub
 SafeExit:
     MsgBox "ThisWorkbook.App_WorkbookOpen: 打开工作簿出错: " & Err.Description, vbCritical, "错误"
 End Sub
