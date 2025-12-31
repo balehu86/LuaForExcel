@@ -69,9 +69,7 @@ Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
     ' 跳过加载宏自身
     If Wb Is ThisWorkbook Then Exit Sub
 
-    Dim wbInfo As WorkbookInfo
-    Set wbInfo = New WorkbookInfo
-    Set wbInfo.Workbook = Wb
+    Dim wbInfo As New WorkbookInfo
     wbInfo.Name = Wb.Name
 
     g_Workbooks.Add Wb.Name, wbInfo

@@ -9,7 +9,7 @@ Public LastTime As Double    ' 上次调度时间(ms)
 Public TotalTime As Double   ' 总运行时间(ms)
 Public TickCount As Integer   ' 调度次数(统计用)
 
-Private m_Workbook As Workbook
+' Private m_Workbook As Workbook
 Private m_Tasks As Object
 
 Private Sub Class_Initialize()
@@ -21,13 +21,13 @@ Private Sub Class_Initialize()
     Set m_Tasks = CreateObject("Scripting.Dictionary")
 End Sub
 
-Public Property Get Workbook() As Workbook
-    Set Workbook = m_Workbook
-End Property
+' Public Property Get Workbook() As Workbook
+'     Set Workbook = m_Workbook
+' End Property
 
-Public Property Set Workbook(ByVal wb As Workbook)
-    Set m_Workbook = wb
-End Property
+' Public Property Set Workbook(ByVal wb As Workbook)
+'     Set m_Workbook = wb
+' End Property
 
 ' 属性访问器
 Public Property Get Tasks() As Object
@@ -40,7 +40,7 @@ End Property
 ' End Property
 
 Public Sub AddTask(task As TaskInfo)
-    m_Tasks.Add task
+    m_Tasks.Add TaskId, task
 End Sub
 
 Public Sub RemoveTask(taskId As String)
