@@ -17,11 +17,11 @@ Private Sub Workbook_Open()
 
     DisableLuaTaskMenu
     EnableLuaTaskMenu
-    ' 初始化全局工作簿字典
-    InitLuaState
-
+    ' 初始化必要的全局变量
+    g_NextTaskId = 1
+    If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
-
+    If g_TaskQueue Is Nothing Then Set g_TaskQueue = CreateObject("Scripting.Dictionary")
     ' MsgBox "Excel-Lua 5.4 加载宏已加载！", vbInformation, "欢迎"
 
     Exit Sub
