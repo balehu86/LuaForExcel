@@ -49,31 +49,55 @@ End Function
 ' 辅助函数：清理特定工作簿的任务
 Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
-
     If g_Tasks Is Nothing Then Exit Sub
-
     ' 收集要删除的任务ID（不能在遍历时删除）
     Dim toRemove As Collection
     Set toRemove = New Collection
-
     Dim taskId As Variant
     For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
             toRemove.Add CStr(taskId)
         End If
     Next
-
-    ' 删除任务
-    Dim removeId As Variant
+    ' 在删除任务时，也清理其监控索引
     For Each removeId In toRemove
         CollectionRemove g_TaskQueue, CStr(removeId)
+        ' 清理该任务的监控索引
+        If g_WatchesByTask.Exists(CStr(removeId)) Then
+            g_WatchesByTask.Remove CStr(removeId)
+        End If
         g_Tasks.Remove CStr(removeId)
     Next
-
+    ' 清理工作簿的监控
+    CleanupWorkbookWatches wbName
     ' 清理工作簿记录
     If g_Workbooks.Exists(wbName) Then
         g_Workbooks.Remove wbName
     End If
+End Sub
+
+' 辅助函数：清理特定工作簿的监视点
+Public Sub CleanupWorkbookWatches(wbName As String)
+    On Error Resume Next
+    If g_Watches Is Nothing Then Exit Sub
+    Dim toRemove As Collection
+    Set toRemove = New Collection
+    Dim watchCell As Variant
+    Dim watchInfo As WatchInfo
+    For Each watchCell In g_Watches.Keys
+        Set watchInfo = g_Watches(watchCell)
+        If watchInfo.watchWorkbook = wbName Then
+            toRemove.Add CStr(watchCell)
+        End If
+    Next
+    Dim removeKey As Variant
+    For Each removeKey In toRemove
+        ' 同时清理二级索引
+        If g_Watches.Exists(CStr(removeKey)) Then
+            RemoveFromWatchesByTask g_Watches(CStr(removeKey)).watchTaskId, CStr(removeKey)
+        End If
+        g_Watches.Remove CStr(removeKey)
+    Next
 End Sub
 ' ============================================
 ' 第七部分：可视化操作函数
@@ -893,7 +917,11 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
         msg = msg & "  名称: " & wbName & vbCrLf
         msg = msg & "  总调度次数: " & wb.wbTickCount & vbCrLf
         msg = msg & "  总运行时间: " & Format(wb.wbTotalTime, "0.00") & " ms" & vbCrLf
-        msg = msg & "  平均时间: " & Format(wb.wbTotalTime / wb.wbTickCount, "0.00") & " ms" & vbCrLf
+        If wb.wbTickCount > 0 Then
+            msg = msg & "  平均时间: " & Format(wb.wbTotalTime / wb.wbTickCount, "0.00") & " ms" & vbCrLf
+        Else
+            msg = msg & "  平均时间: (尚未调度)" & vbCrLf
+        End If
         msg = msg & "  上次调度: " & Format(wb.wbLastTime, "0.00") & " ms" & vbCrLf
         msg = msg & "----------------------------------------" & vbCrLf
     Next

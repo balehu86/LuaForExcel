@@ -11,20 +11,18 @@ Private WithEvents App As Application
 ' 加载宏打开时自动运行
 Private Sub Workbook_Open()
     On Error GoTo ErrorHandler
-
     ' 绑定 Application 事件
     Set App = Application
-
     ' 初始化必要的全局变量
     g_NextTaskId = 1
     If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
     If g_TaskQueue Is Nothing Then Set g_TaskQueue = New Collection
-
+    If g_Watches Is Nothing Then Set g_Watches = CreateObject("Scripting.Dictionary")
+    If g_WatchesByTask Is Nothing Then Set g_WatchesByTask = CreateObject("Scripting.Dictionary")
+    ' 删除 g_DirtyWatches 初始化
     DisableLuaTaskMenu
     EnableLuaTaskMenu
-    ' MsgBox "Excel-Lua 5.4 加载宏已加载！", vbInformation, "欢迎"
-
     Exit Sub
 ErrorHandler:
     MsgBox "ThisWorkbook.Workbook_Open: 加载宏启动失败: " & Err.Description, vbCritical, "严重错误"
@@ -35,19 +33,20 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
     StopScheduler
     DisableLuaTaskMenu
-
     ' 注销应用程序级事件
     Set App = Nothing
     If Not g_Workbooks Is Nothing Then g_Workbooks.RemoveAll
+    Set g_Workbooks = Nothing
     If Not g_Tasks Is Nothing Then g_Tasks.RemoveAll
+    Set g_Tasks = Nothing
     Set g_TaskQueue = Nothing
-    ' MsgBox "Excel-Lua 5.4 加载宏已卸载。", vbInformation, "再见"
+    If Not g_Watches Is Nothing Then g_Watches.RemoveAll
+    Set g_Watches = Nothing
+    ' 删除 g_DirtyWatches 清理
 End Sub
-
 ' ============================================
 ' 应用程序级事件管理
 ' ============================================
-
 ' 打开普通工作簿
 Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
     On Error GoTo SafeExit
@@ -64,17 +63,21 @@ Private Sub App_WorkbookOpen(ByVal Wb As Workbook)
 SafeExit:
     MsgBox "ThisWorkbook.App_WorkbookOpen: 打开工作簿出错: " & Err.Description, vbCritical, "错误"
 End Sub
+
 ' 工作簿关闭前事件 - 清理该工作簿的任务
 Private Sub App_WorkbookBeforeClose(ByVal Wb As Workbook, Cancel As Boolean)
     On Error Resume Next
-
     ' 跳过加载宏自身
     If Wb Is ThisWorkbook Then Exit Sub
+
+    ' CleanupWorkbookTasks 内部已调用 CleanupWorkbookWatches
     CleanupWorkbookTasks Wb.Name
+    If Not g_WatchesByTask Is Nothing Then g_WatchesByTask.RemoveAll
+    Set g_WatchesByTask = Nothing
+
     If Not g_Workbooks Is Nothing Then
         If g_Workbooks.Exists(Wb.Name) Then
             g_Workbooks.Remove Wb.Name
         End If
     End If
-    ' MsgBox "已清理该工作簿的所有任务", vbInformation, "再见"
 End Sub
