@@ -70,7 +70,7 @@ Public g_Tasks As Object       ' task Id -> task Instance
 Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
 Public g_TaskQueue As Collection     ' taskId -> True (active tasks)
 Public g_Watches As Object          ' Dictionary: watchCell -> WatchInfo
-Public g_WatchesByTask As Object   ' taskId -> Collection of watchCell (新增)
+Public g_WatchesByTask As Object   ' taskId -> Collection of watchCell
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
@@ -762,7 +762,6 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
 ErrorHandler:
     LuaWatch = "#ERROR: " & Err.Description
 End Function
-
 ' 刷新所有脏的监控（批量写入，不触发重算）
 Private Sub RefreshWatches()
     On Error Resume Next
@@ -1179,7 +1178,6 @@ Private Function CFS_PickNextTask() As String
 
     CFS_PickNextTask = selectedId
 End Function
-
 ' 更新任务的 vruntime
 Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
     ' vruntime 增量 = 实际运行时间 * (默认权重 / 任务权重)
@@ -1499,7 +1497,6 @@ ErrorHandler:
     SetTaskStatus task, "error"
     If coThread <> 0 Then lua_settop coThread, stackTop
 End Sub
-
 
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
