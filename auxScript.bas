@@ -189,7 +189,7 @@ Private Sub LuaTaskMenu_PauseTask()
 
     If g_TaskQueue.Exists(taskId) Then
         g_TaskQueue(taskId) = False
-        g_TaskQueue(taskId).taskStatus = "paused"
+        g_Tasks(taskId).taskStatus = "paused"
         MsgBox "任务 " & taskId & " 已暂停。" & vbCrLf & _
                "使用 ResumeTask 恢复。", vbInformation, "任务已暂停"
     Else
