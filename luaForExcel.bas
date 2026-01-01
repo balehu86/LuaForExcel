@@ -69,22 +69,24 @@ Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
 Private g_TaskQueue As Object     ' taskId -> True (active tasks)
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
-Private g_SchedulerCursorByTask As Long ' Round-Robin 游标
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
 Private g_NextTaskId As Integer         ' 新建下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
 
-Private g_ScheduleMode As Integer         ' 0=按任务顺序, 1=按工作簿
-Private g_MaxIterationsPerTick As Integer ' 按任务时调度：每次调度迭代次数
-Private g_WorkbookTicks As Integer        ' 按工作簿调度：默认每个工作簿的tick数
+' === CFS 调度全局变量 ===
+Private g_CFS_minVruntime As Double       ' 队列中最小的 vruntime（用于新任务初始化）
+Private g_CFS_targetLatency As Double     ' 目标延迟周期（ms），默认 100ms
+Private g_CFS_minGranularity As Double    ' 最小执行粒度（ms），默认 10ms
+Private g_CFS_niceToWeight(0 To 39) As Double  ' nice 值到权重的映射表
 ' ===== 配置常量 =====
 Private Const CP_UTF8 As Long = 65001
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
-Private Const DEFAULT_MAX_ITERATIONS_PER_TICK As Long = 1  ' 每次调度迭代次数，默认1
-Private Const DEFAULT_SCHEDULER_MODE As Integer = 0  ' 调度模式：0=按任务顺序, 1=按工作簿
-Private Const DEFAULT_WORKBOOK_TICKS As Integer = 1  ' 每个工作簿的默认tick数
+
+Private Const CFS_DEFAULT_WEIGHT As Double = 1024
+Private Const CFS_TARGET_LATENCY As Double = 100    ' ms
+Private Const CFS_MIN_GRANULARITY As Double = 10    ' ms
 ' ===== 性能统计全局变量 =====
 Private Type SchedulerStats
     TotalTime As Double      ' 调度器总运行时间(ms)
@@ -148,11 +150,17 @@ End Function
 
 ' 初始化协程系统
 Private Sub InitCoroutineSystem()
-    g_MaxIterationsPerTick = DEFAULT_MAX_ITERATIONS_PER_TICK
     g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
-    g_ScheduleMode = DEFAULT_SCHEDULER_MODE ' 默认按任务顺序调度
-    g_WorkbookTicks = DEFAULT_WORKBOOK_TICKS ' 按工作簿调度，默认每个工作簿1个tick
-
+    ' CFS 参数初始化
+    g_CFS_minVruntime = 0
+    g_CFS_targetLatency = CFS_TARGET_LATENCY
+    g_CFS_minGranularity = CFS_MIN_GRANULARITY
+    ' 初始化 nice 到权重的映射表（简化版，只用 0-39 对应 nice -20 到 +19）
+    ' 权重公式: weight = 1024 / 1.25^nice  (nice=0 时 weight=1024)
+    Dim i As Integer
+    For i = 0 To 39
+        g_CFS_niceToWeight(i) = 1024 / (1.25 ^ (i - 20))
+    Next i
     ' 初始化性能统计
     g_SchedulerStats.TotalTime = 0
     g_SchedulerStats.LastTime = 0
@@ -163,7 +171,6 @@ Private Sub InitCoroutineSystem()
     If g_TaskQueue Is Nothing Then Set g_TaskQueue = CreateObject("Scripting.Dictionary")
 
     If g_NextTaskId = 0 Then g_NextTaskId = 1
-    g_SchedulerCursorByTask = 0
     g_StateDirty = False
 End Sub
 
@@ -503,21 +510,25 @@ Public Function LuaTask(ParamArray params() As Variant) As String
 
     ' 注册任务
     Dim task As New TaskUnit
-    task.taskId = g_NextTaskId
-    task.taskFunc = funcName
-    task.taskWorkbook = wbName
-    task.taskStartArgs = startArgs
-    task.taskResumeSpec = resumeSpec
-    task.taskCell = taskCell
-    task.taskStatus = "defined"
-    task.taskProgress = 0
-    task.taskMessage = vbNullString
-    task.taskValue = vbNull
-    task.taskError = vbNullString
-    task.taskCoThread = 0
-    task.taskLastTime = 0
-    task.taskTotalTime = 0
-    task.taskTickCount = 0
+    With task
+        .taskId = g_NextTaskId
+        .taskFunc = funcName
+        .taskWorkbook = wbName
+        .taskStartArgs = startArgs
+        .taskResumeSpec = resumeSpec
+        .taskCell = taskCell
+        .taskStatus = "defined"
+        .taskProgress = 0
+        .taskMessage = vbNullString
+        .taskValue = vbNull
+        .taskError = vbNullString
+        .taskCoThread = 0
+        .taskLastTime = 0
+        .taskTotalTime = 0
+        .taskTickCount = 0
+        .CFS_weight = CFS_DEFAULT_WEIGHT
+        .CFS_vruntime = g_CFS_minVruntime  ' 从当前最小值开始
+    End With
     g_Tasks.Add taskId, task
     g_Workbooks(wbName).AddTask taskId, task
 
@@ -657,6 +668,10 @@ Public Sub StartLuaCoroutine(taskId As String)
 
     HandleCoroutineResult task, result, CLng(nres)
     If task.taskStatus = "yielded" Then
+        With g_Tasks(taskId)
+            .CFS_vruntime = g_CFS_minVruntime
+            .CFS_lastScheduled = GetTickCount()
+        End With
         g_TaskQueue(taskId) = True
     End If
 
@@ -693,12 +708,8 @@ Public Sub SchedulerTick()
     Dim schedulerStart As Double
     schedulerStart = GetTickCount()
 
-    ' 根据调度模式分流执行
-    If g_ScheduleMode = 0 Then
-        Call ScheduleByTask  ' 按任务顺序调度
-    Else
-        Call ScheduleByWorkbook  ' 按工作簿调度
-    End If
+    ' === 使用 CFS 调度 ===
+    Call ScheduleByCFS
 
     ' 性能计时统计
     Dim schedulerElapsed As Double
@@ -725,195 +736,125 @@ Public Sub SchedulerTick()
     End If
 End Sub
 
-' 按任务顺序调度 - 直接执行
-' 按任务顺序调度 - 增强版（修复死循环卡顿问题）
-Private Sub ScheduleByTask()
-    Dim total As Long
-    total = g_TaskQueue.Count
-    If total = 0 Then Exit Sub
+' CFS 调度核心算法
+Private Sub ScheduleByCFS()
+    If g_TaskQueue.Count = 0 Then Exit Sub
 
-    Dim executed As Integer
-    Dim taskId As Variant
-    Dim task As TaskUnit
+    Dim tickBudget As Double
     Dim taskStart As Double, taskElapsed As Double
-    Dim currentCursor As Long ' 临时保存当前执行的游标
+    Dim selectedTaskId As String
+    Dim task As TaskUnit
 
-    executed = 0
-    
-    ' 获取键数组的快照，避免频繁调用 .Keys 属性造成不稳定
-    Dim currentKeys As Variant
-    currentKeys = g_TaskQueue.Keys
+    ' 计算本次 tick 的时间预算
+    tickBudget = g_SchedulerIntervalMilliSec * 0.8  ' 留 20% 余量给 VBA 开销
 
-    Do While executed < g_MaxIterationsPerTick And g_TaskQueue.Count > 0
-        
-        ' 1. 游标越界检查 (防止任务移除后数组变短)
-        If g_SchedulerCursorByTask >= g_TaskQueue.Count Then
-            g_SchedulerCursorByTask = 0
+    Dim totalElapsed As Double
+    totalElapsed = 0
+
+    Do While totalElapsed < tickBudget And g_TaskQueue.Count > 0
+        ' 1. 选择 vruntime 最小的任务
+        selectedTaskId = CFS_PickNextTask()
+
+        If selectedTaskId = vbNullString Then Exit Do
+
+        If Not g_Tasks.Exists(selectedTaskId) Then
+            ' 僵尸任务，移除
+            If g_TaskQueue.Exists(selectedTaskId) Then g_TaskQueue.Remove selectedTaskId
+            GoTo ContinueLoop
         End If
 
-        ' 2. 获取当前要执行的任务ID
-        ' 使用 currentKeys 快照比 g_TaskQueue.Keys()(i) 更稳定
-        ' 如果队列发生了变动，下一轮 tick 会重新获取
-        On Error Resume Next
-        taskId = currentKeys(g_SchedulerCursorByTask)
-        If Err.Number <> 0 Then
-            ' 如果获取失败，重置游标并退出本次循环
-            g_SchedulerCursorByTask = 0
-            Err.Clear
-            Exit Do
-        End If
-        On Error GoTo 0
+        Set task = g_Tasks(selectedTaskId)
 
-        ' 3. 【关键修改】预先推进游标
-        ' 无论后续任务执行是否成功，游标都必须向前移动。
-        ' 保存当前位置用于可能的移除操作修正。
-        currentCursor = g_SchedulerCursorByTask
-        g_SchedulerCursorByTask = g_SchedulerCursorByTask + 1
-
-        ' 4. 执行任务逻辑
-        If g_Tasks.Exists(taskId) Then
-            Set task = g_Tasks(taskId)
-
-            ' 只调度 yielded 状态
-            If task.taskStatus = "yielded" Then
-                taskStart = GetTickCount()
-
-                ResumeCoroutine task
-
-                taskElapsed = GetTickCount() - taskStart
-                
-                ' --- 工作簿统计 ---
-                If g_Workbooks.Exists(task.taskWorkbook) Then
-                    With g_Workbooks(task.taskWorkbook)
-                        .LastTime = taskElapsed
-                        .TotalTime = .TotalTime + taskElapsed
-                        .TickCount = .TickCount + 1
-                    End With
-                End If
-
-                ' --- 终止态清理 ---
-                Select Case task.taskStatus
-                    Case "done", "error", "terminated"
-                        ' 任务完成，从调度队列移除
-                        g_TaskQueue.Remove taskId
-                        
-                        ' 【关键修正】
-                        ' 如果移除了元素，数组后面的元素会前移，填补空缺。
-                        ' 此时原先的 "Next" 元素实际上跑到了 "Current" 位置。
-                        ' 因此我们需要将预先推进的游标回退一格，否则会跳过一个任务。
-                        g_SchedulerCursorByTask = g_SchedulerCursorByTask - 1
-                End Select
-            End If
-        Else
-            ' 这是一个无效的任务ID（僵尸任务）
-            g_TaskQueue.Remove taskId
-            g_SchedulerCursorByTask = g_SchedulerCursorByTask - 1
+        ' 只调度 yielded 状态
+        If task.taskStatus <> "yielded" Then
+            GoTo ContinueLoop
         End If
 
-        executed = executed + 1
+        ' 2. 执行任务
+        taskStart = GetTickCount()
+
+        ResumeCoroutine task
+
+        taskElapsed = GetTickCount() - taskStart
+        If taskElapsed < g_CFS_minGranularity Then taskElapsed = g_CFS_minGranularity
+
+        totalElapsed = totalElapsed + taskElapsed
+
+        ' 3. 更新 vruntime
+        CFS_UpdateVruntime task, taskElapsed
+
+        ' 4. 更新工作簿统计（保留此功能）
+        If g_Workbooks.Exists(task.taskWorkbook) Then
+            With g_Workbooks(task.taskWorkbook)
+                .wbLastTime = taskElapsed
+                .wbTotalTime = .wbTotalTime + taskElapsed
+                .wbTickCount = .wbTickCount + 1
+            End With
+        End If
+
+        ' 5. 终止态清理
+        Select Case task.taskStatus
+            Case "done", "error", "terminated"
+                If g_TaskQueue.Exists(selectedTaskId) Then g_TaskQueue.Remove selectedTaskId
+        End Select
+
+ContinueLoop:
     Loop
 End Sub
-
-' 按工作簿调度 - 直接执行
-Private Sub ScheduleByWorkbook()
-    On Error GoTo ErrorHandler
-
-    Dim wbName As Variant
-    Dim wb As WorkbookInfo
+' 选择 vruntime 最小的任务（CFS 红黑树的简化实现）
+Private Function CFS_PickNextTask() As String
+    Dim minVruntime As Double
+    Dim selectedId As String
+    Dim taskId As Variant
     Dim task As TaskUnit
-    Dim taskId As String
-    Dim taskStart As Double, taskElapsed As Double
-    Dim tickCount As Integer
-    Dim executed As Long
-    Dim cur As Integer
+    minVruntime = 1E+308  ' Double 最大值
+    selectedId = vbNullString
 
-    ' 遍历所有工作簿
-    For Each wbName In g_Workbooks.Keys
-        Set wb = g_Workbooks(wbName)
-        
-        ' [修复1] 必须先计算 tickCount，才能在后面的 If 中使用它
-        ' 否则 tickCount 默认为0，导致所有任务被跳过
-        If wb.wbAllowedTickCount > -1 Then
-            tickCount = wb.wbAllowedTickCount
-        Else
-            tickCount = g_WorkbookTicks
-        End If
-        
-        ' 如果没有任务或允许的 tick 数非法，则跳过
-        If wb.Tasks.Count = 0 Or tickCount <= 0 Then GoTo NextWorkbook
+    For Each taskId In g_TaskQueue.Keys
+        If g_Tasks.Exists(CStr(taskId)) Then
+            Set task = g_Tasks(CStr(taskId))
 
-        ' Round-Robin 调度
-        cur = wb.wbCursor
-        executed = 0
-
-        ' [修复2] 循环条件增加保护
-        Do While executed < tickCount And wb.Tasks.Count > 0
-            
-            ' [修复3] 关键：防止游标越界
-            ' 任务完成被移除后 wb.Tasks.Count 会变小，旧游标可能越界
-            If cur >= wb.Tasks.Count Then cur = 0
-            
-            ' 安全获取 TaskId
-            taskId = wb.Tasks.Keys()(cur)
-
-            ' 检查任务是否仍在全局队列中（双重校验）
-            If g_Tasks.Exists(taskId) Then
-                Set task = g_Tasks(taskId)
-
-                ' 只执行 yielded 状态的任务
-                If task.taskStatus = "yielded" Then
-                    ' 性能计时开始
-                    taskStart = GetTickCount()
-
-                    ' 执行任务
-                    ResumeCoroutine task
-
-                    ' 性能计时结束
-                    taskElapsed = GetTickCount() - taskStart
-
-                    ' 更新工作簿统计
-                    With wb
-                        .wbLastTime = taskElapsed
-                        .wbTotalTime = .wbTotalTime + taskElapsed
-                        .wbTickCount = .wbTickCount + 1
-                    End With
-
-                    ' --- 终止态清理 ---
-                    Select Case task.taskStatus
-                        Case "done", "error", "terminated"
-                            ' [修复4] 必须同时从全局队列和工作簿队列中移除
-                            ' 否则调度器会尝试再次执行已完成的任务
-                            If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
-                            If wb.Tasks.Exists(taskId) Then wb.Tasks.Remove taskId
-                            
-                            ' 注意：移除元素后，数组索引发生位移。
-                            ' 为保持简单（不引入新变量），不回退 cur。
-                            ' 依赖循环顶部的 cur >= wb.Tasks.Count 自动修正下一轮索引。
-                    End Select
+            ' 只考虑 yielded 状态的任务
+            If task.taskStatus = "yielded" Then
+                If task.CFS_vruntime < minVruntime Then
+                    minVruntime = task.CFS_vruntime
+                    selectedId = CStr(taskId)
                 End If
-            Else
-                ' 任务不存在（僵尸任务），从工作簿移除
-                If wb.Tasks.Exists(taskId) Then wb.Tasks.Remove taskId
             End If
+        End If
+    Next taskId
 
-            executed = executed + 1
+    CFS_PickNextTask = selectedId
+End Function
 
-            ' [修复5] 游标移动逻辑
-            If wb.Tasks.Count > 0 Then
-                cur = (cur + 1) Mod wb.Tasks.Count
-            Else
-                cur = 0
+' 更新任务的 vruntime
+Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
+    ' vruntime 增量 = 实际运行时间 * (默认权重 / 任务权重)
+    ' 权重越大，vruntime 增长越慢，获得的 CPU 时间越多
+    Dim vruntimeDelta As Double
+    vruntimeDelta = actualRuntime * (CFS_DEFAULT_WEIGHT / task.CFS_weight)
+
+    task.CFS_vruntime = task.CFS_vruntime + vruntimeDelta
+    task.CFS_lastScheduled = GetTickCount()
+
+    ' 更新全局最小 vruntime（用于新任务初始化）
+    If task.CFS_vruntime > g_CFS_minVruntime Then
+        ' 找到当前队列中的最小值
+        Dim minV As Double
+        Dim tid As Variant
+        Dim t As TaskUnit
+
+        minV = task.CFS_vruntime
+        For Each tid In g_TaskQueue.Keys
+            If g_Tasks.Exists(CStr(tid)) Then
+                Set t = g_Tasks(CStr(tid))
+                If t.taskStatus = "yielded" And t.CFS_vruntime < minV Then
+                    minV = t.CFS_vruntime
+                End If
             End If
-        Loop
-
-        ' 保存游标位置供下次调度使用
-        wb.wbCursor = cur
-
-NextWorkbook:
-    Next wbName
-    Exit Sub
-ErrorHandler:
-    Debug.Print "ScheduleByWorkbook错误: " & Err.Description
+        Next tid
+        g_CFS_minVruntime = minV
+    End If
 End Sub
 
 ' Resume 协程

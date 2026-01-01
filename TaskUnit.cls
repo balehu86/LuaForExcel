@@ -17,11 +17,14 @@ Public taskLastTime As Double    ' 任务上次运行时间(ms)
 Public taskTotalTime As Double   ' 任务总运行时间(ms)
 Public taskTickCount As Long     ' 任务调度次数
 
-Public taskVRuntime As Double    ' 虚拟运行时间
-Public taskWeight As Double      ' 权重(默认1.0，值越大获得越多CPU时间)
-
+' === CFS 调度字段 ===
+Public CFS_vruntime As Double      ' 虚拟运行时间（核心调度依据）
+Public CFS_weight As Double        ' 任务权重（默认1024，越大优先级越高）
+Public CFS_lastScheduled As Double ' 上次被调度的时间戳（GetTickCount）
 Private Sub Class_Initialize()
-    taskVRuntime = 0
-    taskWeight = 1#  ' 默认权重
+    ' 初始化 CFS 字段
+    CFS_vruntime = 0
+    CFS_weight = 1024        ' 默认权重，与 Linux CFS 的 nice=0 对应
+    CFS_lastScheduled = 0
 End Sub
 

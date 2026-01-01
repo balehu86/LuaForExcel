@@ -1,9 +1,7 @@
 ' WorkbookInfo.cls
 Option Explicit
 
-Public wbName As String
-Public wbCursor As Integer
-Public wbAllowedTickCount As Integer ' 仅mode=1时使用，若设置此值将覆盖此工作簿的g_WorkbookTicks
+Public wbName As String         ' workbook name
 
 Public wbLastTime As Double    ' 上次调度时间(ms)
 Public wbTotalTime As Double   ' 总运行时间(ms)
@@ -12,8 +10,6 @@ Public wbTickCount As Integer   ' 调度次数(统计用)
 Private m_Tasks As Object
 
 Private Sub Class_Initialize()
-    wbCursor = 0
-    wbAllowedTickCount = -1 ' 默认不覆盖
     wbLastTime = 0
     wbTotalTime = 0
     wbTickCount = 0

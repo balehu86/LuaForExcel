@@ -23,11 +23,11 @@ Private Function ArrayDimensions(arr As Variant) As String
         Dim lb As Long
         lb = LBound(arr, i)
 
-        If dims <> "" Then dims = dims & " x "
+        If dims <> vbNullString Then dims = dims & " x "
         dims = dims & (ub - lb + 1)
     Next i
 
-    If dims = "" Then dims = "未知"
+    If dims = vbNullString Then dims = "未知"
     ArrayDimensions = dims
 End Function
 
@@ -57,7 +57,6 @@ Public Sub CleanupWorkbookTasks(wbName As String)
         If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
         ' 从队列中移除
         If g_TaskQueue.Exists(CStr(taskId)) Then g_TaskQueue.Remove taskId
-        g_Tasks(CStr(taskId)).taskWorkbook = vbNull
         End If
     Next
     ' 清理工作簿记录
@@ -88,6 +87,7 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaTaskMenu, "恢复任务", "LuaTaskMenu_ResumeTask"
     AddLuaMenuItem luaTaskMenu, "终止任务", "LuaTaskMenu_TerminateTask"
     AddLuaMenuItem luaTaskMenu, "查看任务详情", "LuaTaskMenu_ShowDetail"
+    AddLuaMenuItem luaTaskMenu, "设置任务权重", "LuaConfigMenu_SetTaskWeight"
 
     ' 添加调度的主菜单
     Dim luaSchedulerMenu As CommandBarControl
@@ -114,9 +114,6 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaConfigMenu, "禁用热重载", "LuaConfigMenu_DisableHotReload"
     AddLuaMenuItem luaConfigMenu, "手动重载 functions.lua", "LuaConfigMenu_ReloadFunctions"
     AddLuaMenuItem luaConfigMenu, "设置调度间隔（毫秒）", "LuaConfigMenu_SetSchedulerInterval"
-    AddLuaMenuItem luaConfigMenu, "设置调度步数", "LuaConfigMenu_SetSchedulerBatchSize"
-    AddLuaMenuItem luaConfigMenu, "切换调度模式", "LuaConfigMenu_ToggleScheduleMode"
-    AddLuaMenuItem luaConfigMenu, "设置工作簿Tick数", "LuaConfigMenu_SetWorkbookTicks"
 
     ' 添加调试的主菜单
     Dim luaDebugMenu As CommandBarControl
@@ -180,22 +177,19 @@ End Sub
 Private Sub LuaTaskMenu_PauseTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
-    If taskId = "" Then
+    If taskId = vbNullString Then
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
         Exit Sub
     End If
 
-    On Error Resume Next
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
-    If Err.Number = 0 Then
+    If Not g_Tasks.Exists(taskId) Then
         MsgBox "任务已不存在。", vbExclamation
         Exit Sub
     End If
 
     If g_TaskQueue.Exists(taskId) Then
         g_TaskQueue(taskId) = False
-        task.taskStatus = "paused"
+        g_TaskQueue(taskId).taskStatus = "paused"
         MsgBox "任务 " & taskId & " 已暂停。" & vbCrLf & _
                "使用 ResumeTask 恢复。", vbInformation, "任务已暂停"
     Else
@@ -207,7 +201,7 @@ End Sub
 Private Sub LuaTaskMenu_ResumeTask()
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
-    If taskId = "" Then
+    If taskId = vbNullString Then
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
         Exit Sub
     End If
@@ -300,6 +294,8 @@ Private Sub LuaTaskMenu_ShowDetail()
     msg = msg & "状态: " & task.taskStatus & vbCrLf
     msg = msg & "进度: " & Format(task.taskProgress, "0.00") & "%" & vbCrLf
     msg = msg & "消息: " & task.taskMessage & vbCrLf
+    msg = msg & "  CFS vruntime: " & Format(task.CFS_vruntime, "0.00") & " ms" & vbCrLf
+    msg = msg & "  CFS 权重: " & task.CFS_weight & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
 
     ' 启动参数
@@ -359,6 +355,35 @@ Private Sub LuaTaskMenu_ShowDetail()
 ErrorHandler:
     MsgBox "显示任务详情时出错: " & Err.Description, vbCritical, "错误"
 End Sub
+
+' 设置任务权重
+Private Sub LuaConfigMenu_SetTaskWeight()
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+
+    If taskId = vbNullString Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+
+    Dim task As TaskUnit
+    Set task = g_Tasks(taskId)
+
+    Dim newWeight As Variant
+    newWeight = Application.InputBox( _
+        "设置任务权重（默认1024，越大优先级越高）" & vbCrLf & _
+        "建议范围: 256 ~ 4096", _
+        "CFS 权重设置", _
+        task.CFS_weight, _
+        Type:=1)
+
+    If newWeight = False Then Exit Sub
+    If newWeight < 1 Then newWeight = 1
+    If newWeight > 65536 Then newWeight = 65536
+
+    task.CFS_weight = CDbl(newWeight)
+    MsgBox "任务 " & taskId & " 权重已设置为: " & task.CFS_weight, vbInformation
+End Sub
 ' ====调度管理功能====
 ' 手动启动调度器
 Private Sub LuaSchedulerMenu_StartScheduler()
@@ -384,7 +409,7 @@ Private Sub LuaSchedulerMenu_StartScheduler()
 
     MsgBox "调度器已启动。" & vbCrLf & vbCrLf & _
            "调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf & _
-           "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf & _
+           "调度模式: CFS (完全公平调度)" & vbCrLf & _
            "当前队列任务数: " & g_TaskQueue.Count, _
            vbInformation, "调度器已启动"
 End Sub
@@ -418,7 +443,7 @@ Private Sub LuaTaskMenu_StartAllWorkbookTasks()
     wbName = ActiveWorkbook.Name
     On Error GoTo ErrorHandler
 
-    If wbName = "" Then
+    If wbName = vbNullString Then
         MsgBox "无法获取当前工作簿。", vbExclamation, "错误"
         Exit Sub
     End If
@@ -516,13 +541,13 @@ End Sub
 
 ' 清理特定工作簿的任务
 Private Sub LuaSchedulerMenu_CleanupWorkbookTasks()
-    Dim wbName As String
-    wbName = Application.Caller.Worksheet.Parent.Name
-    CleanupWorkbookTasks wbName
-    MsgBox "已清理工作簿 " & wbName & " 的任务。", vbInformation
+    Dim callerWb As Workbook
+    Set callerWb = Application.Caller.Worksheet.Parent
+    CleanupWorkbookTasks callerWb.Name
+    MsgBox "已清理工作簿 " & callerWb.Name & " 的任务。", vbInformation
 End Sub
 
-' 清空所有任务和队列
+' 清空所有任务队列
 Private Sub LuaSchedulerMenu_ClearAllTasks()
     Dim result As VbMsgBoxResult
     result = MsgBox("确定要清空所有任务吗？" & vbCrLf & vbCrLf & _
@@ -536,7 +561,6 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
 
     ' 清空所有 Dictionary
     If Not g_Tasks Is Nothing Then
-        g_Tasks.RemoveAll
         g_TaskQueue.RemoveAll
     End If
 
@@ -586,7 +610,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         msg = msg & "  [" & wbName & "]: " & g_Workbooks(wbName).Tasks.Count & " 个任务" & vbCrLf
     Next
 
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+    msg = msg & "----------------------------------------" & vbCrLf
     msg = msg & "状态统计:" & vbCrLf
     msg = msg & "   已定义: " & definedCount & vbCrLf
     msg = msg & "   运行中: " & runningCount & vbCrLf
@@ -594,7 +618,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     msg = msg & "   已完成: " & doneCount & vbCrLf
     msg = msg & "   错误: " & errorCount & vbCrLf
     msg = msg & "   已暂停: " & pausedCount & vbCrLf
-    msg = msg & vbCrLf & "========================================" & vbCrLf & vbCrLf
+    msg = msg & "========================================" & vbCrLf & vbCrLf
 
     ' 详细列出每个任务
     For Each taskId In g_Tasks.Keys
@@ -649,7 +673,7 @@ End Sub
 Private Sub LuaConfigMenu_DisableHotReload()
     g_HotReloadEnabled = False
     MsgBox "Lua 自动热重载已禁用。" & vbCrLf & _
-           "如需更新 functions.lua，请手动运行 ""ReloadFunctions""。", _
+           "如需更新 functions.lua，请手动运行 vbNullStringReloadFunctionsvbNullString。", _
            vbExclamation, "热重载已禁用"
 End Sub
 
@@ -688,83 +712,6 @@ Private Sub LuaConfigMenu_SetSchedulerInterval()
 
     g_SchedulerIntervalMilliSec = seconds
 End Sub
-
-' 按任务调度时，设置调度步数 
-Private Sub LuaConfigMenu_SetSchedulerBatchSize()
-
-    Dim v As Variant
-    v = Application.InputBox( _
-            "请输入每次调度的最大任务数（>=1）", _
-            "调度参数", _
-            g_MaxIterationsPerTick, _
-            Type:=1 _
-        )
-
-    If v = False Then Exit Sub
-    If v < 1 Or v <> CLng(v) Then
-        MsgBox "请输入 >=1 的整数", vbExclamation
-        Exit Sub
-    End If
-
-    g_MaxIterationsPerTick = CLng(v)
-
-End Sub
-
-' 切换调度模式
-Private Sub LuaConfigMenu_ToggleScheduleMode()
-    If g_ScheduleMode = 0 Then
-        g_ScheduleMode = 1
-        MsgBox "已切换到【按工作簿调度】模式" & vbCrLf & _
-               "每个工作簿可独立设置执行的tick数", vbInformation
-    Else
-        g_ScheduleMode = 0
-        MsgBox "已切换到【按任务顺序调度】模式" & vbCrLf & _
-               "使用Round-Robin轮询所有任务", vbInformation
-    End If
-End Sub
-
-' 按工作簿调度时，设置工作簿Tick数
-Private Sub LuaConfigMenu_SetWorkbookTicks()
-    If g_ScheduleMode = 0 Then
-        MsgBox "当前为【按任务顺序】模式，此设置无效" & vbCrLf & _
-               "请先切换到【按工作簿调度】模式", vbExclamation
-        Exit Sub
-    End If
-
-    Dim choice As String
-    choice = InputBox("请选择设置方式：" & vbCrLf & _
-                     "1 - 设置默认tick数（所有工作簿）" & vbCrLf & _
-                     "2 - 设置当前工作簿tick数", "设置工作簿Tick", "1")
-
-    If choice = "1" Then
-        Dim defaultTicks As Variant
-        defaultTicks = Application.InputBox("请输入默认tick数（>=1）", "默认设置", g_WorkbookTicks, Type:=1)
-        If defaultTicks = False Then Exit Sub
-        If defaultTicks < 1 Then
-            MsgBox "tick数必须>=1", vbExclamation
-            Exit Sub
-        End If
-        g_WorkbookTicks = CLng(defaultTicks)
-        MsgBox "默认工作簿tick数已设置为: " & g_WorkbookTicks, vbInformation
-
-    ElseIf choice = "2" Then
-        Dim wbName As String
-        wbName = ActiveWorkbook.Name
-
-        Dim wbTicks As Variant
-        Dim currentTicks As Integer
-        If Not g_Workbooks(wbName).wbAllowedTickCount < 0 Then
-            currentTicks = g_Workbooks(wbName).wbAllowedTickCount
-        Else
-            currentTicks = g_WorkbookTicks
-        End If
-
-        wbTicks = Application.InputBox("设置工作簿 [" & wbName & "] 的tick数，负数为将不会调度工作簿。", "工作簿设置", currentTicks, Type:=1)
-        If wbTicks = False Then Exit Sub
-        g_Workbooks(wbName).wbAllowedTickCount = CLng(wbTicks)
-        MsgBox "工作簿 [" & wbName & "] tick数已设置为: " & wbTicks, vbInformation
-    End If
-End Sub
 ' ====调试和诊断功能====
 ' 显示加载宏状态
 Private Sub LuaDebugMenu_ShowAddinStatus()
@@ -779,11 +726,10 @@ Private Sub LuaDebugMenu_ShowAddinStatus()
     msg = msg & "热重载: " & IIf(g_HotReloadEnabled, "已启用", "已禁用") & vbCrLf
     msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
     msg = msg & "调度间隔: " & g_SchedulerIntervalMilliSec & " 毫秒" & vbCrLf
-    msg = msg & "调度步数: " & g_MaxIterationsPerTick & vbCrLf
-    msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
-    If g_ScheduleMode = 1 Then
-        msg = msg & "默认Tick数: " & g_WorkbookTicks & vbCrLf
-    End If
+    msg = msg & "调度算法: CFS (完全公平调度)" & vbCrLf
+    msg = msg & "目标延迟: " & g_CFS_targetLatency & " ms" & vbCrLf
+    msg = msg & "最小粒度: " & g_CFS_minGranularity & " ms" & vbCrLf
+    msg = msg & "当前 min_vruntime: " & Format(g_CFS_minVruntime, "0.00") & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     If g_Tasks Is Nothing Then
         msg = msg & "任务总数: 0" & vbCrLf
@@ -828,16 +774,9 @@ Private Sub LuaPerfMenu_ShowSchedulerStats()
 
     msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerStats.LastTime, "0.00") & " ms" & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
-
-    msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
+    msg = msg & "调度算法: CFS" & vbCrLf
     msg = msg & "调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf
-
-    If g_ScheduleMode = 0 Then
-        msg = msg & "每次执行: " & g_MaxIterationsPerTick & " 个任务" & vbCrLf
-    Else
-        msg = msg & "默认Tick: " & g_WorkbookTicks & " 次/工作簿" & vbCrLf
-    End If
-
+    msg = msg & "当前 min_vruntime: " & Format(g_CFS_minVruntime, "0.00") & " ms" & vbCrLf
     msg = msg & vbCrLf & "当前状态: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
     msg = msg & "活跃任务: " & g_TaskQueue.Count & vbCrLf
 
@@ -896,7 +835,7 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
     msg = msg & "========================================" & vbCrLf & vbCrLf
 
     msg = msg & "工作簿总数: " & g_Workbooks.Count & vbCrLf
-    msg = msg & "调度模式: " & IIf(g_ScheduleMode = 0, "按任务顺序", "按工作簿") & vbCrLf
+    msg = msg & "调度模式: CFS (完全公平调度)" & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
 
     Dim wb As WorkbookInfo
@@ -914,15 +853,6 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
         msg = msg & "  总运行时间: " & Format(wb.wbTotalTime, "0.00") & " ms" & vbCrLf
         msg = msg & "  平均时间: " & Format(wb.wbTotalTime / wb.wbTickCount, "0.00") & " ms" & vbCrLf
         msg = msg & "  上次调度: " & Format(wb.wbLastTime, "0.00") & " ms" & vbCrLf
-        ' 显示配置的tick数（仅在按工作簿调度模式下）
-        ' If g_ScheduleMode = 1 Then
-        '     If g_WorkbookTickCount.Exists(CStr(wb)) Then
-        '         msg = msg & "  配置Tick数: " & g_WorkbookTickCount(CStr(wb)) & vbCrLf
-        '     Else
-        '         msg = msg & "  配置Tick数: " & g_WorkbookTicks & " (默认)" & vbCrLf
-        '     End If
-        ' End If
-
         msg = msg & "----------------------------------------" & vbCrLf
     Next
 
