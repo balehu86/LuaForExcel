@@ -6,7 +6,7 @@ Public taskWorkbook As String ' taskId -> workbookInfo instance
 Public taskStartArgs As Variant  ' taskId -> startArgs array
 Public taskResumeSpec As Variant ' taskId -> resumeSpec array
 Public taskCell As String        ' taskId -> taskCell address
-Public taskStatus As String      ' taskId -> status string:defined、yield、done、error、terminated、paused
+Public taskStatus As String      ' taskId -> status string:defined、yield、paused、done、error、terminated
 Public taskProgress As Double    ' taskId -> progress number
 Public taskMessage As String     ' taskId -> message variant
 Public taskValue As Variant      ' taskId -> value variant
