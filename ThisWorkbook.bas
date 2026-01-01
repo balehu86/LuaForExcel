@@ -19,7 +19,7 @@ Private Sub Workbook_Open()
     g_NextTaskId = 1
     If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
-    If g_TaskQueue Is Nothing Then Set g_TaskQueue = CreateObject("Scripting.Dictionary")
+    If g_TaskQueue Is Nothing Then Set g_TaskQueue = New Collection
 
     DisableLuaTaskMenu
     EnableLuaTaskMenu
