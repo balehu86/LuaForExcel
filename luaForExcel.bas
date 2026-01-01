@@ -944,28 +944,24 @@ End Sub
 ' 启动协程
 Public Sub StartLuaCoroutine(taskId As String)
     On Error GoTo ErrorHandler
-
     If Not InitLuaState() Then
         MsgBox "Lua状态初始化失败", vbCritical
         Exit Sub
     End If
-
     If Not g_Tasks.Exists(taskId) Then
         MsgBox "错误：任务 " & taskId & " 不存在", vbCritical
         Exit Sub
     End If
-
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
-
     If task.taskStatus <> "defined" Then
         MsgBox "错误：任务已启动或已完成，当前状态: " & task.taskStatus, vbExclamation
         Exit Sub
     End If
-
-    ' 确保之前的协程已释放（防御性编程）
+    
+    ' 【修改】改为调用主模块统一释放函数
     ReleaseTaskCoroutine task
-
+    
     ' 创建协程并锚定到注册表
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
@@ -974,30 +970,26 @@ Public Sub StartLuaCoroutine(taskId As String)
         task.taskError = "无法创建协程线程"
         Exit Sub
     End If
-
     ' 锚定协程
     task.taskCoRef = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
     task.taskCoThread = coThread
-
+    
+    ' ... 后续代码保持不变 ...
+    
     ' 获取函数并移动到协程栈
     lua_getglobal g_LuaState, task.taskFunc
-
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
         SetTaskStatus task, "error"
         task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         lua_settop g_LuaState, 0
         Exit Sub
     End If
-
     lua_xmove g_LuaState, coThread, 1
     lua_pushstring coThread, task.taskCell
-
     Dim nargs As Long
     nargs = 1
-
     Dim startArgs As Variant
     startArgs = task.taskStartArgs
-
     If IsArray(startArgs) Then
         Dim i As Long
         For i = LBound(startArgs) To UBound(startArgs)
@@ -1005,14 +997,11 @@ Public Sub StartLuaCoroutine(taskId As String)
             nargs = nargs + 1
         Next i
     End If
-
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-
     ' 处理结果（内部会调用 SetTaskStatus）
     HandleCoroutineResult task, result, CLng(nres)
-
     ' 如果是 yielded 状态，加入队列
     If task.taskStatus = "yielded" Then
         task.CFS_vruntime = g_CFS_minVruntime
@@ -1020,9 +1009,7 @@ Public Sub StartLuaCoroutine(taskId As String)
         CollectionAdd g_TaskQueue, taskId
         StartSchedulerIfNeeded
     End If
-
     Exit Sub
-
 ErrorHandler:
     SetTaskStatus task, "error"
     task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
@@ -1850,60 +1837,55 @@ Private Sub CollectionAdd(col As Collection, key As String)
         col.Add key, key  ' item, key
     End If
 End Sub
-
-' 公开的协程释放函数（供 TaskUnit 类调用）
-Public Sub UnrefCoroutine(ByVal L As LongPtr, ByVal ref As Long)
-    On Error Resume Next
-    If L <> 0 And ref <> 0 Then
-        luaL_unref L, LUA_REGISTRYINDEX, ref
-    End If
-End Sub
-' 统一释放任务的协程资源
-Private Sub ReleaseTaskCoroutine(task As TaskUnit)
-    On Error Resume Next
-    If task Is Nothing Then Exit Sub
-    If g_LuaState = 0 Then Exit Sub
-
-    If task.taskCoRef <> 0 Then
-        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-        task.taskCoRef = 0
-        task.taskCoThread = 0
-        Debug.Print "释放协程: Task_" & task.taskId & ", Ref=" & task.taskCoRef
-    End If
-End Sub
 ' 统一设置任务状态并处理副作用
 Private Sub SetTaskStatus(task As TaskUnit, newStatus As String)
     If task Is Nothing Then Exit Sub
-
     Dim taskId As String
     taskId = "Task_" & task.taskId
     Dim oldStatus As String
     oldStatus = task.taskStatus
-
     ' 更新状态
     task.taskStatus = newStatus
-
     ' 终态处理：释放协程
     Select Case newStatus
         Case "done", "error", "terminated"
+            ' 【修改】改为调用主模块统一释放函数
             ReleaseTaskCoroutine task
             CollectionRemove g_TaskQueue, taskId
-
         Case "paused"
             ' 暂停不释放协程，但从队列移除
             CollectionRemove g_TaskQueue, taskId
-
         Case "defined"
             ' 重置状态，确保协程已释放
+            ' 【修改】改为调用主模块统一释放函数
             ReleaseTaskCoroutine task
             CollectionRemove g_TaskQueue, taskId
     End Select
-
     ' 标记监控为脏
     If oldStatus <> newStatus Then
         g_StateDirty = True
         MarkWatchesDirty taskId
     End If
-
     Debug.Print "任务状态变更: " & taskId & " [" & oldStatus & "] -> [" & newStatus & "]"
+End Sub
+' 统一释放任务的协程资源
+Public Sub ReleaseTaskCoroutine(task As TaskUnit)
+    On Error Resume Next
+
+    If task Is Nothing Then Exit Sub
+    If task.taskCoRef = 0 Then Exit Sub
+
+    ' 确保 Lua 状态机有效
+    If g_LuaState = 0 Or Not g_Initialized Then
+        Debug.Print "ReleaseTaskCoroutine: Lua 状态机无效，跳过释放"
+        task.ClearCoroutineRef
+        Exit Sub
+    End If
+
+    ' 执行释放
+    Debug.Print "ReleaseTaskCoroutine: Task_" & task.taskId & " 释放协程 Ref=" & task.taskCoRef
+    luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+
+    ' 清除任务中的引用
+    task.ClearCoroutineRef
 End Sub

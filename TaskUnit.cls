@@ -33,31 +33,13 @@ Private Sub Class_Initialize()
     CFS_lastScheduled = 0
 End Sub
 
-' ===== 释放协程资源（唯一入口）=====
-Public Sub ReleaseCoroutine()
-    On Error Resume Next
-    
-    If taskCoRef = 0 Then Exit Sub
-    
-    ' 获取全局 Lua 状态机
-    Dim L As LongPtr
-    L = GetLuaState()
-    
-    If L <> 0 Then
-        UnrefFromRegistry L, taskCoRef
-        Debug.Print "TaskUnit.ReleaseCoroutine: Task_" & taskId & " 释放协程 Ref=" & taskCoRef
-    End If
-    
-    taskCoRef = 0
-    taskCoThread = 0
-End Sub
-
 ' ===== 检查协程是否有效 =====
 Public Function HasValidCoroutine() As Boolean
     HasValidCoroutine = (taskCoRef <> 0 And taskCoThread <> 0)
 End Function
 
-' ===== 类销毁时自动释放 =====
-Private Sub Class_Terminate()
-    ReleaseCoroutine
+' ===== 清除协程引用（仅清除本地存储，不执行释放）=====
+Public Sub ClearCoroutineRef()
+    taskCoRef = 0
+    taskCoThread = 0
 End Sub

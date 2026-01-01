@@ -50,39 +50,50 @@ End Function
 Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
     If g_Tasks Is Nothing Then Exit Sub
-    
+
     ' 收集要删除的任务ID
     Dim toRemove As Collection
     Set toRemove = New Collection
     Dim taskId As Variant
-    
+
     For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
             toRemove.Add CStr(taskId)
         End If
     Next
-    
+
     ' 删除任务
     Dim task As TaskUnit
     For Each taskId In toRemove
         Set task = g_Tasks(CStr(taskId))
-        
-        ' 使用统一的状态设置（会自动释放协程和从队列移除）
-        SetTaskStatus task, "terminated"
-        
+
+        ' 【修改】改为调用主模块统一释放函数
+        ReleaseTaskCoroutine task
+
+        ' 从队列移除
+        CollectionRemove g_TaskQueue, CStr(taskId)
+
         ' 清理监控索引
         If g_WatchesByTask.Exists(CStr(taskId)) Then
+            Dim watchCells As Collection
+            Set watchCells = g_WatchesByTask(CStr(taskId))
+            Dim wc As Variant
+            For Each wc In watchCells
+                If g_Watches.Exists(CStr(wc)) Then
+                    g_Watches.Remove CStr(wc)
+                End If
+            Next wc
             g_WatchesByTask.Remove CStr(taskId)
         End If
-        
+
         ' 释放并移除
         Set g_Tasks(CStr(taskId)) = Nothing
         g_Tasks.Remove CStr(taskId)
     Next
-    
+
     ' 清理工作簿的监控
     CleanupWorkbookWatches wbName
-    
+
     ' 清理工作簿记录
     If g_Workbooks.Exists(wbName) Then
         g_Workbooks.Remove wbName
@@ -659,24 +670,22 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
     result = MsgBox("确定要清空所有任务吗？" & vbCrLf & vbCrLf & _
                     "这将删除所有任务数据，无法恢复！", _
                     vbExclamation + vbYesNo, "确认清空")
-
     If result = vbNo Then Exit Sub
-
     ' 停止调度器
     StopScheduler
-    ' 释放所有协程引用
+
+    ' 【修改】改为调用主模块统一释放函数
     If Not g_Tasks Is Nothing Then
         Dim taskId As Variant
         Dim task As TaskUnit
         For Each taskId In g_Tasks.Keys
             Set task = g_Tasks(taskId)
-            If task.taskCoRef <> 0 Then
-                luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-            End If
+            ReleaseTaskCoroutine task
         Next
         ' 清空所有数据
         g_Tasks.RemoveAll
     End If
+
     Set g_TaskQueue = New Collection
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
 End Sub
