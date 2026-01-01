@@ -530,7 +530,7 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     For Each taskId In g_Tasks.Keys
         status = g_Tasks(taskId).taskStatus
         If status = "done" Or status = "error" Then
-            CollectionRemove g_TaskQueue, taskId
+            CollectionRemove g_TaskQueue, CStr(taskId)
             count = count +1
         End If
     Next

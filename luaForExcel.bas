@@ -66,11 +66,11 @@ Private g_LastModified As Date
 ' ===== 协程全局变量 =====
 Public g_Tasks As Object       ' task Id -> task Instance
 Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
-Private g_TaskQueue As Collection     ' taskId -> True (active tasks)
+Public g_TaskQueue As Collection     ' taskId -> True (active tasks)
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
-Private g_NextTaskId As Integer         ' 新建下一个任务ID计数器
+Public g_NextTaskId As Integer         ' 新建下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
 
