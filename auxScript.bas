@@ -299,6 +299,22 @@ Private Sub LuaTaskMenu_TerminateTask()
     ' 从队列移除
     If Not g_TaskQueue Is Nothing Then
         CollectionRemove g_TaskQueue, taskId
+        ' 从队列移除
+        CollectionRemove g_TaskQueue, taskId
+        ' 清理该任务的所有监控索引
+        If g_WatchesByTask.Exists(taskId) Then
+            Dim watchCells As Collection
+            Set watchCells = g_WatchesByTask(taskId)
+            Dim wc As Variant
+            For Each wc In watchCells
+                If g_Watches.Exists(CStr(wc)) Then
+                    g_Watches.Remove CStr(wc)
+                End If
+            Next wc
+            g_WatchesByTask.Remove taskId
+        End If
+        ' 释放 TaskUnit 对象引用
+        Set g_Tasks(taskId) = Nothing
     End If
 
     g_Tasks.Remove taskId
@@ -565,10 +581,10 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
         Exit Sub
     End If
 
-    ' 【修复】收集需要清理的任务ID（不能在遍历时删除）
+    ' 收集需要清理的任务ID（不能在遍历时删除）
     Dim toRemove As Collection
     Set toRemove = New Collection
-    
+
     Dim taskId As Variant
     Dim status As String
     For Each taskId In g_Tasks.Keys
@@ -578,12 +594,27 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
         End If
     Next
 
-    ' 【修复】实际删除任务
+    ' 实际删除任务
     Dim removeId As Variant
     Dim count As Integer
     count = 0
     For Each removeId In toRemove
+        ' 从队列移除
         CollectionRemove g_TaskQueue, CStr(removeId)
+        ' 清理监控索引
+        If g_WatchesByTask.Exists(CStr(removeId)) Then
+            Dim watchCells As Collection
+            Set watchCells = g_WatchesByTask(CStr(removeId))
+            Dim wc As Variant
+            For Each wc In watchCells
+                If g_Watches.Exists(CStr(wc)) Then
+                    g_Watches.Remove CStr(wc)
+                End If
+            Next wc
+            g_WatchesByTask.Remove CStr(removeId)
+        End If
+        ' 释放对象引用
+        Set g_Tasks(CStr(removeId)) = Nothing
         g_Tasks.Remove CStr(removeId)
         count = count + 1
     Next
@@ -633,15 +664,14 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     ' 按工作簿分组统计
     Dim taskId As Variant
     Dim task As TaskUnit
-    Dim definedCount As Integer, runningCount As Integer, yieldedCount As Integer
+    Dim definedCount As Integer, yieldedCount As Integer
     Dim doneCount As Integer, errorCount As Integer, pausedCount As Integer
-    
+
     ' 统计各状态任务数
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
         Select Case task.taskStatus
             Case "defined": definedCount = definedCount + 1
-            Case "running": runningCount = runningCount + 1
             Case "yielded": yieldedCount = yieldedCount + 1
             Case "done": doneCount = doneCount + 1
             Case "error": errorCount = errorCount + 1
@@ -680,7 +710,6 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     msg = msg & "----------------------------------------" & vbCrLf
     msg = msg & "状态统计:" & vbCrLf
     msg = msg & "   已定义: " & definedCount & vbCrLf
-    msg = msg & "   运行中: " & runningCount & vbCrLf
     msg = msg & "   中止中: " & yieldedCount & vbCrLf
     msg = msg & "   已完成: " & doneCount & vbCrLf
     msg = msg & "   错误: " & errorCount & vbCrLf
