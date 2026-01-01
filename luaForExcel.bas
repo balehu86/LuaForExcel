@@ -551,12 +551,14 @@ ErrorHandler:
     LuaTask = "#ERROR: Task" & Err.Description
 End Function
 
-' 读取任务状态
+' 读取任务状态（静态读取，不自动刷新）
+' 如需实时监控，请使用 LuaWatch 函数
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
 
-    ' 标记为 volatile，每次计算都会刷新
-    Application.Volatile True
+    ' 【修改】完全移除 Volatile
+    ' 此函数只在输入公式或手动刷新(F9)时计算
+    ' 实时监控请使用 LuaWatch
 
     If Not InitLuaState() Then
         LuaGet = CVErr(xlErrValue)
@@ -567,6 +569,7 @@ Public Function LuaGet(taskId As String, field As String) As Variant
         LuaGet = "#ERROR: 任务不存在"
         Exit Function
     End If
+    
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
 
@@ -597,17 +600,21 @@ Public Function LuaGet(taskId As String, field As String) As Variant
 ErrorHandler:
     LuaGet = "#ERROR: " & Err.Description
 End Function
-' 监控任务字段变化
+
+' 监控任务字段变化（注册监控点，由调度器统一刷新）
 Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
                          Optional targetCell As Variant, _
                          Optional direction As Integer = 0) As Variant
     On Error GoTo ErrorHandler
-    ' 不标记为 Volatile，由调度器控制刷新
-    ' Application.Volatile False
+    
+    ' 【关键】不使用 Volatile，此函数只负责注册监控
+    ' 实际刷新由调度器在周期末尾统一处理
+    
     If Not InitLuaState() Then
         LuaWatch = CVErr(xlErrValue)
         Exit Function
     End If
+    
     ' 初始化监控字典
     If g_Watches Is Nothing Then
         Set g_Watches = CreateObject("Scripting.Dictionary")
@@ -615,10 +622,12 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     If g_WatchesByTask Is Nothing Then
         Set g_WatchesByTask = CreateObject("Scripting.Dictionary")
     End If
+    
     ' 获取调用单元格信息
     Dim callerCell As Range
     Dim callerAddr As String
     Dim callerWb As Workbook
+    
     On Error Resume Next
     Set callerCell = Application.Caller
     If callerCell Is Nothing Then
@@ -628,6 +637,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     callerAddr = callerCell.Address(External:=True)
     Set callerWb = callerCell.Worksheet.Parent
     On Error GoTo ErrorHandler
+    
     ' 解析 taskId
     Dim taskId As String
     If TypeName(taskIdOrCell) = "Range" Then
@@ -635,27 +645,25 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     Else
         taskId = CStr(taskIdOrCell)
     End If
+    
     ' 验证任务存在
     If Not g_Tasks.Exists(taskId) Then
         LuaWatch = "#ERROR: 任务不存在"
         Exit Function
     End If
+    
     ' 计算目标单元格
     Dim targetAddr As String
     Dim targetRange As Range
+    
     If IsMissing(targetCell) Or IsEmpty(targetCell) Then
         ' 根据 direction 计算相邻单元格
         Select Case direction
-            Case 0  ' 右侧
-                Set targetRange = callerCell.Offset(0, 1)
-            Case 1  ' 上侧
-                Set targetRange = callerCell.Offset(-1, 0)
-            Case 2  ' 左侧
-                Set targetRange = callerCell.Offset(0, -1)
-            Case 3  ' 下侧
-                Set targetRange = callerCell.Offset(1, 0)
-            Case Else
-                Set targetRange = callerCell.Offset(0, 1)
+            Case 0: Set targetRange = callerCell.Offset(0, 1)  ' 右侧
+            Case 1: Set targetRange = callerCell.Offset(-1, 0) ' 上侧
+            Case 2: Set targetRange = callerCell.Offset(0, -1) ' 左侧
+            Case 3: Set targetRange = callerCell.Offset(1, 0)  ' 下侧
+            Case Else: Set targetRange = callerCell.Offset(0, 1)
         End Select
         targetAddr = targetRange.Address(External:=True)
     Else
@@ -663,7 +671,6 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         If TypeName(targetCell) = "Range" Then
             targetAddr = targetCell.Address(External:=True)
         Else
-            ' 尝试解析为单元格地址
             On Error Resume Next
             Set targetRange = callerWb.Sheets(callerCell.Worksheet.Name).Range(CStr(targetCell))
             If targetRange Is Nothing Then
@@ -674,9 +681,11 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
             On Error GoTo ErrorHandler
         End If
     End If
+    
     ' 注册或更新监控
     Dim watchInfo As WatchInfo
     Dim oldTaskId As String
+    
     If g_Watches.Exists(callerAddr) Then
         ' 更新现有监控
         Set watchInfo = g_Watches(callerAddr)
@@ -693,6 +702,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         g_Watches.Add callerAddr, watchInfo
         AddToWatchesByTask taskId, callerAddr
     End If
+    
     With watchInfo
         .watchCell = callerAddr
         .watchTaskId = taskId
@@ -701,29 +711,40 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         .watchDirection = direction
         .watchWorkbook = callerWb.Name
         .watchLastValue = Empty  ' 标记为需要首次写入
-        .watchDirty = True       ' 新注册或更新时标记为脏
+        .watchDirty = True       ' 新注册时标记为脏
     End With
-    ' 返回监控状态描述
-    LuaWatch = "监控: " & taskId & "." & field
+    
+    ' 返回监控状态描述（静态文本，不会变化）
+    LuaWatch = "监控: " & taskId & "." & field & " -> " & targetAddr
+    
     Exit Function
 ErrorHandler:
     LuaWatch = "#ERROR: " & Err.Description
 End Function
 
-' 刷新所有脏的监控
+' 刷新所有脏的监控（批量写入，不触发重算）
 Private Sub RefreshWatches()
     On Error Resume Next
+
     If g_Watches Is Nothing Then Exit Sub
     If g_Watches.Count = 0 Then Exit Sub
+
     Dim watchCell As Variant
     Dim watchInfo As WatchInfo
     Dim task As TaskUnit
     Dim currentValue As Variant
+    Dim writeCount As Long
+    writeCount = 0
+
+    ' 【优化】收集所有需要写入的工作表，最后统一处理
+    Dim sheetsToRefresh As Object
+    Set sheetsToRefresh = CreateObject("Scripting.Dictionary")
+
     For Each watchCell In g_Watches.Keys
         Set watchInfo = g_Watches(watchCell)
-
         ' 只处理脏的监控
         If Not watchInfo.watchDirty Then GoTo NextWatch
+
         ' 检查任务是否存在
         If Not g_Tasks.Exists(watchInfo.watchTaskId) Then
             ' 任务已删除，移除监控和二级索引
@@ -731,7 +752,9 @@ Private Sub RefreshWatches()
             g_Watches.Remove watchCell
             GoTo NextWatch
         End If
+
         Set task = g_Tasks(watchInfo.watchTaskId)
+
         ' 获取当前字段值
         Select Case watchInfo.watchField
             Case "status"
@@ -747,10 +770,10 @@ Private Sub RefreshWatches()
             Case Else
                 currentValue = "#未知字段"
         End Select
+
         ' 检查值是否真的变化了（避免不必要的写入）
         Dim needWrite As Boolean
         needWrite = False
-
         If IsEmpty(watchInfo.watchLastValue) Then
             needWrite = True
         ElseIf IsArray(currentValue) Or IsArray(watchInfo.watchLastValue) Then
@@ -758,40 +781,34 @@ Private Sub RefreshWatches()
         ElseIf currentValue <> watchInfo.watchLastValue Then
             needWrite = True
         End If
-        ' 写入目标单元格
-        If needWrite Then
-            WriteToTargetCell watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook
-            watchInfo.watchLastValue = currentValue
-        End If
 
+        ' 写入目标单元格（直接写值，不触发计算）
+        If needWrite Then
+            WriteToTargetCellDirect watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook, sheetsToRefresh
+            watchInfo.watchLastValue = currentValue
+            writeCount = writeCount + 1
+        End If
         ' 清除脏标记
         watchInfo.watchDirty = False
 NextWatch:
     Next watchCell
+    ' 【关键】只在有实际写入时，统一刷新一次
+    ' 这里不再调用 Calculate，因为直接写值不需要重算
 End Sub
-' 写入目标单元格
-Private Sub WriteToTargetCell(targetAddr As String, value As Variant, wbName As String)
+' 直接写入目标单元格（不触发 Calculate）
+Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbName As String, sheetsDict As Object)
     On Error Resume Next
-
     Dim targetRange As Range
-
-    ' 解析外部地址格式 [Book1.xlsx]Sheet1!$A$1
-    ' 或简单格式 $A$1
-
     Dim wb As Workbook
-    Set wb = Nothing
 
-    ' 尝试获取工作簿
     Set wb = Application.Workbooks(wbName)
     If wb Is Nothing Then Exit Sub
-
     ' 解析地址
     Dim sheetName As String
     Dim cellAddr As String
     Dim exclamPos As Long
     Dim bracketEnd As Long
-
-    ' 处理外部引用格式
+    ' 处理外部引用格式 [Book1.xlsx]Sheet1!$A$1
     If Left(targetAddr, 1) = "[" Then
         bracketEnd = InStr(targetAddr, "]")
         exclamPos = InStr(targetAddr, "!")
@@ -805,25 +822,20 @@ Private Sub WriteToTargetCell(targetAddr As String, value As Variant, wbName As 
         exclamPos = InStr(targetAddr, "!")
         sheetName = Left(targetAddr, exclamPos - 1)
         cellAddr = Mid(targetAddr, exclamPos + 1)
-        ' 移除可能的引号
         sheetName = Replace(sheetName, "'", "")
     Else
         cellAddr = targetAddr
     End If
-
     ' 获取目标范围
     If sheetName <> "" Then
         Set targetRange = wb.Sheets(sheetName).Range(cellAddr)
     Else
         Set targetRange = wb.ActiveSheet.Range(cellAddr)
     End If
-
     If targetRange Is Nothing Then Exit Sub
-
+    ' 【关键】直接写值，不触发事件和计算
     ' 写入值
     If IsArray(value) Then
-        ' 数组值：尝试调整大小
-        On Error Resume Next
         targetRange.Resize(UBound(value, 1) - LBound(value, 1) + 1, _
                           UBound(value, 2) - LBound(value, 2) + 1).value = value
     Else
@@ -969,12 +981,14 @@ End Sub
 ' 调度器心跳 - 主入口
 Public Sub SchedulerTick()
     On Error Resume Next
+    
     If Not g_SchedulerRunning Then Exit Sub
     If g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
         Exit Sub
     End If
 
+    ' 【关键】在整个调度周期开始时禁用事件和计算
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
@@ -992,15 +1006,19 @@ Public Sub SchedulerTick()
     g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
     g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
 
+    ' 【关键】在周期末尾统一处理所有监控刷新
+    ' 只有状态真的变化时才处理
+    If g_StateDirty Then
+        RefreshWatches  ' 批量写入所有脏监控的目标单元格
+        g_StateDirty = False
+        ' 【注意】不再调用 ActiveSheet.Calculate
+        ' 因为我们是直接写值到目标单元格，不需要重新计算公式
+    End If
+
+    ' 【关键】恢复 Excel 状态
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
-    ' 刷新监控（在状态脏标记检查时一并处理）
-    If g_StateDirty Then
-        RefreshWatches  ' 添加这行
-        g_StateDirty = False
-        ActiveSheet.Calculate
-    End If
 
     ' 重新安排下一次调度
     If g_TaskQueue.Count > 0 Then
@@ -1395,7 +1413,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
     coThread = task.taskCoThread
 
     Dim stackTop As Long
-    stackTop = lua_gettop(coThread)  ' 入口保存
+    stackTop = lua_gettop(coThread)
     
     Dim taskId As String
     taskId = "Task_" & CStr(task.taskId)
@@ -1405,7 +1423,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
             task.taskStatus = "done"
             task.taskProgress = 100
             g_StateDirty = True
-            MarkWatchesDirty taskId  ' 标记相关监控为脏
+            MarkWatchesDirty taskId  ' 只标记，不刷新
 
             If nres > 0 And stackTop > 0 Then
                 Dim retData As Variant
@@ -1423,12 +1441,12 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
                 task.taskStatus = "yielded"
             End If
             g_StateDirty = True
-            MarkWatchesDirty taskId  ' 标记相关监控为脏
+            MarkWatchesDirty taskId  ' 只标记，不刷新
 
         Case Else
             task.taskStatus = "error"
             g_StateDirty = True
-            MarkWatchesDirty taskId  ' 标记相关监控为脏
+            MarkWatchesDirty taskId  ' 只标记，不刷新
 
             If nres > 0 And stackTop > 0 Then
                 task.taskError = GetStringFromState(coThread, -1)
@@ -1437,7 +1455,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
             End If
     End Select
 
-    lua_settop coThread, stackTop  ' 统一恢复
+    lua_settop coThread, stackTop
     Exit Sub
 
 ErrorHandler:
