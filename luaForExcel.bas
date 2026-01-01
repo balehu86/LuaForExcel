@@ -654,17 +654,15 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     Dim targetRange As Range
 
     If IsMissing(targetCell) Or IsEmpty(targetCell) Then
-        ' 根据 direction 计算相邻单元格
         Select Case direction
-            Case 0: Set targetRange = callerCell.Offset(0, 1)  ' 右侧
-            Case 1: Set targetRange = callerCell.Offset(-1, 0) ' 上侧
-            Case 2: Set targetRange = callerCell.Offset(0, -1) ' 左侧
-            Case 3: Set targetRange = callerCell.Offset(1, 0)  ' 下侧
+            Case 0: Set targetRange = callerCell.Offset(0, 1)
+            Case 1: Set targetRange = callerCell.Offset(-1, 0)
+            Case 2: Set targetRange = callerCell.Offset(0, -1)
+            Case 3: Set targetRange = callerCell.Offset(1, 0)
             Case Else: Set targetRange = callerCell.Offset(0, 1)
         End Select
         targetAddr = targetRange.Address(External:=True)
     Else
-        ' 使用指定的目标单元格
         If TypeName(targetCell) = "Range" Then
             targetAddr = targetCell.Address(External:=True)
         Else
@@ -678,40 +676,75 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
             On Error GoTo ErrorHandler
         End If
     End If
-    
-    ' 注册或更新监控
+
+    ' 【修复】检查是否已存在相同的监控
     Dim watchInfo As WatchInfo
-    Dim oldTaskId As String
-    
+    Dim isNewWatch As Boolean
+    Dim needUpdateIndex As Boolean
+
+    isNewWatch = False
+    needUpdateIndex = False
+
     If g_Watches.Exists(callerAddr) Then
-        ' 更新现有监控
+        ' 已存在监控
         Set watchInfo = g_Watches(callerAddr)
-        oldTaskId = watchInfo.watchTaskId
-        
-        ' 如果任务ID变了，更新二级索引
-        If oldTaskId <> taskId Then
-            RemoveFromWatchesByTask oldTaskId, callerAddr
-            AddToWatchesByTask taskId, callerAddr
+
+        ' 【修复】检查关键参数是否变化
+        Dim paramsChanged As Boolean
+        paramsChanged = False
+
+        If watchInfo.watchTaskId <> taskId Then
+            paramsChanged = True
+            needUpdateIndex = True
         End If
+        If watchInfo.watchField <> LCase(Trim(field)) Then
+            paramsChanged = True
+        End If
+        If watchInfo.watchTargetCell <> targetAddr Then
+            paramsChanged = True
+        End If
+
+        ' 【修复】只有参数真的变化时才更新
+        If paramsChanged Then
+            ' 更新二级索引（如果 taskId 变化）
+            If needUpdateIndex Then
+                RemoveFromWatchesByTask watchInfo.watchTaskId, callerAddr
+                AddToWatchesByTask taskId, callerAddr
+            End If
+
+            ' 更新监控信息
+            With watchInfo
+                .watchTaskId = taskId
+                .watchField = LCase(Trim(field))
+                .watchTargetCell = targetAddr
+                .watchDirection = direction
+                .watchLastValue = Empty  ' 参数变化，需要重新写入
+                .watchDirty = True
+            End With
+        End If
+        ' 【修复】参数未变化时，不修改任何状态
+
     Else
-        ' 创建新监控
+        ' 新建监控
+        isNewWatch = True
         Set watchInfo = New WatchInfo
+
+        With watchInfo
+            .watchCell = callerAddr
+            .watchTaskId = taskId
+            .watchField = LCase(Trim(field))
+            .watchTargetCell = targetAddr
+            .watchDirection = direction
+            .watchWorkbook = callerWb.Name
+            .watchLastValue = Empty
+            .watchDirty = True  ' 新监控需要首次写入
+        End With
+
         g_Watches.Add callerAddr, watchInfo
         AddToWatchesByTask taskId, callerAddr
     End If
-    
-    With watchInfo
-        .watchCell = callerAddr
-        .watchTaskId = taskId
-        .watchField = LCase(Trim(field))
-        .watchTargetCell = targetAddr
-        .watchDirection = direction
-        .watchWorkbook = callerWb.Name
-        .watchLastValue = Empty  ' 标记为需要首次写入
-        .watchDirty = True       ' 新注册时标记为脏
-    End With
-    
-    ' 返回监控状态描述（静态文本，不会变化）
+
+    ' 返回监控状态描述
     LuaWatch = "监控: " & taskId & "." & field & " -> " & targetAddr
 
     Exit Function
@@ -839,7 +872,7 @@ Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbNa
         targetRange.value = value
     End If
 End Sub
-' 辅助函数：添加到二级索引
+' 辅助函数：添加到二级索引（防重复）
 Private Sub AddToWatchesByTask(taskId As String, watchCell As String)
     If g_WatchesByTask Is Nothing Then
         Set g_WatchesByTask = CreateObject("Scripting.Dictionary")
@@ -849,10 +882,25 @@ Private Sub AddToWatchesByTask(taskId As String, watchCell As String)
         g_WatchesByTask.Add taskId, New Collection
     End If
 
-    ' 避免重复添加
+    ' 【修复】先检查是否已存在，再添加
+    Dim col As Collection
+    Set col = g_WatchesByTask(taskId)
+
+    ' 检查是否已存在
+    Dim exists As Boolean
+    exists = False
+
     On Error Resume Next
-    g_WatchesByTask(taskId).Add watchCell, watchCell
+    Dim dummy As Variant
+    dummy = col(watchCell)
+    exists = (Err.Number = 0)
+    Err.Clear
     On Error GoTo 0
+
+    ' 不存在才添加
+    If Not exists Then
+        col.Add watchCell, watchCell
+    End If
 End Sub
 ' 辅助函数：从二级索引移除
 Private Sub RemoveFromWatchesByTask(taskId As String, watchCell As String)
