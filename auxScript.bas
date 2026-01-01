@@ -55,25 +55,28 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     Set toRemove = New Collection
     Dim taskId As Variant
     For Each taskId In g_Tasks.Keys
-        If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
-            toRemove.Add CStr(taskId)
-        End If
+        If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then toRemove.Add CStr(taskId)
     Next
     ' 在删除任务时，也清理其监控索引
+    Dim task As TaskUnit
     For Each taskId In toRemove
+        task = g_Tasks(CStr(taskId))
+        ' 释放协程引用
+        If task.taskCoRef <> 0 Then
+            luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+            task.taskCoRef = 0
+            task.taskCoThread = 0
+        End If
         CollectionRemove g_TaskQueue, CStr(taskId)
         ' 清理该任务的监控索引
-        If g_WatchesByTask.Exists(CStr(taskId)) Then
-            g_WatchesByTask.Remove CStr(taskId)
-        End If
+        If g_WatchesByTask.Exists(CStr(taskId)) Then g_WatchesByTask.Remove CStr(taskId)
         g_Tasks.Remove CStr(taskId)
     Next
     ' 清理工作簿的监控
     CleanupWorkbookWatches wbName
     ' 清理工作簿记录
-    If g_Workbooks.Exists(wbName) Then
-        g_Workbooks.Remove wbName
-    End If
+    If g_Workbooks.Exists(wbName) Then g_Workbooks.Remove wbName
+
 End Sub
 
 ' 辅助函数：清理特定工作簿的监视点
@@ -295,6 +298,15 @@ Private Sub LuaTaskMenu_TerminateTask()
     result = MsgBox("确定要终止并删除任务 " & taskId & " 吗？", _
                     vbQuestion + vbYesNo, "确认终止")
     If result = vbNo Then Exit Sub
+
+    ' === 新增：释放协程引用 ===
+    Dim task As TaskUnit
+    Set task = g_Tasks(taskId)
+    If task.taskCoRef <> 0 Then
+        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+        task.taskCoRef = 0
+        task.taskCoThread = 0
+    End If
 
     ' 从队列移除
     If Not g_TaskQueue Is Nothing Then
@@ -599,6 +611,10 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     Dim count As Integer
     count = 0
     For Each removeId In toRemove
+        ' 释放协程引用（虽然终态时应该已释放，但双重保险）
+        If g_Tasks(CStr(removeId)).taskCoRef <> 0 Then
+            luaL_unref g_LuaState, LUA_REGISTRYINDEX, g_Tasks(CStr(removeId)).taskCoRef
+        End If
         ' 从队列移除
         CollectionRemove g_TaskQueue, CStr(removeId)
         ' 清理监控索引
@@ -641,14 +657,21 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
     If result = vbNo Then Exit Sub
 
     ' 停止调度器
-    StopScheduler  ' 【修复】使用 StopScheduler 而不是直接设置标志
-
-    ' 【修复】清空所有数据
+    StopScheduler
+    ' 释放所有协程引用
     If Not g_Tasks Is Nothing Then
+        Dim taskId As Variant
+        Dim task As TaskUnit
+        For Each taskId In g_Tasks.Keys
+            Set task = g_Tasks(taskId)
+            If task.taskCoRef <> 0 Then
+                luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+            End If
+        Next
+        ' 清空所有数据
         g_Tasks.RemoveAll
     End If
     Set g_TaskQueue = New Collection
-
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
 End Sub
 

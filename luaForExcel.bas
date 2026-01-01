@@ -38,6 +38,8 @@ Option Explicit
     Private Declare PtrSafe Function lua_resume Lib "lua54.dll" (ByVal L As LongPtr, ByVal from As LongPtr, ByVal narg As Long, ByVal nres As LongPtr) As Long
     Private Declare PtrSafe Function lua_status Lib "lua54.dll" (ByVal L As LongPtr) As Long
     Private Declare PtrSafe Sub lua_xmove Lib "lua54.dll" (ByVal fromL As LongPtr, ByVal toL As LongPtr, ByVal n As Long)
+    Private Declare PtrSafe Function luaL_ref Lib "lua54.dll" (ByVal L As LongPtr, ByVal t As Long) As Long
+    Private Declare PtrSafe Sub luaL_unref Lib "lua54.dll" (ByVal L As LongPtr, ByVal t As Long, ByVal ref As Long)
     ' 系统 API
     Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As LongPtr)
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
@@ -89,6 +91,8 @@ Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默�
 Private Const CFS_DEFAULT_WEIGHT As Double = 1024
 Private Const CFS_TARGET_LATENCY As Double = 100    ' ms
 Private Const CFS_MIN_GRANULARITY As Double = 10    ' ms
+
+Private Const LUA_REGISTRYINDEX As Long = -1001000
 ' ===== 性能统计全局变量 =====
 Private Type SchedulerStats
     TotalTime As Double      ' 调度器总运行时间(ms)
@@ -958,18 +962,27 @@ Public Sub StartLuaCoroutine(taskId As String)
         Exit Sub
     End If
 
+    ' === 修复：创建协程并锚定到注册表 ===
     Dim coThread As LongPtr
-    coThread = lua_newthread(g_LuaState)
+    coThread = lua_newthread(g_LuaState)  ' 协程在主栈顶 [-1]
     If coThread = 0 Then
         task.taskStatus = "error"
         task.taskError = "无法创建协程线程"
         Exit Sub
     End If
+    
+    ' 锚定协程到注册表（防止 GC），同时从主栈弹出
+    task.taskCoRef = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
     task.taskCoThread = coThread
 
+    ' 获取函数并移动到协程栈
     lua_getglobal g_LuaState, task.taskFunc
 
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
+        ' === 修复：出错时释放协程引用 ===
+        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+        task.taskCoRef = 0
+        task.taskCoThread = 0
         task.taskStatus = "error"
         task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         lua_settop g_LuaState, 0
@@ -999,7 +1012,13 @@ Public Sub StartLuaCoroutine(taskId As String)
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
 
     HandleCoroutineResult task, result, CLng(nres)
-    If task.taskStatus = "yielded" Then
+    
+    ' === 修复：如果任务直接完成或出错，释放协程引用 ===
+    If task.taskStatus = "done" Or task.taskStatus = "error" Then
+        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+        task.taskCoRef = 0
+        task.taskCoThread = 0
+    ElseIf task.taskStatus = "yielded" Then
         With g_Tasks(taskId)
             .CFS_vruntime = g_CFS_minVruntime
             .CFS_lastScheduled = GetTickCount()
@@ -1010,6 +1029,12 @@ Public Sub StartLuaCoroutine(taskId As String)
 
     Exit Sub
 ErrorHandler:
+    ' === 修复：异常时也要释放协程 ===
+    If task.taskCoRef <> 0 Then
+        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+        task.taskCoRef = 0
+        task.taskCoThread = 0
+    End If
     task.taskStatus = "error"
     task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
     MsgBox "启动协程失败: " & Err.Description, vbCritical
@@ -1309,14 +1334,19 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-
     ' 处理结果
     HandleCoroutineResult task, result, CLng(nres)
-
+    ' === 新增：任务终态时释放协程引用 ===
+    If task.taskStatus = "done" Or task.taskStatus = "error" Then
+        If task.taskCoRef <> 0 Then
+            luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+            task.taskCoRef = 0
+            task.taskCoThread = 0
+        End If
+    End If
     ' 性能计时结束并统计
     Dim taskElapsed As Double
     taskElapsed = GetTickCount() - taskStart
-
     ' 更新任务统计
     task.taskLastTime = taskElapsed
     task.taskTotalTime = task.taskTotalTime + taskElapsed
@@ -1327,11 +1357,6 @@ ErrorHandler:
     errorDetails = "Resume错误:" & vbCrLf
     errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
     errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
-
-    If Err.Erl <> 0 Then
-        errorDetails = errorDetails & "行号: " & Err.Erl & vbCrLf
-    End If
-
     errorDetails = errorDetails & "协程线程: " & coThread & vbCrLf
     errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
     errorDetails = errorDetails & "参数数量: " & nargs
@@ -1343,6 +1368,12 @@ ErrorHandler:
     Debug.Print "=== Resume 错误详情 ==="
     Debug.Print errorDetails
     Debug.Print "======================="
+    ' === 新增：异常时释放协程 ===
+    If task.taskCoRef <> 0 Then
+        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+        task.taskCoRef = 0
+        task.taskCoThread = 0
+    End If
 End Sub
 
 ' 手动停止调度器
