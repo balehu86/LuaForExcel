@@ -72,8 +72,6 @@ Private Sub App_WorkbookBeforeClose(ByVal Wb As Workbook, Cancel As Boolean)
 
     ' CleanupWorkbookTasks 内部已调用 CleanupWorkbookWatches
     CleanupWorkbookTasks Wb.Name
-    If Not g_WatchesByTask Is Nothing Then g_WatchesByTask.RemoveAll
-    Set g_WatchesByTask = Nothing
 
     If Not g_Workbooks Is Nothing Then
         If g_Workbooks.Exists(Wb.Name) Then

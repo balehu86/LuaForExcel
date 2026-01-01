@@ -50,33 +50,43 @@ End Function
 Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
     If g_Tasks Is Nothing Then Exit Sub
-    ' 收集要删除的任务ID（不能在遍历时删除）
+    
+    ' 收集要删除的任务ID
     Dim toRemove As Collection
     Set toRemove = New Collection
     Dim taskId As Variant
+    
     For Each taskId In g_Tasks.Keys
-        If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then toRemove.Add CStr(taskId)
+        If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
+            toRemove.Add CStr(taskId)
+        End If
     Next
-    ' 在删除任务时，也清理其监控索引
+    
+    ' 删除任务
     Dim task As TaskUnit
     For Each taskId In toRemove
-        task = g_Tasks(CStr(taskId))
-        ' 释放协程引用
-        If task.taskCoRef <> 0 Then
-            luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-            task.taskCoRef = 0
-            task.taskCoThread = 0
+        Set task = g_Tasks(CStr(taskId))
+        
+        ' 使用统一的状态设置（会自动释放协程和从队列移除）
+        SetTaskStatus task, "terminated"
+        
+        ' 清理监控索引
+        If g_WatchesByTask.Exists(CStr(taskId)) Then
+            g_WatchesByTask.Remove CStr(taskId)
         End If
-        CollectionRemove g_TaskQueue, CStr(taskId)
-        ' 清理该任务的监控索引
-        If g_WatchesByTask.Exists(CStr(taskId)) Then g_WatchesByTask.Remove CStr(taskId)
+        
+        ' 释放并移除
+        Set g_Tasks(CStr(taskId)) = Nothing
         g_Tasks.Remove CStr(taskId)
     Next
+    
     ' 清理工作簿的监控
     CleanupWorkbookWatches wbName
+    
     ' 清理工作簿记录
-    If g_Workbooks.Exists(wbName) Then g_Workbooks.Remove wbName
-
+    If g_Workbooks.Exists(wbName) Then
+        g_Workbooks.Remove wbName
+    End If
 End Sub
 
 ' 辅助函数：清理特定工作簿的监视点
@@ -293,44 +303,33 @@ Private Sub LuaTaskMenu_TerminateTask()
         Exit Sub
     End If
 
-    ' 确认对话框
     Dim result As VbMsgBoxResult
     result = MsgBox("确定要终止并删除任务 " & taskId & " 吗？", _
                     vbQuestion + vbYesNo, "确认终止")
     If result = vbNo Then Exit Sub
 
-    ' === 新增：释放协程引用 ===
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
-    If task.taskCoRef <> 0 Then
-        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-        task.taskCoRef = 0
-        task.taskCoThread = 0
+    
+    ' 使用统一的状态设置（会自动释放协程）
+    SetTaskStatus task, "terminated"
+
+    ' 清理监控索引
+    If g_WatchesByTask.Exists(taskId) Then
+        Dim watchCells As Collection
+        Set watchCells = g_WatchesByTask(taskId)
+        Dim wc As Variant
+        For Each wc In watchCells
+            If g_Watches.Exists(CStr(wc)) Then
+                g_Watches.Remove CStr(wc)
+            End If
+        Next wc
+        g_WatchesByTask.Remove taskId
     End If
 
-    ' 从队列移除
-    If Not g_TaskQueue Is Nothing Then
-        CollectionRemove g_TaskQueue, taskId
-        ' 从队列移除
-        CollectionRemove g_TaskQueue, taskId
-        ' 清理该任务的所有监控索引
-        If g_WatchesByTask.Exists(taskId) Then
-            Dim watchCells As Collection
-            Set watchCells = g_WatchesByTask(taskId)
-            Dim wc As Variant
-            For Each wc In watchCells
-                If g_Watches.Exists(CStr(wc)) Then
-                    g_Watches.Remove CStr(wc)
-                End If
-            Next wc
-            g_WatchesByTask.Remove taskId
-        End If
-        ' 释放 TaskUnit 对象引用
-        Set g_Tasks(taskId) = Nothing
-    End If
-
+    ' 释放 TaskUnit 并从字典移除
+    Set g_Tasks(taskId) = Nothing
     g_Tasks.Remove taskId
-    g_StateDirty = True
 
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
@@ -585,15 +584,17 @@ End Sub
 ' 清理所有已完成或错误的任务
 Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     On Error Resume Next
+
     If g_Tasks Is Nothing Then
         InitCoroutineSystem
     End If
+
     If g_Tasks.Count = 0 Then
         MsgBox "当前没有任务需要清理。", vbInformation, "清理任务"
         Exit Sub
     End If
 
-    ' 收集需要清理的任务ID（不能在遍历时删除）
+    ' 收集需要清理的任务ID
     Dim toRemove As Collection
     Set toRemove = New Collection
 
@@ -606,17 +607,21 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
         End If
     Next
 
-    ' 实际删除任务
+    ' 删除任务
     Dim removeId As Variant
     Dim count As Integer
     count = 0
+    Dim task As TaskUnit
+
     For Each removeId In toRemove
-        ' 释放协程引用（虽然终态时应该已释放，但双重保险）
-        If g_Tasks(CStr(removeId)).taskCoRef <> 0 Then
-            luaL_unref g_LuaState, LUA_REGISTRYINDEX, g_Tasks(CStr(removeId)).taskCoRef
-        End If
+        Set task = g_Tasks(CStr(removeId))
+
+        ' 确保协程已释放（终态应该已释放，双重保险）
+        ReleaseTaskCoroutine task
+
         ' 从队列移除
         CollectionRemove g_TaskQueue, CStr(removeId)
+
         ' 清理监控索引
         If g_WatchesByTask.Exists(CStr(removeId)) Then
             Dim watchCells As Collection
@@ -629,7 +634,8 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
             Next wc
             g_WatchesByTask.Remove CStr(removeId)
         End If
-        ' 释放对象引用
+
+        ' 释放并移除
         Set g_Tasks(CStr(removeId)) = Nothing
         g_Tasks.Remove CStr(removeId)
         count = count + 1

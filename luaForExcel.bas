@@ -944,6 +944,7 @@ End Sub
 ' 启动协程
 Public Sub StartLuaCoroutine(taskId As String)
     On Error GoTo ErrorHandler
+
     If Not InitLuaState() Then
         MsgBox "Lua状态初始化失败", vbCritical
         Exit Sub
@@ -958,20 +959,23 @@ Public Sub StartLuaCoroutine(taskId As String)
     Set task = g_Tasks(taskId)
 
     If task.taskStatus <> "defined" Then
-        MsgBox "错误：任务已启动或已完成", vbExclamation
+        MsgBox "错误：任务已启动或已完成，当前状态: " & task.taskStatus, vbExclamation
         Exit Sub
     End If
 
-    ' === 修复：创建协程并锚定到注册表 ===
+    ' 确保之前的协程已释放（防御性编程）
+    ReleaseTaskCoroutine task
+
+    ' 创建协程并锚定到注册表
     Dim coThread As LongPtr
-    coThread = lua_newthread(g_LuaState)  ' 协程在主栈顶 [-1]
+    coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
-        task.taskStatus = "error"
+        SetTaskStatus task, "error"
         task.taskError = "无法创建协程线程"
         Exit Sub
     End If
-    
-    ' 锚定协程到注册表（防止 GC），同时从主栈弹出
+
+    ' 锚定协程
     task.taskCoRef = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
     task.taskCoThread = coThread
 
@@ -979,11 +983,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     lua_getglobal g_LuaState, task.taskFunc
 
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
-        ' === 修复：出错时释放协程引用 ===
-        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-        task.taskCoRef = 0
-        task.taskCoThread = 0
-        task.taskStatus = "error"
+        SetTaskStatus task, "error"
         task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         lua_settop g_LuaState, 0
         Exit Sub
@@ -1008,34 +1008,23 @@ Public Sub StartLuaCoroutine(taskId As String)
 
     Dim nres As LongPtr
     Dim result As Long
-
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
 
+    ' 处理结果（内部会调用 SetTaskStatus）
     HandleCoroutineResult task, result, CLng(nres)
-    
-    ' === 修复：如果任务直接完成或出错，释放协程引用 ===
-    If task.taskStatus = "done" Or task.taskStatus = "error" Then
-        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-        task.taskCoRef = 0
-        task.taskCoThread = 0
-    ElseIf task.taskStatus = "yielded" Then
-        With g_Tasks(taskId)
-            .CFS_vruntime = g_CFS_minVruntime
-            .CFS_lastScheduled = GetTickCount()
-        End With
+
+    ' 如果是 yielded 状态，加入队列
+    If task.taskStatus = "yielded" Then
+        task.CFS_vruntime = g_CFS_minVruntime
+        task.CFS_lastScheduled = GetTickCount()
         CollectionAdd g_TaskQueue, taskId
         StartSchedulerIfNeeded
     End If
 
     Exit Sub
+
 ErrorHandler:
-    ' === 修复：异常时也要释放协程 ===
-    If task.taskCoRef <> 0 Then
-        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-        task.taskCoRef = 0
-        task.taskCoThread = 0
-    End If
-    task.taskStatus = "error"
+    SetTaskStatus task, "error"
     task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
     MsgBox "启动协程失败: " & Err.Description, vbCritical
 End Sub
@@ -1229,35 +1218,34 @@ Private Sub ResumeCoroutine(task As TaskUnit)
         Exit Sub
     End If
 
-    ' 性能计时开始
+    ' 检查协程是否有效
+    If Not task.HasValidCoroutine() Then
+        SetTaskStatus task, "error"
+        task.taskError = "协程引用无效"
+        Exit Sub
+    End If
+
     Dim taskStart As Long
     taskStart = GetTickCount()
 
-    ' 检查协程线程是否有效
     Dim coThread As LongPtr
     coThread = task.taskCoThread
-
-    If coThread = 0 Then
-        task.taskStatus = "error"
-        task.taskError = "协程线程无效(coThread=0)"
-        Exit Sub
-    End If
 
     ' 检查协程状态
     Dim coStatus As Long
     coStatus = lua_status(coThread)
     If coStatus <> LUA_OK And coStatus <> LUA_YIELD Then
-        task.taskStatus = "error"
-        task.taskError = "协程状态异常: " & coStatus & " (期望: " & LUA_YIELD & ")"
+        SetTaskStatus task, "error"
+        task.taskError = "协程状态异常: " & coStatus
         Exit Sub
     End If
 
     ' 检查工作簿是否仍然打开
     Dim wbName As String
     wbName = task.taskWorkbook
+    Dim wb As Workbook
 
     If Not IsEmpty(wbName) And wbName <> vbNullString And wbName <> "" Then
-        Dim wb As Workbook
         Dim wbExists As Boolean
         wbExists = False
 
@@ -1267,7 +1255,7 @@ Private Sub ResumeCoroutine(task As TaskUnit)
         On Error GoTo ErrorHandler
 
         If Not wbExists Then
-            task.taskStatus = "error"
+            SetTaskStatus task, "error"
             task.taskError = "工作簿已关闭: " & wbName
             Exit Sub
         End If
@@ -1292,12 +1280,10 @@ Private Sub ResumeCoroutine(task As TaskUnit)
             Dim param As Variant
             param = resumeSpec(i)
 
-            ' 处理字符串参数(可能是单元格地址)
             If VarType(param) = vbString Then
                 Dim paramStr As String
                 paramStr = Trim(CStr(param))
 
-                ' 尝试作为单元格地址解析
                 If Len(paramStr) > 0 And Not wb Is Nothing Then
                     On Error Resume Next
                     Dim rng As Range
@@ -1305,24 +1291,20 @@ Private Sub ResumeCoroutine(task As TaskUnit)
                     Set rng = wb.Range(paramStr)
 
                     If Err.Number = 0 And Not rng Is Nothing Then
-                        ' 成功解析为单元格,传递值
                         If rng.Cells.Count = 1 Then
                             PushValue coThread, rng.Value
                         Else
                             PushValue coThread, rng.Value
                         End If
                     Else
-                        ' 不是有效的单元格地址,作为普通字符串
                         PushValue coThread, paramStr
                     End If
                     Err.Clear
                     On Error GoTo ErrorHandler
                 Else
-                    ' 空字符串或无工作簿
                     PushValue coThread, paramStr
                 End If
             Else
-                ' 非字符串参数直接传递
                 PushValue coThread, param
             End If
 
@@ -1334,46 +1316,27 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-    ' 处理结果
+    
+    ' 处理结果（内部会调用 SetTaskStatus 处理终态）
     HandleCoroutineResult task, result, CLng(nres)
-    ' === 新增：任务终态时释放协程引用 ===
-    If task.taskStatus = "done" Or task.taskStatus = "error" Then
-        If task.taskCoRef <> 0 Then
-            luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-            task.taskCoRef = 0
-            task.taskCoThread = 0
-        End If
-    End If
-    ' 性能计时结束并统计
+
+    ' 性能统计
     Dim taskElapsed As Double
     taskElapsed = GetTickCount() - taskStart
-    ' 更新任务统计
     task.taskLastTime = taskElapsed
     task.taskTotalTime = task.taskTotalTime + taskElapsed
     task.taskTickCount = task.taskTickCount + 1
+    
     Exit Sub
+
 ErrorHandler:
     Dim errorDetails As String
-    errorDetails = "Resume错误:" & vbCrLf
-    errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
-    errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
-    errorDetails = errorDetails & "协程线程: " & coThread & vbCrLf
-    errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
-    errorDetails = errorDetails & "参数数量: " & nargs
+    errorDetails = "Resume错误: " & Err.Description & " (行 " & Erl & ")"
 
-    task.taskStatus = "error"
+    SetTaskStatus task, "error"
     task.taskError = errorDetails
 
-    ' 输出到立即窗口便于调试
-    Debug.Print "=== Resume 错误详情 ==="
-    Debug.Print errorDetails
-    Debug.Print "======================="
-    ' === 新增：异常时释放协程 ===
-    If task.taskCoRef <> 0 Then
-        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
-        task.taskCoRef = 0
-        task.taskCoThread = 0
-    End If
+    Debug.Print "=== Resume 错误 ===" & vbCrLf & errorDetails
 End Sub
 
 ' 手动停止调度器
@@ -1492,55 +1455,48 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
     Dim stackTop As Long
     stackTop = lua_gettop(coThread)
 
-    Dim taskId As String
-    taskId = "Task_" & CStr(task.taskId)
-
     Select Case result
         Case LUA_OK
-            task.taskStatus = "done"
-            task.taskProgress = 100
-            g_StateDirty = True
-            MarkWatchesDirty taskId  ' 只标记，不刷新
-
+            ' 正常完成
             If nres > 0 And stackTop > 0 Then
                 Dim retData As Variant
                 retData = GetValue(coThread, -1)
                 ParseYieldReturn task, retData, True
             End If
+            SetTaskStatus task, "done"
+            task.taskProgress = 100
 
         Case LUA_YIELD
+            ' 挂起
             If nres > 0 And stackTop > 0 Then
                 Dim yieldData As Variant
                 yieldData = GetValue(coThread, -1)
                 ParseYieldReturn task, yieldData, False
             End If
+            ' 只有未被 ParseYieldReturn 设置为终态时才设为 yielded
             If task.taskStatus <> "done" And task.taskStatus <> "error" Then
-                task.taskStatus = "yielded"
+                SetTaskStatus task, "yielded"
             End If
-            g_StateDirty = True
-            MarkWatchesDirty taskId  ' 只标记，不刷新
 
         Case Else
-            task.taskStatus = "error"
-            g_StateDirty = True
-            MarkWatchesDirty taskId  ' 只标记，不刷新
-
+            ' 错误
             If nres > 0 And stackTop > 0 Then
                 task.taskError = GetStringFromState(coThread, -1)
             Else
                 task.taskError = "协程错误: 代码 " & result
             End If
+            SetTaskStatus task, "error"
     End Select
 
     lua_settop coThread, stackTop
     Exit Sub
 
 ErrorHandler:
-    task.taskStatus = "error"
     task.taskError = "处理结果错误: " & Err.Description
-    MarkWatchesDirty taskId
+    SetTaskStatus task, "error"
     If coThread <> 0 Then lua_settop coThread, stackTop
 End Sub
+
 
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
@@ -1895,3 +1851,59 @@ Private Sub CollectionAdd(col As Collection, key As String)
     End If
 End Sub
 
+' 公开的协程释放函数（供 TaskUnit 类调用）
+Public Sub UnrefCoroutine(ByVal L As LongPtr, ByVal ref As Long)
+    On Error Resume Next
+    If L <> 0 And ref <> 0 Then
+        luaL_unref L, LUA_REGISTRYINDEX, ref
+    End If
+End Sub
+' 统一释放任务的协程资源
+Private Sub ReleaseTaskCoroutine(task As TaskUnit)
+    On Error Resume Next
+    If task Is Nothing Then Exit Sub
+    If g_LuaState = 0 Then Exit Sub
+
+    If task.taskCoRef <> 0 Then
+        luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+        task.taskCoRef = 0
+        task.taskCoThread = 0
+        Debug.Print "释放协程: Task_" & task.taskId & ", Ref=" & task.taskCoRef
+    End If
+End Sub
+' 统一设置任务状态并处理副作用
+Private Sub SetTaskStatus(task As TaskUnit, newStatus As String)
+    If task Is Nothing Then Exit Sub
+
+    Dim taskId As String
+    taskId = "Task_" & task.taskId
+    Dim oldStatus As String
+    oldStatus = task.taskStatus
+
+    ' 更新状态
+    task.taskStatus = newStatus
+
+    ' 终态处理：释放协程
+    Select Case newStatus
+        Case "done", "error", "terminated"
+            ReleaseTaskCoroutine task
+            CollectionRemove g_TaskQueue, taskId
+
+        Case "paused"
+            ' 暂停不释放协程，但从队列移除
+            CollectionRemove g_TaskQueue, taskId
+
+        Case "defined"
+            ' 重置状态，确保协程已释放
+            ReleaseTaskCoroutine task
+            CollectionRemove g_TaskQueue, taskId
+    End Select
+
+    ' 标记监控为脏
+    If oldStatus <> newStatus Then
+        g_StateDirty = True
+        MarkWatchesDirty taskId
+    End If
+
+    Debug.Print "任务状态变更: " & taskId & " [" & oldStatus & "] -> [" & newStatus & "]"
+End Sub
