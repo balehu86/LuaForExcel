@@ -49,18 +49,31 @@ End Function
 ' 辅助函数：清理特定工作簿的任务
 Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
+
     If g_Tasks Is Nothing Then Exit Sub
-    If Not g_Workbooks.Exists(wbName) Then Exit Sub
+
+    ' 收集要删除的任务ID（不能在遍历时删除）
+    Dim toRemove As Collection
+    Set toRemove = New Collection
 
     Dim taskId As Variant
     For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
-        ' 从队列中移除
-        CollectionRemove g_TaskQueue, CStr(taskId)
+            toRemove.Add CStr(taskId)
         End If
     Next
+
+    ' 删除任务
+    Dim removeId As Variant
+    For Each removeId In toRemove
+        CollectionRemove g_TaskQueue, CStr(removeId)
+        g_Tasks.Remove CStr(removeId)
+    Next
+
     ' 清理工作簿记录
-    g_Workbooks(wbName).Tasks.RemoveAll
+    If g_Workbooks.Exists(wbName) Then
+        g_Workbooks.Remove wbName
+    End If
 End Sub
 ' ============================================
 ' 第七部分：可视化操作函数
@@ -146,7 +159,8 @@ Public Sub DisableLuaTaskMenu()
         If ctrl.Tag = "LuaTaskMenu" Then ctrl.Delete
         If ctrl.Tag = "LuaSchedulerMenu" Then ctrl.Delete
         If ctrl.Tag = "LuaConfigMenu" Then ctrl.Delete
-        If ctrl.Tag = "LuaPerfMenu" Then ctrl.Delete  ' 新增
+        If ctrl.Tag = "LuaDebugMenu" Then ctrl.Delete
+        If ctrl.Tag = "LuaPerfMenu" Then ctrl.Delete
     Next
 End Sub
 
@@ -434,7 +448,7 @@ Private Sub LuaSchedulerMenu_StopScheduler()
 End Sub
 
 ' 启动本工作簿的所有defined任务
-Private Sub LuaTaskMenu_StartAllWorkbookTasks()
+Private Sub LuaSchedulerMenu_StartAllWorkbookTasks()
     On Error Resume Next
 
     ' 获取当前工作簿名称
@@ -487,25 +501,25 @@ End Sub
 
 ' 批量启动所有 defined 状态的任务
 Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
-    Dim task As TaskUnit
     Dim taskId As Variant
     Dim count As Integer
     count = 0
-    If g_Tasks Is Nothing Then
-        InitCoroutineSystem
+
+    If Not InitLuaState() Then
+        MsgBox "Lua状态初始化失败", vbCritical
+        Exit Sub
     End If
     If g_Tasks.Count = 0 Then
         MsgBox "当前没有任何任务。", vbInformation, "提示"
         Exit Sub
     End If
+
     For Each taskId In g_Tasks.Keys
-        Set task = g_Tasks(taskId)
-        If task.taskStatus = "defined" Then
-            StartLuaCoroutine "Task_" & CStr(task.taskId)
+        If g_Tasks(taskId).taskStatus = "defined" Then
+            StartLuaCoroutine CStr(taskId)
             count = count + 1
         End If
     Next
-    StartSchedulerIfNeeded
 
     MsgBox "已启动 " & count & " 个任务", vbInformation
 End Sub
@@ -541,10 +555,10 @@ End Sub
 
 ' 清理特定工作簿的任务
 Private Sub LuaSchedulerMenu_CleanupWorkbookTasks()
-    Dim callerWb As Workbook
-    Set callerWb = Application.Caller.Worksheet.Parent
-    CleanupWorkbookTasks callerWb.Name
-    MsgBox "已清理工作簿 " & callerWb.Name & " 的任务。", vbInformation
+    Dim wb As String
+    wb = Selection.Worksheet.Parent.Name
+    CleanupWorkbookTasks wb
+    MsgBox "已清理工作簿 " & wb & " 的任务。", vbInformation
 End Sub
 
 ' 清空所有任务队列
@@ -579,7 +593,9 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     ' 按工作簿分组统计
     Dim taskId As Variant
     Dim task As TaskUnit
-    Dim definedCount As Integer, runningCount As Integer, yieldedCount As Integer, doneCount As Integer, errorCount As Integer, pausedCount As Integer
+    Dim definedCount As Integer, runningCount As Integer, yieldedCount As Integer
+    Dim doneCount As Integer, errorCount As Integer, pausedCount As Integer
+    
     ' 统计各状态任务数
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
@@ -593,21 +609,32 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         End Select
     Next
 
+    ' 按工作簿统计任务数
+    Dim wbTaskCount As Object
+    Set wbTaskCount = CreateObject("Scripting.Dictionary")
+    
+    For Each taskId In g_Tasks.Keys
+        Set task = g_Tasks(taskId)
+        If wbTaskCount.Exists(task.taskWorkbook) Then
+            wbTaskCount(task.taskWorkbook) = wbTaskCount(task.taskWorkbook) + 1
+        Else
+            wbTaskCount.Add task.taskWorkbook, 1
+        End If
+    Next
 
     ' 构建消息
     Dim msg As String
     msg = "========================================" & vbCrLf
-    msg = msg & "  Lua 协程任务管理器（单实例）" & vbCrLf
+    msg = msg & "  Lua 协程任务管理器" & vbCrLf
     msg = msg & "========================================" & vbCrLf & vbCrLf
     msg = msg & "任务总数: " & g_Tasks.Count & vbCrLf
-
     msg = msg & "活跃队列: " & g_TaskQueue.Count & vbCrLf
     msg = msg & "调度器: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
     msg = msg & vbCrLf & "按工作簿分组:" & vbCrLf
 
     Dim wbName As Variant
-    For Each wbName In g_Workbooks.Keys
-        msg = msg & "  [" & wbName & "]: " & g_Workbooks(wbName).Tasks.Count & " 个任务" & vbCrLf
+    For Each wbName In wbTaskCount.Keys
+        msg = msg & "  [" & wbName & "]: " & wbTaskCount(wbName) & " 个任务" & vbCrLf
     Next
 
     msg = msg & "----------------------------------------" & vbCrLf
@@ -626,6 +653,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         msg = msg & "【任务 #" & task.taskId & "】" & vbCrLf
         msg = msg & "  ID: " & CStr(taskId) & vbCrLf
         msg = msg & "  函数: " & task.taskFunc & vbCrLf
+        msg = msg & "  工作簿: " & task.taskWorkbook & vbCrLf
         msg = msg & "  单元格: " & task.taskCell & vbCrLf
         msg = msg & "  状态: " & task.taskStatus & vbCrLf
         msg = msg & "  进度: " & Format(task.taskProgress, "0.0") & "%" & vbCrLf
@@ -652,12 +680,11 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         msg = msg & "----------------------------------------" & vbCrLf
     Next
 
-    ' 显示消息框
     MsgBox msg, vbInformation, "Lua 协程任务列表 (" & g_Tasks.Count & " 个任务)"
-
     Exit Sub
+    
 ErrorHandler:
-    MsgBox "显示任务信息时出错: " & Err.Description & msg, vbCritical, "错误"
+    MsgBox "显示任务信息时出错: " & Err.Description, vbCritical, "错误"
 End Sub
 
 ' ====插件设置功能====
@@ -848,7 +875,6 @@ Private Sub LuaPerfMenu_ShowWorkbookStats()
         wbNum = wbNum + 1
         msg = msg & "【工作簿 #" & wbNum & "】" & vbCrLf
         msg = msg & "  名称: " & wbName & vbCrLf
-        msg = msg & "  任务数: " & wb.Tasks.Count & vbCrLf
         msg = msg & "  总调度次数: " & wb.wbTickCount & vbCrLf
         msg = msg & "  总运行时间: " & Format(wb.wbTotalTime, "0.00") & " ms" & vbCrLf
         msg = msg & "  平均时间: " & Format(wb.wbTotalTime / wb.wbTickCount, "0.00") & " ms" & vbCrLf

@@ -530,7 +530,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .CFS_vruntime = g_CFS_minVruntime  ' 从当前最小值开始
     End With
     g_Tasks.Add taskId, task
-    g_Workbooks(wbName).AddTask taskId, task
+    ' g_Workbooks(wbName).AddTask taskId, task
 
     LuaTask = taskId
     g_NextTaskId = g_NextTaskId + 1
@@ -540,12 +540,6 @@ ErrorHandler:
     errorDetails = "Task错误:" & vbCrLf
     errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
     errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
-    ' If Err.Erl <> 0 Then
-    '     errorDetails = errorDetails & "行号: " & Err.Erl & vbCrLf
-    ' End If
-    ' LuaTask = "#ERROR: " & errorDetails
-    ' 'errorDetails = errorDetails & "工作簿: " & wbName & vbCrLf
-    ' 'errorDetails = errorDetails & "对比名称: " & g_Workbooks(wbName).Name & vbCrLf
     ' ' 输出到立即窗口便于调试
     Debug.Print "=== Task错误详情 ==="
     Debug.Print errorDetails
@@ -605,8 +599,9 @@ End Function
 ' 启动协程
 Public Sub StartLuaCoroutine(taskId As String)
     On Error GoTo ErrorHandler
-    If g_Tasks Is Nothing Then
-        InitCoroutineSystem
+    If Not InitLuaState() Then
+        MsgBox "Lua状态初始化失败", vbCritical
+        Exit Sub
     End If
 
     If Not g_Tasks.Exists(taskId) Then
@@ -619,10 +614,6 @@ Public Sub StartLuaCoroutine(taskId As String)
 
     If task.taskStatus <> "defined" Then
         MsgBox "错误：任务已启动或已完成", vbExclamation
-        Exit Sub
-    End If
-    If g_LuaState = 0 Then
-        MsgBox "Lua主状态未初始化", vbCritical
         Exit Sub
     End If
 
@@ -673,6 +664,7 @@ Public Sub StartLuaCoroutine(taskId As String)
             .CFS_lastScheduled = GetTickCount()
         End With
         CollectionAdd g_TaskQueue, taskId
+        StartSchedulerIfNeeded
     End If
 
     Exit Sub
@@ -685,7 +677,6 @@ End Sub
 ' 启动调度器
 Private Sub StartSchedulerIfNeeded()
     If g_SchedulerRunning Then Exit Sub
-    If g_TaskQueue Is Nothing Then Exit Sub
     If g_TaskQueue.Count = 0 Then Exit Sub
     g_SchedulerRunning = True
     g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
@@ -696,7 +687,7 @@ End Sub
 Public Sub SchedulerTick()
     On Error Resume Next
     If Not g_SchedulerRunning Then Exit Sub
-    If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
+    If g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
         Exit Sub
     End If
