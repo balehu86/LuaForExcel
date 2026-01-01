@@ -606,10 +606,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
                          Optional targetCell As Variant, _
                          Optional direction As Integer = 0) As Variant
     On Error GoTo ErrorHandler
-    
-    ' 【关键】不使用 Volatile，此函数只负责注册监控
-    ' 实际刷新由调度器在周期末尾统一处理
-    
+
     If Not InitLuaState() Then
         LuaWatch = CVErr(xlErrValue)
         Exit Function
