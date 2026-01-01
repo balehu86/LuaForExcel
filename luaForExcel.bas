@@ -1303,9 +1303,12 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-    
+
     ' 处理结果（内部会调用 SetTaskStatus 处理终态）
     HandleCoroutineResult task, result, CLng(nres)
+    ' 【修复】每次 Resume 后都标记该任务的监控为脏
+    MarkWatchesDirty "Task_" & task.taskId
+    g_StateDirty = True
 
     ' 性能统计
     Dim taskElapsed As Double
