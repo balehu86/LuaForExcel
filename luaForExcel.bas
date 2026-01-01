@@ -185,14 +185,20 @@ End Sub
 ' 清理 Lua 状态机
 Public Sub CleanupLua()
     If g_Initialized Then
-        g_SchedulerRunning = False
         StopScheduler
 
+        ' 【修复】先释放所有协程
         If Not g_Tasks Is Nothing Then
+            Dim taskId As Variant
+            Dim task As TaskUnit
+            For Each taskId In g_Tasks.Keys
+                Set task = g_Tasks(taskId)
+                ReleaseTaskCoroutine task
+            Next
             g_Tasks.RemoveAll
-            Set g_TaskQueue = New Collection
         End If
 
+        ' 然后关闭 Lua 状态机
         If g_LuaState <> 0 Then
             lua_close g_LuaState
             g_LuaState = 0
@@ -1027,8 +1033,8 @@ End Sub
 
 ' 调度器心跳 - 主入口
 Public Sub SchedulerTick()
-    On Error Resume Next
-    
+    On Error Goto ErrorHandler
+
     If Not g_SchedulerRunning Then Exit Sub
     If g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
@@ -1074,6 +1080,13 @@ Public Sub SchedulerTick()
     Else
         g_SchedulerRunning = False
     End If
+    Exit Sub
+ErrorHandler:
+    ' 确保恢复 Excel 状态
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    Debug.Print "SchedulerTick Error: " & Err.Description
 End Sub
 
 ' CFS 调度核心算法
