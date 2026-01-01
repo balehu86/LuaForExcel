@@ -649,16 +649,16 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         Exit Function
     End If
 
-    ' 计算目标单元格
+    ' 计算目标单元格地址
     Dim targetAddr As String
     Dim targetRange As Range
 
     If IsMissing(targetCell) Or IsEmpty(targetCell) Then
         Select Case direction
-            Case 0: Set targetRange = callerCell.Offset(0, 1)
-            Case 1: Set targetRange = callerCell.Offset(-1, 0)
-            Case 2: Set targetRange = callerCell.Offset(0, -1)
-            Case 3: Set targetRange = callerCell.Offset(1, 0)
+            Case 0: Set targetRange = callerCell.Offset(0, 1)  ' 右
+            Case 1: Set targetRange = callerCell.Offset(-1, 0) ' 上
+            Case 2: Set targetRange = callerCell.Offset(0, -1) ' 左
+            Case 3: Set targetRange = callerCell.Offset(1, 0)  ' 下
             Case Else: Set targetRange = callerCell.Offset(0, 1)
         End Select
         targetAddr = targetRange.Address(External:=True)
@@ -679,32 +679,32 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
 
     ' 【修复】检查是否已存在相同的监控
     Dim watchInfo As WatchInfo
-    Dim isNewWatch As Boolean
     Dim needUpdateIndex As Boolean
-
-    isNewWatch = False
     needUpdateIndex = False
 
     If g_Watches.Exists(callerAddr) Then
-        ' 已存在监控
+        ' 已存在监控：检查参数是否变化
         Set watchInfo = g_Watches(callerAddr)
 
         ' 【修复】检查关键参数是否变化
         Dim paramsChanged As Boolean
         paramsChanged = False
 
+        ' 检查 taskId
         If watchInfo.watchTaskId <> taskId Then
             paramsChanged = True
             needUpdateIndex = True
         End If
+        ' 检查 field
         If watchInfo.watchField <> LCase(Trim(field)) Then
             paramsChanged = True
         End If
+        ' 检查 targetAddr
         If watchInfo.watchTargetCell <> targetAddr Then
             paramsChanged = True
         End If
 
-        ' 【修复】只有参数真的变化时才更新
+        ' 只有参数变化时才更新
         If paramsChanged Then
             ' 更新二级索引（如果 taskId 变化）
             If needUpdateIndex Then
@@ -712,13 +712,14 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
                 AddToWatchesByTask taskId, callerAddr
             End If
 
-            ' 更新监控信息
+            ' 更新监控属性
             With watchInfo
                 .watchTaskId = taskId
                 .watchField = LCase(Trim(field))
                 .watchTargetCell = targetAddr
                 .watchDirection = direction
-                .watchLastValue = Empty  ' 参数变化，需要重新写入
+                ' 参数变化，清空上次值，标记为脏
+                .watchLastValue = Empty
                 .watchDirty = True
             End With
         End If
@@ -726,7 +727,6 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
 
     Else
         ' 新建监控
-        isNewWatch = True
         Set watchInfo = New WatchInfo
 
         With watchInfo
@@ -740,11 +740,13 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
             .watchDirty = True  ' 新监控需要首次写入
         End With
 
+        ' 添加到主索引
         g_Watches.Add callerAddr, watchInfo
+        ' 添加到二级索引
         AddToWatchesByTask taskId, callerAddr
     End If
 
-    ' 返回监控状态描述
+    ' 返回静态描述文本
     LuaWatch = "监控: " & taskId & "." & field & " -> " & targetAddr
 
     Exit Function
