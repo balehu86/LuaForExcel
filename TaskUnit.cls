@@ -17,7 +17,11 @@ Public taskLastTime As Double    ' 任务上次运行时间(ms)
 Public taskTotalTime As Double   ' 任务总运行时间(ms)
 Public taskTickCount As Long     ' 任务调度次数
 
+Public taskVRuntime As Double    ' 虚拟运行时间
+Public taskWeight As Double      ' 权重(默认1.0，值越大获得越多CPU时间)
+
 Private Sub Class_Initialize()
-    ' Debug.Print "[INFO] " & "一个新的TaskInfo实例被创建"
+    taskVRuntime = 0
+    taskWeight = 1#  ' 默认权重
 End Sub
 

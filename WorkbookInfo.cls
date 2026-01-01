@@ -25,7 +25,7 @@ Public Property Get Tasks() As Object
     Set Tasks = m_Tasks
 End Property
 
-Public Sub AddTask(taskId As String, task As TaskInfo)
+Public Sub AddTask(taskId As String, task As TaskUnit)
     m_Tasks.Add taskId, task
 End Sub
 

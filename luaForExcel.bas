@@ -502,7 +502,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     taskId = "Task_" & CStr(g_NextTaskId)
 
     ' 注册任务
-    Dim task As New TaskInfo
+    Dim task As New TaskUnit
     task.taskId = g_NextTaskId
     task.taskFunc = funcName
     task.taskWorkbook = wbName
@@ -558,7 +558,7 @@ Public Function LuaGet(taskId As String, field As String) As Variant
         LuaGet = "#ERROR: 任务不存在"
         Exit Function
     End If
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Set task = g_Tasks(taskId)
 
     Select Case LCase(field)
@@ -603,7 +603,7 @@ Public Sub StartLuaCoroutine(taskId As String)
         Exit Sub
     End If
 
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Set task = g_Tasks(taskId)
 
     If task.taskStatus <> "defined" Then
@@ -734,7 +734,7 @@ Private Sub ScheduleByTask()
 
     Dim executed As Integer
     Dim taskId As Variant
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Dim taskStart As Double, taskElapsed As Double
     Dim currentCursor As Long ' 临时保存当前执行的游标
 
@@ -820,7 +820,7 @@ Private Sub ScheduleByWorkbook()
 
     Dim wbName As Variant
     Dim wb As WorkbookInfo
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Dim taskId As String
     Dim taskStart As Double, taskElapsed As Double
     Dim tickCount As Integer
@@ -917,7 +917,7 @@ ErrorHandler:
 End Sub
 
 ' Resume 协程
-Private Sub ResumeCoroutine(task As TaskInfo)
+Private Sub ResumeCoroutine(task As TaskUnit)
     On Error GoTo ErrorHandler
 
     If task.taskStatus <> "yielded" Then
@@ -1172,7 +1172,7 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
 End Sub
 
 ' 处理协程返回结果
-Private Sub HandleCoroutineResult(task As TaskInfo, result As Long, nres As Long)
+Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long)
     On Error GoTo ErrorHandler
 
     Dim coThread As LongPtr
@@ -1478,7 +1478,7 @@ ErrorHandler:
 End Function
 
 ' 解析 yield/return 字典
-Private Sub ParseYieldReturn(task As TaskInfo, data As Variant, isFinal As Boolean)
+Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boolean)
     On Error Resume Next
     ' 如果不是数组,直接作为value处理
     If Not IsArray(data) Then

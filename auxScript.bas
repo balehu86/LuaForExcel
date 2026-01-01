@@ -186,7 +186,7 @@ Private Sub LuaTaskMenu_PauseTask()
     End If
 
     On Error Resume Next
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Set task = g_Tasks(taskId)
     If Err.Number = 0 Then
         MsgBox "任务已不存在。", vbExclamation
@@ -287,7 +287,7 @@ Private Sub LuaTaskMenu_ShowDetail()
         MsgBox "任务 " & taskId & " 不存在！", vbCritical, "错误"
         Exit Sub
     End If
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Set task = g_Tasks(taskId)
     Dim msg As String
     msg = "========================================" & vbCrLf
@@ -436,7 +436,7 @@ Private Sub LuaTaskMenu_StartAllWorkbookTasks()
     Dim taskId As Variant
     Dim count As Long
     count = 0
-    Dim task As TaskInfo
+    Dim task As TaskUnit
 
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
@@ -462,7 +462,7 @@ End Sub
 
 ' 批量启动所有 defined 状态的任务
 Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Dim taskId As Variant
     Dim count As Integer
     count = 0
@@ -554,7 +554,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
 
     ' 按工作簿分组统计
     Dim taskId As Variant
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     Dim definedCount As Integer, runningCount As Integer, yieldedCount As Integer, doneCount As Integer, errorCount As Integer, pausedCount As Integer
     ' 统计各状态任务数
     For Each taskId In g_Tasks.Keys
@@ -860,7 +860,7 @@ Private Sub LuaPerfMenu_ShowTaskStats()
     Dim taskNum As Long
     taskNum = 0
     Dim taskId As Variant
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     For Each taskId In g_Tasks.Keys
         taskNum = taskNum + 1
         Set task = g_Tasks(taskId)
@@ -946,7 +946,7 @@ Private Sub LuaPerfMenu_ResetStats()
 
     ' 重置任务统计
     Dim taskId As Variant
-    Dim task As TaskInfo
+    Dim task As TaskUnit
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
         task.taskLastTime = 0
