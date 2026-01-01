@@ -66,7 +66,7 @@ Private g_LastModified As Date
 ' ===== 协程全局变量 =====
 Public g_Tasks As Object       ' task Id -> task Instance
 Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
-Private g_TaskQueue As Object     ' taskId -> True (active tasks)
+Private g_TaskQueue As Collection     ' taskId -> True (active tasks)
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
@@ -168,7 +168,7 @@ Private Sub InitCoroutineSystem()
     g_SchedulerStats.StartTime = Now
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
     If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
-    If g_TaskQueue Is Nothing Then Set g_TaskQueue = CreateObject("Scripting.Dictionary")
+    If g_TaskQueue Is Nothing Then Set g_TaskQueue = New Collection
 
     If g_NextTaskId = 0 Then g_NextTaskId = 1
     g_StateDirty = False
@@ -182,7 +182,7 @@ Public Sub CleanupLua()
 
         If Not g_Tasks Is Nothing Then
             g_Tasks.RemoveAll
-            g_TaskQueue.RemoveAll
+            Set g_TaskQueue = New Collection
         End If
 
         If g_LuaState <> 0 Then
@@ -672,7 +672,7 @@ Public Sub StartLuaCoroutine(taskId As String)
             .CFS_vruntime = g_CFS_minVruntime
             .CFS_lastScheduled = GetTickCount()
         End With
-        g_TaskQueue(taskId) = True
+        CollectionAdd g_TaskQueue, taskId
     End If
 
     Exit Sub
@@ -759,7 +759,7 @@ Private Sub ScheduleByCFS()
 
         If Not g_Tasks.Exists(selectedTaskId) Then
             ' 僵尸任务，移除
-            If g_TaskQueue.Exists(selectedTaskId) Then g_TaskQueue.Remove selectedTaskId
+            CollectionRemove g_TaskQueue, selectedTaskId
             GoTo ContinueLoop
         End If
 
@@ -795,7 +795,7 @@ Private Sub ScheduleByCFS()
         ' 5. 终止态清理
         Select Case task.taskStatus
             Case "done", "error", "terminated"
-                If g_TaskQueue.Exists(selectedTaskId) Then g_TaskQueue.Remove selectedTaskId
+                CollectionRemove g_TaskQueue, selectedTaskId
         End Select
 
 ContinueLoop:
@@ -810,7 +810,7 @@ Private Function CFS_PickNextTask() As String
     minVruntime = 1E+308  ' Double 最大值
     selectedId = vbNullString
 
-    For Each taskId In g_TaskQueue.Keys
+    For Each taskId In g_TaskQueue
         If g_Tasks.Exists(CStr(taskId)) Then
             Set task = g_Tasks(CStr(taskId))
 
@@ -845,7 +845,7 @@ Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
         Dim t As TaskUnit
 
         minV = task.CFS_vruntime
-        For Each tid In g_TaskQueue.Keys
+        For Each tid In g_TaskQueue
             If g_Tasks.Exists(CStr(tid)) Then
                 Set t = g_Tasks(CStr(tid))
                 If t.taskStatus = "yielded" And t.CFS_vruntime < minV Then
@@ -1493,3 +1493,27 @@ Private Function FindTaskByCell(taskCell As String) As String
     Next
     FindTaskByCell = vbNullString
 End Function
+
+    ' ===== 辅助函数（新增）=====
+' 检查 Collection 中是否存在指定键
+Private Function CollectionExists(col As Collection, key As String) As Boolean
+    On Error Resume Next
+    Dim dummy As Variant
+    dummy = col(key)
+    CollectionExists = (Err.Number = 0)
+    Err.Clear
+    On Error GoTo 0
+End Function
+' 安全地从 Collection 中移除元素
+Private Sub CollectionRemove(col As Collection, key As String)
+    On Error Resume Next
+    col.Remove key
+    Err.Clear
+    On Error GoTo 0
+End Sub
+' 安全地向 Collection 添加元素（避免重复）
+Private Sub CollectionAdd(col As Collection, key As String)
+    If Not CollectionExists(col, key) Then
+        col.Add key, key  ' item, key
+    End If
+End Sub

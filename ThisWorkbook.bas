@@ -40,7 +40,7 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
     Set App = Nothing
     If Not g_Workbooks Is Nothing Then g_Workbooks.RemoveAll
     If Not g_Tasks Is Nothing Then g_Tasks.RemoveAll
-    If Not g_TaskQueue Is Nothing Then g_TaskQueue.RemoveAll
+    Set g_TaskQueue = Nothing
     ' MsgBox "Excel-Lua 5.4 加载宏已卸载。", vbInformation, "再见"
 End Sub
 

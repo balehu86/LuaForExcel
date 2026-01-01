@@ -56,7 +56,7 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
         ' 从队列中移除
-        If g_TaskQueue.Exists(CStr(taskId)) Then g_TaskQueue.Remove taskId
+        CollectionRemove g_TaskQueue, CStr(taskId)
         End If
     Next
     ' 清理工作簿记录
@@ -187,8 +187,8 @@ Private Sub LuaTaskMenu_PauseTask()
         Exit Sub
     End If
 
-    If g_TaskQueue.Exists(taskId) Then
-        g_TaskQueue(taskId) = False
+    If CollectionExists(g_TaskQueue, taskId) Then
+        CollectionRemove g_TaskQueue, taskId
         g_Tasks(taskId).taskStatus = "paused"
         MsgBox "任务 " & taskId & " 已暂停。" & vbCrLf & _
                "使用 ResumeTask 恢复。", vbInformation, "任务已暂停"
@@ -217,8 +217,8 @@ Private Sub LuaTaskMenu_ResumeTask()
         Exit Sub
     End If
 
-    If Not g_TaskQueue.Exists(taskId) Then
-        g_TaskQueue(taskId) = True
+    If Not CollectionExists(g_TaskQueue, taskId) Then
+        CollectionAdd g_TaskQueue, taskId
         StartSchedulerIfNeeded
         MsgBox "任务 " & taskId & " 已恢复。", vbInformation, "任务已恢复"
     Else
@@ -240,7 +240,7 @@ Private Sub LuaTaskMenu_terminateTask()
 
     ' 从队列移除
     If Not g_TaskQueue Is Nothing Then
-        If g_TaskQueue.Exists(taskId) Then g_TaskQueue.Remove taskId
+        CollectionRemove g_TaskQueue, taskId
     End If
 
     ' 设置终止状态并标记为脏
@@ -346,7 +346,7 @@ Private Sub LuaTaskMenu_ShowDetail()
 
     ' 调度信息
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
-    msg = msg & "在活跃队列中: " & IIf(g_TaskQueue.Exists(taskId), "是", "否") & vbCrLf
+    msg = msg & "在活跃队列中: " & IIf(CollectionExists(g_TaskQueue, taskId), "是", "否") & vbCrLf
     msg = msg & "协程线程: " & IIf(task.taskCoThread = 0, "未创建", "0x" & Hex(task.taskCoThread)) & vbCrLf
 
     MsgBox msg, vbInformation, "任务详情 - " & taskId
@@ -530,7 +530,7 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     For Each taskId In g_Tasks.Keys
         status = g_Tasks(taskId).taskStatus
         If status = "done" Or status = "error" Then
-            g_TaskQueue.Remove taskId
+            CollectionRemove g_TaskQueue, taskId
             count = count +1
         End If
     Next
@@ -561,7 +561,7 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
 
     ' 清空所有 Dictionary
     If Not g_Tasks Is Nothing Then
-        g_TaskQueue.RemoveAll
+        Set g_TaskQueue = New Collection
     End If
 
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
@@ -645,7 +645,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         End If
 
         ' 显示是否在活跃队列中
-        If g_TaskQueue.Exists(CStr(taskId)) Then
+        If CollectionExists(g_TaskQueue, CStr(taskId)) Then
             msg = msg & "  队列: 是" & vbCrLf
         End If
 
