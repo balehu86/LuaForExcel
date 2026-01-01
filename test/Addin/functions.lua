@@ -377,8 +377,6 @@ function progress_simulator(taskCell, maxSteps)
     end
 end
 
-
-
 -- 示例6：数据流处理（持续接收和处理数据）
 function data_stream(taskCell)
     local processedCount = 0
@@ -489,16 +487,15 @@ end
 -- 示例10：多值返回测试
 function multi_value_test(taskCell)
     local count = 0
-    
+
     while true do
         count = count + 1
-        
+
         -- 返回一个大的二维数组
         local data = {}
         for i = 1, 5 do
             data[i] = {count + i - 1, (count + i - 1) * 2, (count + i - 1) * 3}
         end
-        
         coroutine.yield({
             status = "running",
             progress = (count % 100),
@@ -608,8 +605,8 @@ end
 function interactive_coroutine_task(taskCell, initial_value)
     local current_value = initial_value
     local step = 0
-    
-    while step < 5 do
+
+    while true do
         step = step + 1
         
         -- 执行操作
@@ -640,40 +637,6 @@ function interactive_coroutine_task(taskCell, initial_value)
 end
 
 
--- 模板 4: 返回复杂数据的协程函数
-function data_processing_task(taskCell, data_range)
-    -- 处理数组数据
-    local results = {}
-    local total = #data_range
-    
-    for i, item in ipairs(data_range) do
-        -- 处理单个项目
-        local processed = process_item(item)
-        table.insert(results, processed)
-        
-        -- 报告进度
-        coroutine.yield({
-            status = "yielded",
-            progress = (i / total) * 100,
-            message = "已处理 " .. i .. "/" .. total,
-            value = {
-                current_item = item,
-                processed_count = i,
-                latest_result = processed
-            }
-        })
-    end
-    
-    return {
-        progress = 100,
-        message = "数据处理完成",
-        value = {
-            total_processed = #results,
-            results = results,
-            summary = "所有项目已处理"
-        }
-    }
-end
 
 
 -- ============================================
@@ -717,3 +680,417 @@ end
    - g_MaxIterationsPerTick: 每次调度执行的任务数
    - g_SchedulerIntervalSec: 调度间隔（秒）
 ]]
+
+-- ============================================
+-- 协程示例：运行指定次数，处理多种参数类型
+-- ============================================
+
+-- 辅助函数：将值转换为二维表格格式（兼容 Excel 区域）
+local function toRegion(value)
+    if type(value) == "table" then
+        -- 检查是否已经是二维表
+        if type(value[1]) == "table" then
+            return value
+        else
+            -- 一维表转二维（单行）
+            return {value}
+        end
+    else
+        -- 单个值转为 1x1 区域
+        return {{value}}
+    end
+end
+
+-- 辅助函数：合并多个区域到一个结果表
+local function mergeRegions(...)
+    local result = {}
+    local args = {...}
+    
+    for _, region in ipairs(args) do
+        local r = toRegion(region)
+        for _, row in ipairs(r) do
+            table.insert(result, row)
+        end
+    end
+    
+    return result
+end
+
+-- 辅助函数：创建进度报告（字典格式）
+local function makeYieldResult(status, progress, message, value)
+    return {
+        {"status", status or "yielded"},
+        {"progress", progress or 0},
+        {"message", message or ""},
+        {"value", value}
+    }
+end
+
+-- ============================================
+-- 主协程函数：counter_task
+-- 
+-- 启动参数 (startArgs):
+--   1. maxIterations: 最大迭代次数（数字）
+--   2. initialValue: 初始值（数字/单元格值）
+--   3. stepValue: 步进值（数字/单元格值）
+--
+-- Resume 参数 (resumeSpec):
+--   每次 resume 传入的参数，可以是：
+--   - 数字：直接累加
+--   - 单元格值：读取后累加
+--   - 区域值：累加所有值
+-- ============================================
+function counter_task(taskCell, maxIterations, initialValue, stepValue)
+    -- 参数默认值处理
+    maxIterations = tonumber(maxIterations) or 10
+    initialValue = tonumber(initialValue) or 0
+    stepValue = tonumber(stepValue) or 1
+    
+    -- 初始化状态
+    local currentValue = initialValue
+    local iteration = 0
+    local history = {}  -- 记录每次迭代的结果
+    
+    -- 记录初始状态
+    table.insert(history, {
+        iteration = 0,
+        value = currentValue,
+        input = "初始化",
+        timestamp = os.time()
+    })
+    
+    -- 第一次 yield，报告初始状态
+    local resumeInput = coroutine.yield(makeYieldResult(
+        "yielded",
+        0,
+        string.format("初始化完成，将运行 %d 次迭代", maxIterations),
+        toRegion({{"迭代", "当前值", "输入", "累计"}})
+    ))
+    
+    -- 主循环：运行指定次数
+    while iteration < maxIterations do
+        iteration = iteration + 1
+        
+        -- 处理 resume 输入
+        local inputSum = 0
+        local inputDesc = ""
+        
+        if resumeInput ~= nil then
+            if type(resumeInput) == "table" then
+                -- 处理区域/数组输入
+                if type(resumeInput[1]) == "table" then
+                    -- 二维数组
+                    for i, row in ipairs(resumeInput) do
+                        for j, cell in ipairs(row) do
+                            local num = tonumber(cell)
+                            if num then
+                                inputSum = inputSum + num
+                            end
+                        end
+                    end
+                    inputDesc = string.format("区域[%dx%d]", #resumeInput, #resumeInput[1])
+                else
+                    -- 一维数组
+                    for _, v in ipairs(resumeInput) do
+                        local num = tonumber(v)
+                        if num then
+                            inputSum = inputSum + num
+                        end
+                    end
+                    inputDesc = string.format("数组[%d]", #resumeInput)
+                end
+            else
+                -- 单个值
+                inputSum = tonumber(resumeInput) or 0
+                inputDesc = tostring(resumeInput)
+            end
+        else
+            -- 没有输入，使用步进值
+            inputSum = stepValue
+            inputDesc = string.format("步进(%s)", stepValue)
+        end
+        
+        -- 更新当前值
+        currentValue = currentValue + inputSum
+        
+        -- 记录本次迭代
+        table.insert(history, {
+            iteration = iteration,
+            value = currentValue,
+            input = inputDesc,
+            inputSum = inputSum
+        })
+        
+        -- 计算进度
+        local progress = (iteration / maxIterations) * 100
+        
+        -- 构建当前结果区域（显示最近5条记录）
+        local resultRegion = {{"迭代", "当前值", "输入", "增量"}}
+        local startIdx = math.max(1, #history - 4)
+        for i = startIdx, #history do
+            local h = history[i]
+            table.insert(resultRegion, {
+                h.iteration,
+                h.value,
+                h.input,
+                h.inputSum or 0
+            })
+        end
+        
+        -- 检查是否完成
+        if iteration >= maxIterations then
+            -- 最后一次，返回完整结果
+            local finalRegion = {{"迭代", "当前值", "输入", "增量"}}
+            for i = 1, #history do
+                local h = history[i]
+                table.insert(finalRegion, {
+                    h.iteration,
+                    h.value,
+                    h.input,
+                    h.inputSum or 0
+                })
+            end
+            
+            -- 添加汇总行
+            table.insert(finalRegion, {"---", "---", "---", "---"})
+            table.insert(finalRegion, {"汇总", currentValue, "总迭代", iteration})
+            
+            return makeYieldResult(
+                "done",
+                100,
+                string.format("完成！最终值: %s，共 %d 次迭代", currentValue, iteration),
+                finalRegion
+            )
+        end
+        
+        -- yield 当前状态，等待下次 resume
+        resumeInput = coroutine.yield(makeYieldResult(
+            "yielded",
+            progress,
+            string.format("迭代 %d/%d，当前值: %s", iteration, maxIterations, currentValue),
+            resultRegion
+        ))
+    end
+end
+
+-- ============================================
+-- 简化版协程：simple_counter
+-- 演示最基本的用法
+-- ============================================
+function simple_counter(taskCell, times)
+    times = tonumber(times) or 5
+    local count = 0
+    
+    for i = 1, times do
+        count = count + 1
+        
+        if i < times then
+            coroutine.yield(makeYieldResult(
+                "yielded",
+                (i / times) * 100,
+                string.format("计数: %d / %d", i, times),
+                {{i, count}}
+            ))
+        end
+    end
+    
+    return makeYieldResult(
+        "done",
+        100,
+        "计数完成",
+        {{"最终计数", count}, {"总次数", times}}
+    )
+end
+
+-- ============================================
+-- 区域处理协程：region_processor
+-- 每次 resume 处理传入的区域数据
+-- ============================================
+function region_processor(taskCell, operation)
+    operation = operation or "sum"  -- sum, avg, max, min, count
+    
+    local totalProcessed = 0
+    local results = {{"批次", "操作", "结果", "处理数量"}}
+    local batch = 0
+    
+    -- 首次 yield，等待输入
+    local inputData = coroutine.yield(makeYieldResult(
+        "yielded",
+        0,
+        "等待输入区域数据...",
+        {{"状态", "等待输入"}}
+    ))
+    
+    -- 持续处理，直到收到 "stop" 信号
+    while inputData ~= "stop" and batch < 100 do
+        batch = batch + 1
+        
+        local result = 0
+        local count = 0
+        local values = {}
+        
+        -- 解析输入数据
+        if type(inputData) == "table" then
+            if type(inputData[1]) == "table" then
+                for _, row in ipairs(inputData) do
+                    for _, cell in ipairs(row) do
+                        local num = tonumber(cell)
+                        if num then
+                            table.insert(values, num)
+                            count = count + 1
+                        end
+                    end
+                end
+            else
+                for _, v in ipairs(inputData) do
+                    local num = tonumber(v)
+                    if num then
+                        table.insert(values, num)
+                        count = count + 1
+                    end
+                end
+            end
+        else
+            local num = tonumber(inputData)
+            if num then
+                table.insert(values, num)
+                count = 1
+            end
+        end
+        
+        -- 执行操作
+        if count > 0 then
+            if operation == "sum" then
+                for _, v in ipairs(values) do
+                    result = result + v
+                end
+            elseif operation == "avg" then
+                local sum = 0
+                for _, v in ipairs(values) do
+                    sum = sum + v
+                end
+                result = sum / count
+            elseif operation == "max" then
+                result = values[1]
+                for _, v in ipairs(values) do
+                    if v > result then result = v end
+                end
+            elseif operation == "min" then
+                result = values[1]
+                for _, v in ipairs(values) do
+                    if v < result then result = v end
+                end
+            elseif operation == "count" then
+                result = count
+            end
+        end
+        
+        totalProcessed = totalProcessed + count
+        table.insert(results, {batch, operation, result, count})
+        
+        -- yield 当前结果
+        inputData = coroutine.yield(makeYieldResult(
+            "yielded",
+            batch,  -- 用批次数作为进度指示
+            string.format("批次 %d: %s = %s (处理 %d 个值)", batch, operation, result, count),
+            results
+        ))
+    end
+    
+    -- 完成
+    table.insert(results, {"---", "---", "---", "---"})
+    table.insert(results, {"汇总", operation, batch .. " 批", totalProcessed})
+    
+    return makeYieldResult(
+        "done",
+        100,
+        string.format("处理完成：%d 批次，共 %d 个值", batch, totalProcessed),
+        results
+    )
+end
+
+-- ============================================
+-- 矩阵运算协程：matrix_builder
+-- 逐步构建矩阵，每次 resume 添加一行
+-- ============================================
+function matrix_builder(taskCell, targetRows, targetCols)
+    targetRows = tonumber(targetRows) or 5
+    targetCols = tonumber(targetCols) or 3
+    
+    local matrix = {}
+    local rowCount = 0
+    
+    -- 首次 yield
+    local rowData = coroutine.yield(makeYieldResult(
+        "yielded",
+        0,
+        string.format("准备构建 %dx%d 矩阵，请输入第 1 行", targetRows, targetCols),
+        {{"状态", "等待第1行数据"}}
+    ))
+    
+    while rowCount < targetRows do
+        rowCount = rowCount + 1
+        
+        -- 处理输入行
+        local newRow = {}
+        if type(rowData) == "table" then
+            if type(rowData[1]) == "table" then
+                -- 取第一行
+                for j = 1, targetCols do
+                    newRow[j] = rowData[1][j] or 0
+                end
+            else
+                for j = 1, targetCols do
+                    newRow[j] = rowData[j] or 0
+                end
+            end
+        else
+            -- 单个值填充整行
+            for j = 1, targetCols do
+                newRow[j] = rowData or 0
+            end
+        end
+        
+        table.insert(matrix, newRow)
+        
+        -- 构建显示结果
+        local displayMatrix = {}
+        -- 添加表头
+        local header = {"行"}
+        for j = 1, targetCols do
+            table.insert(header, "列" .. j)
+        end
+        table.insert(displayMatrix, header)
+        
+        -- 添加数据行
+        for i, row in ipairs(matrix) do
+            local displayRow = {i}
+            for _, v in ipairs(row) do
+                table.insert(displayRow, v)
+            end
+            table.insert(displayMatrix, displayRow)
+        end
+        
+        local progress = (rowCount / targetRows) * 100
+        
+        if rowCount >= targetRows then
+            -- 完成
+            return makeYieldResult(
+                "done",
+                100,
+                string.format("矩阵构建完成: %dx%d", targetRows, targetCols),
+                displayMatrix
+            )
+        end
+        
+        -- yield 等待下一行
+        rowData = coroutine.yield(makeYieldResult(
+            "yielded",
+            progress,
+            string.format("已添加 %d/%d 行，请输入第 %d 行", rowCount, targetRows, rowCount + 1),
+            displayMatrix
+        ))
+    end
+end
+
+print("functions.lua 已加载 - 协程示例")
