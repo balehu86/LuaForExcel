@@ -534,7 +534,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .CFS_vruntime = g_CFS_minVruntime  ' 从当前最小值开始
     End With
     g_Tasks.Add taskId, task
-    ' g_Workbooks(wbName).AddTask taskId, task
 
     LuaTask = taskId
     g_NextTaskId = g_NextTaskId + 1
@@ -1461,7 +1460,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
 
     Dim stackTop As Long
     stackTop = lua_gettop(coThread)
-    
+
     Dim taskId As String
     taskId = "Task_" & CStr(task.taskId)
 
