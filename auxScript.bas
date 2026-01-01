@@ -60,13 +60,13 @@ Public Sub CleanupWorkbookTasks(wbName As String)
         End If
     Next
     ' 在删除任务时，也清理其监控索引
-    For Each removeId In toRemove
-        CollectionRemove g_TaskQueue, CStr(removeId)
+    For Each taskId In toRemove
+        CollectionRemove g_TaskQueue, CStr(taskId)
         ' 清理该任务的监控索引
-        If g_WatchesByTask.Exists(CStr(removeId)) Then
-            g_WatchesByTask.Remove CStr(removeId)
+        If g_WatchesByTask.Exists(CStr(taskId)) Then
+            g_WatchesByTask.Remove CStr(taskId)
         End If
-        g_Tasks.Remove CStr(removeId)
+        g_Tasks.Remove CStr(taskId)
     Next
     ' 清理工作簿的监控
     CleanupWorkbookWatches wbName
