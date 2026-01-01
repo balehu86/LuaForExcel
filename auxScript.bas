@@ -226,9 +226,14 @@ Private Sub LuaTaskMenu_ResumeTask()
 
     Dim status As String
     status = g_Tasks(taskId).taskStatus
+
     If status <> "yielded" And status <> "paused" Then
         MsgBox "任务 " & taskId & " 状态为 " & status & "，无法恢复。", vbExclamation, "无法恢复"
         Exit Sub
+    End If
+
+    If status = "paused" Then
+        g_Tasks(taskId).taskStatus = "yielded"
     End If
 
     If Not CollectionExists(g_TaskQueue, taskId) Then
@@ -241,38 +246,39 @@ Private Sub LuaTaskMenu_ResumeTask()
 End Sub
 
 ' 终止任务
-Private Sub LuaTaskMenu_terminateTask()
+Private Sub LuaTaskMenu_TerminateTask()
     On Error Resume Next
-    If g_Tasks Is Nothing Then Exit Sub
+
+    If g_Tasks Is Nothing Then
+        MsgBox "任务系统未初始化", vbExclamation
+        Exit Sub
+    End If
 
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
     If taskId = vbNullString Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+
+    If Not g_Tasks.Exists(taskId) Then
         MsgBox "任务不存在或已删除", vbExclamation
         Exit Sub
     End If
+
+    ' 确认对话框
+    Dim result As VbMsgBoxResult
+    result = MsgBox("确定要终止并删除任务 " & taskId & " 吗？", _
+                    vbQuestion + vbYesNo, "确认终止")
+    If result = vbNo Then Exit Sub
 
     ' 从队列移除
     If Not g_TaskQueue Is Nothing Then
         CollectionRemove g_TaskQueue, taskId
     End If
 
-    ' 设置终止状态并标记为脏
-    g_Tasks(taskId).taskStatus = "terminated"
+    g_Tasks.Remove taskId
     g_StateDirty = True
-
-    ' ' 删除所有数据
-    ' g_TaskFunc.Remove taskId
-    ' g_TaskWorkbook.Remove taskId
-    ' g_TaskStartArgs.Remove taskId
-    ' g_TaskResumeSpec.Remove taskId
-    ' g_TaskCell.Remove taskId
-    ' g_TaskStatus.Remove taskId
-    ' g_TaskProgress.Remove taskId
-    ' g_TaskMessage.Remove taskId
-    ' g_TaskValue.Remove taskId
-    ' g_TaskError.Remove taskId
-    ' g_TaskCoThread.Remove taskId
 
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
@@ -328,7 +334,7 @@ Private Sub LuaTaskMenu_ShowDetail()
     ' Resume 参数
     msg = msg & vbCrLf & "Resume 参数:" & vbCrLf
     Dim resumeSpec As Variant
-    resumeSpec = task.TaskResumeSpec
+    resumeSpec = task.taskResumeSpec
     If IsArray(resumeSpec) Then
         For i = LBound(resumeSpec) To UBound(resumeSpec)
             msg = msg & "   [" & i & "] " & CStr(resumeSpec(i)) & vbCrLf
@@ -535,18 +541,27 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
         Exit Sub
     End If
 
-
-    ' 收集需要清理的任务
+    ' 【修复】收集需要清理的任务ID（不能在遍历时删除）
+    Dim toRemove As Collection
+    Set toRemove = New Collection
+    
     Dim taskId As Variant
-    Dim count As Integer
-    count = 0
     Dim status As String
     For Each taskId In g_Tasks.Keys
         status = g_Tasks(taskId).taskStatus
-        If status = "done" Or status = "error" Then
-            CollectionRemove g_TaskQueue, CStr(taskId)
-            count = count +1
+        If status = "done" Or status = "error" Or status = "terminated" Then
+            toRemove.Add CStr(taskId)
         End If
+    Next
+
+    ' 【修复】实际删除任务
+    Dim removeId As Variant
+    Dim count As Integer
+    count = 0
+    For Each removeId In toRemove
+        CollectionRemove g_TaskQueue, CStr(removeId)
+        g_Tasks.Remove CStr(removeId)
+        count = count + 1
     Next
 
     MsgBox "已清理 " & count & " 个已完成或错误的任务。" & vbCrLf & _
@@ -571,12 +586,13 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
     If result = vbNo Then Exit Sub
 
     ' 停止调度器
-    g_SchedulerRunning = False
+    StopScheduler  ' 【修复】使用 StopScheduler 而不是直接设置标志
 
-    ' 清空所有 Dictionary
+    ' 【修复】清空所有数据
     If Not g_Tasks Is Nothing Then
-        Set g_TaskQueue = New Collection
+        g_Tasks.RemoveAll
     End If
+    Set g_TaskQueue = New Collection
 
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
 End Sub
@@ -838,8 +854,8 @@ Private Sub LuaPerfMenu_ShowTaskStats()
             msg = msg & "  (尚未执行)" & vbCrLf
         Else
             msg = msg & "  调度次数: " & task.taskTickCount & vbCrLf
-            msg = msg & "  总运行时间: " & Format(task.TaskTotalTime, "0.00") & " ms" & vbCrLf
-            msg = msg & "  平均时间: " & Format(task.TaskTotalTime / task.taskTickCount, "0.00") & " ms" & vbCrLf
+            msg = msg & "  总运行时间: " & Format(task.taskTotalTime, "0.00") & " ms" & vbCrLf
+            msg = msg & "  平均时间: " & Format(task.taskTotalTime / task.taskTickCount, "0.00") & " ms" & vbCrLf
             msg = msg & "  上次运行: " & Format(task.taskLastTime, "0.00") & " ms" & vbCrLf
         End If
         msg = msg & "----------------------------------------" & vbCrLf
