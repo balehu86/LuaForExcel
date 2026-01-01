@@ -614,7 +614,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         LuaWatch = CVErr(xlErrValue)
         Exit Function
     End If
-    
+
     ' 初始化监控字典
     If g_Watches Is Nothing Then
         Set g_Watches = CreateObject("Scripting.Dictionary")
@@ -622,12 +622,12 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     If g_WatchesByTask Is Nothing Then
         Set g_WatchesByTask = CreateObject("Scripting.Dictionary")
     End If
-    
+
     ' 获取调用单元格信息
     Dim callerCell As Range
     Dim callerAddr As String
     Dim callerWb As Workbook
-    
+
     On Error Resume Next
     Set callerCell = Application.Caller
     If callerCell Is Nothing Then
@@ -637,7 +637,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     callerAddr = callerCell.Address(External:=True)
     Set callerWb = callerCell.Worksheet.Parent
     On Error GoTo ErrorHandler
-    
+
     ' 解析 taskId
     Dim taskId As String
     If TypeName(taskIdOrCell) = "Range" Then
@@ -645,17 +645,17 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     Else
         taskId = CStr(taskIdOrCell)
     End If
-    
+
     ' 验证任务存在
     If Not g_Tasks.Exists(taskId) Then
         LuaWatch = "#ERROR: 任务不存在"
         Exit Function
     End If
-    
+
     ' 计算目标单元格
     Dim targetAddr As String
     Dim targetRange As Range
-    
+
     If IsMissing(targetCell) Or IsEmpty(targetCell) Then
         ' 根据 direction 计算相邻单元格
         Select Case direction
@@ -716,7 +716,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     
     ' 返回监控状态描述（静态文本，不会变化）
     LuaWatch = "监控: " & taskId & "." & field & " -> " & targetAddr
-    
+
     Exit Function
 ErrorHandler:
     LuaWatch = "#ERROR: " & Err.Description
