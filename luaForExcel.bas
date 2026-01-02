@@ -60,12 +60,20 @@ Private Const LUA_OK = 0
 Private Const LUA_YIELD = 1
 Private Const LUA_ERRRUN = 2
 ' ===== 全局变量 =====
+Private g_LogLevel As Byte ' 日志等级：0=错误，1=信息，2=调试
 Private g_LuaState As LongPtr
 Private g_Initialized As Boolean
 Private g_HotReloadEnabled As Boolean
 Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
 ' ===== 协程全局变量 =====
+Public Enum CoStatus
+    DEFINED
+    YIELD
+    PAUSED
+    DONE
+    ERROR
+End Enum
 Public g_Tasks As Object       ' task Id -> task Instance
 Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
 Public g_TaskQueue As Collection     ' taskId -> True (active tasks)
@@ -77,20 +85,19 @@ Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用�
 Public g_NextTaskId As Integer         ' 新建下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
-
-' === CFS 调度全局变量 ===
 Private g_CFS_minVruntime As Double       ' 队列中最小的 vruntime（用于新任务初始化）
 Private g_CFS_targetLatency As Double     ' 目标延迟周期（ms），默认 100ms
 Private g_CFS_minGranularity As Double    ' 最小执行粒度（ms），默认 10ms
 Private g_CFS_niceToWeight(0 To 39) As Double  ' nice 值到权重的映射表
 ' ===== 配置常量 =====
 Private Const CP_UTF8 As Long = 65001
+Private Const LOG_LEVEL As Byte = 1  ' 默认日志等级：0=错误，1=信息，2=调试
 Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
 Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
 
-Private Const CFS_DEFAULT_WEIGHT As Double = 1024
-Private Const CFS_TARGET_LATENCY As Double = 100    ' ms
-Private Const CFS_MIN_GRANULARITY As Double = 10    ' ms
+Private Const CFS_DEFAULT_WEIGHT As Double = 1024 ' 默认权重（对应 nice=0）
+Private Const CFS_TARGET_LATENCY As Double = 100  ' 目标最小延迟周期（ms）
+Private Const CFS_MIN_GRANULARITY As Double = 10  ' 最小执行粒度（ms）
 
 Private Const LUA_REGISTRYINDEX As Long = -1001000
 ' ===== 性能统计全局变量 =====
@@ -113,6 +120,8 @@ Public Function InitLuaState() As Boolean
         Exit Function
     End If
 
+    g_LogLevel = LOG_LEVEL
+
     ' 创建Lua状态机
     g_LuaState = luaL_newstate()
     If g_LuaState = 0 Then
@@ -127,8 +136,6 @@ Public Function InitLuaState() As Boolean
     ' 固定为加载项目录下的functions.lua
     g_FunctionsPath = ThisWorkbook.Path & "\functions.lua"
     g_LastModified = #1/1/1900#
-
-    g_Initialized = True
     g_HotReloadEnabled = DEFAULT_HOT_RELOAD_ENABLED
 
     InitCoroutineSystem
@@ -138,17 +145,12 @@ Public Function InitLuaState() As Boolean
     Set fso = CreateObject("Scripting.FileSystemObject")
 
     If fso.FileExists(g_FunctionsPath) Then
-        If Not TryLoadFunctionsFile() Then
-            MsgBox "functions.lua 加载失败。" & vbCrLf & _
-                   "Lua 引擎已启动,但自定义函数不可用。", _
-                   vbExclamation, "InitLuaState_Warning"
-        End If
+        If Not TryLoadFunctionsFile() Then MsgBox "functions.lua 加载失败。" & vbCrLf & "Lua 引擎已启动,但自定义函数不可用。", vbExclamation, "InitLuaState_Warning"
     End If
 
     InitLuaState = True
     ' MsgBox "Lua栈初始化完成",vbInformation,"InitLuaState_Info" 
     Exit Function
-
 ErrorHandler:
     MsgBox "初始化 Lua 失败: " & Err.Description, vbCritical, "严重错误"
     InitLuaState = False
@@ -156,22 +158,23 @@ End Function
 
 ' 初始化协程系统
 Private Sub InitCoroutineSystem()
-    g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
+    If g_SchedulerIntervalMilliSec = 0 Then g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
     ' CFS 参数初始化
-    g_CFS_minVruntime = 0
-    g_CFS_targetLatency = CFS_TARGET_LATENCY
-    g_CFS_minGranularity = CFS_MIN_GRANULARITY
+    If g_CFS_minVruntime = 0 Then g_CFS_minVruntime = 0
+    If g_CFS_targetLatency = 0 Then g_CFS_targetLatency = CFS_TARGET_LATENCY
+    If g_CFS_minGranularity = 0 Then g_CFS_minGranularity = CFS_MIN_GRANULARITY
     ' 初始化 nice 到权重的映射表（简化版，只用 0-39 对应 nice -20 到 +19）
     ' 权重公式: weight = 1024 / 1.25^nice  (nice=0 时 weight=1024)
     Dim i As Integer
     For i = 0 To 39
         g_CFS_niceToWeight(i) = 1024 / (1.25 ^ (i - 20))
-    Next i
-    ' 初始化性能统计
+    Next
+    ' 初始化调度器性能统计
     g_SchedulerStats.TotalTime = 0
     g_SchedulerStats.LastTime = 0
     g_SchedulerStats.TotalCount = 0
     g_SchedulerStats.StartTime = Now
+
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
     If g_Tasks Is Nothing Then Set g_Tasks = CreateObject("Scripting.Dictionary")
     If g_TaskQueue Is Nothing Then Set g_TaskQueue = New Collection
@@ -187,13 +190,11 @@ Public Sub CleanupLua()
     If g_Initialized Then
         StopScheduler
 
-        ' 【修复】先释放所有协程
+        ' 先释放所有协程
         If Not g_Tasks Is Nothing Then
             Dim taskId As Variant
-            Dim task As TaskUnit
             For Each taskId In g_Tasks.Keys
-                Set task = g_Tasks(taskId)
-                ReleaseTaskCoroutine task
+                ReleaseTaskCoroutine g_Tasks(taskId)
             Next
             g_Tasks.RemoveAll
         End If
@@ -450,7 +451,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     taskCell = Application.Caller.Address(External:=True)
     Set callerWb = Application.Caller.Worksheet.Parent
 
-    ' 关键修复:检查调用者工作簿是否为宏文件
+    ' 检查调用者工作簿是否存在
     If callerWb Is Nothing Then
         LuaTask = "#ERROR: 无法获取调用工作簿"
         Exit Function
@@ -531,7 +532,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .taskStartArgs = startArgs
         .taskResumeSpec = resumeSpec
         .taskCell = taskCell
-        .taskStatus = "defined"
+        .taskStatus = CoStatus.DEFINED
         .taskProgress = 0
         .taskMessage = vbNullString
         .taskValue = vbNull
@@ -565,7 +566,7 @@ End Function
 Public Function LuaGet(taskId As String, field As String) As Variant
     On Error GoTo ErrorHandler
 
-    ' 【修改】完全移除 Volatile
+    ' 完全移除 Volatile
     ' 此函数只在输入公式或手动刷新(F9)时计算
     ' 实时监控请使用 LuaWatch
 
@@ -578,9 +579,17 @@ Public Function LuaGet(taskId As String, field As String) As Variant
         LuaGet = "#ERROR: 任务不存在"
         Exit Function
     End If
-    
+
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
+    Dim taskstatus As String
+    Select Case task.taskStatus
+        Case CoStatus.DEFINED: taskstatus = CoStatus.DEFINED
+        Case CoStatus.YIELD: taskstatus = CoStatus.YIELD
+        Case CoStatus.PAUSED: taskstatus = CoStatus.PAUSED
+        Case CoStatus.DONE: taskstatus = CoStatus.DONE
+        Case CoStatus.ERROR: taskstatus = CoStatus.ERROR
+    End Select
 
     Select Case LCase(field)
         Case "status"
@@ -595,9 +604,9 @@ Public Function LuaGet(taskId As String, field As String) As Variant
             LuaGet = task.taskError
         Case "summary"
             Dim summary As String
-            summary = "状态:" & task.taskStatus
+            summary = "状态:" & taskstatus
             summary = summary & " | 进度:" & Format(task.taskProgress, "0.0") & "%"
-            If task.taskStatus = "error" Then
+            If taskstatus = CoStatus.ERROR Then
                 summary = summary & " | 错误:" & Left(task.taskError, 30)
             End If
             LuaGet = summary
@@ -622,13 +631,8 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     End If
 
     ' 初始化监控字典
-    If g_Watches Is Nothing Then
-        Set g_Watches = CreateObject("Scripting.Dictionary")
-    End If
-    If g_WatchesByTask Is Nothing Then
-        Set g_WatchesByTask = CreateObject("Scripting.Dictionary")
-    End If
-
+    If g_Watches Is Nothing Then Set g_Watches = CreateObject("Scripting.Dictionary")
+    If g_WatchesByTask Is Nothing Then Set g_WatchesByTask = CreateObject("Scripting.Dictionary")
     ' 获取调用单元格信息
     Dim callerCell As Range
     Dim callerAddr As String
@@ -686,7 +690,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         End If
     End If
 
-    ' 【修复】检查是否已存在相同的监控
+    ' 检查是否已存在相同的监控
     Dim watchInfo As WatchInfo
     Dim needUpdateIndex As Boolean
     needUpdateIndex = False
@@ -695,7 +699,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         ' 已存在监控：检查参数是否变化
         Set watchInfo = g_Watches(callerAddr)
 
-        ' 【修复】检查关键参数是否变化
+        ' 检查关键参数是否变化
         Dim paramsChanged As Boolean
         paramsChanged = False
 
@@ -732,7 +736,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
                 .watchDirty = True
             End With
         End If
-        ' 【修复】参数未变化时，不修改任何状态
+        ' 参数未变化时，不修改任何状态
 
     Else
         ' 新建监控
@@ -776,7 +780,7 @@ Private Sub RefreshWatches()
     Dim writeCount As Long
     writeCount = 0
 
-    ' 【优化】收集所有需要写入的工作表，最后统一处理
+    ' 收集所有需要写入的工作表，最后统一处理
     Dim sheetsToRefresh As Object
     Set sheetsToRefresh = CreateObject("Scripting.Dictionary")
 
@@ -832,7 +836,7 @@ Private Sub RefreshWatches()
         watchInfo.watchDirty = False
 NextWatch:
     Next watchCell
-    ' 【关键】只在有实际写入时，统一刷新一次
+    ' 只在有实际写入时，统一刷新一次
     ' 这里不再调用 Calculate，因为直接写值不需要重算
 End Sub
 ' 直接写入目标单元格（不触发 Calculate）
@@ -873,8 +877,7 @@ Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbNa
         Set targetRange = wb.ActiveSheet.Range(cellAddr)
     End If
     If targetRange Is Nothing Then Exit Sub
-    ' 【关键】直接写值，不触发事件和计算
-    ' 写入值
+    ' 直接写值，不触发事件和计算
     If IsArray(value) Then
         targetRange.Resize(UBound(value, 1) - LBound(value, 1) + 1, _
                           UBound(value, 2) - LBound(value, 2) + 1).value = value
@@ -892,7 +895,7 @@ Private Sub AddToWatchesByTask(taskId As String, watchCell As String)
         g_WatchesByTask.Add taskId, New Collection
     End If
 
-    ' 【修复】先检查是否已存在，再添加
+    ' 先检查是否已存在，再添加
     Dim col As Collection
     Set col = g_WatchesByTask(taskId)
 
@@ -941,7 +944,7 @@ Private Sub MarkWatchesDirty(taskId As String)
         If g_Watches.Exists(CStr(wc)) Then
             g_Watches(CStr(wc)).watchDirty = True
         End If
-    Next wc
+    Next
 End Sub
 ' ============================================
 ' 第五部分：协程执行和调度
@@ -959,32 +962,30 @@ Public Sub StartLuaCoroutine(taskId As String)
     End If
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
-    If task.taskStatus <> "defined" Then
+    If task.taskStatus <> CoStatus.Defined Then
         MsgBox "错误：任务已启动或已完成，当前状态: " & task.taskStatus, vbExclamation
         Exit Sub
     End If
-    
-    ' 【修改】改为调用主模块统一释放函数
+
+    ' 统一释放旧协程（防止泄漏）
     ReleaseTaskCoroutine task
-    
+
     ' 创建协程并锚定到注册表
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
-        SetTaskStatus task, "error"
+        SetTaskStatus task, CoStatus.ERROR
         task.taskError = "无法创建协程线程"
         Exit Sub
     End If
     ' 锚定协程
     task.taskCoRef = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
     task.taskCoThread = coThread
-    
-    ' ... 后续代码保持不变 ...
-    
+
     ' 获取函数并移动到协程栈
     lua_getglobal g_LuaState, task.taskFunc
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
-        SetTaskStatus task, "error"
+        SetTaskStatus task, CoStatus.ERROR
         task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         lua_settop g_LuaState, 0
         Exit Sub
@@ -1007,8 +1008,8 @@ Public Sub StartLuaCoroutine(taskId As String)
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
     ' 处理结果（内部会调用 SetTaskStatus）
     HandleCoroutineResult task, result, CLng(nres)
-    ' 如果是 yielded 状态，加入队列
-    If task.taskStatus = "yielded" Then
+    ' 如果是 yield 状态，加入队列
+    If task.taskStatus = CoStatus.YIELD Then
         task.CFS_vruntime = g_CFS_minVruntime
         task.CFS_lastScheduled = GetTickCount()
         CollectionAdd g_TaskQueue, taskId
@@ -1016,7 +1017,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     End If
     Exit Sub
 ErrorHandler:
-    SetTaskStatus task, "error"
+    SetTaskStatus task, CoStatus.ERROR
     task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
     MsgBox "启动协程失败: " & Err.Description, vbCritical
 End Sub
@@ -1040,7 +1041,7 @@ Public Sub SchedulerTick()
         Exit Sub
     End If
 
-    ' 【关键】在整个调度周期开始时禁用事件和计算
+    ' 在整个调度周期开始时禁用事件和计算
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
@@ -1048,7 +1049,7 @@ Public Sub SchedulerTick()
     Dim schedulerStart As Double
     schedulerStart = GetTickCount()
 
-    ' === 使用 CFS 调度 ===
+    ' 使用 CFS 调度算法 
     Call ScheduleByCFS
 
     ' 性能计时统计
@@ -1058,16 +1059,16 @@ Public Sub SchedulerTick()
     g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
     g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
 
-    ' 【关键】在周期末尾统一处理所有监控刷新
+    ' 在周期末尾统一处理所有监控刷新
     ' 只有状态真的变化时才处理
     If g_StateDirty Then
         RefreshWatches  ' 批量写入所有脏监控的目标单元格
         g_StateDirty = False
-        ' 【注意】不再调用 ActiveSheet.Calculate
+        ' 不再调用 ActiveSheet.Calculate
         ' 因为我们是直接写值到目标单元格，不需要重新计算公式
     End If
 
-    ' 【关键】恢复 Excel 状态
+    ' 恢复 Excel 状态
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
@@ -1118,7 +1119,7 @@ Private Sub ScheduleByCFS()
         Set task = g_Tasks(selectedTaskId)
 
         ' 只调度 yielded 状态
-        If task.taskStatus <> "yielded" Then
+        If task.taskStatus <> CoStatus.Yielded Then
             GoTo ContinueLoop
         End If
 
@@ -1146,7 +1147,7 @@ Private Sub ScheduleByCFS()
 
         ' 5. 终止态清理
         Select Case task.taskStatus
-            Case "done", "error", "terminated"
+            Case CoStatus.Done, CoStatus.Error
                 CollectionRemove g_TaskQueue, selectedTaskId
         End Select
 
@@ -1167,7 +1168,7 @@ Private Function CFS_PickNextTask() As String
             Set task = g_Tasks(CStr(taskId))
 
             ' 只考虑 yielded 状态的任务
-            If task.taskStatus = "yielded" Then
+            If task.taskStatus = CoStatus.YIELD Then
                 If task.CFS_vruntime < minVruntime Then
                     minVruntime = task.CFS_vruntime
                     selectedId = CStr(taskId)
@@ -1199,7 +1200,7 @@ Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
         For Each tid In g_TaskQueue
             If g_Tasks.Exists(CStr(tid)) Then
                 Set t = g_Tasks(CStr(tid))
-                If t.taskStatus = "yielded" And t.CFS_vruntime < minV Then
+                If t.taskStatus = CoStatus.YIELD And t.CFS_vruntime < minV Then
                     minV = t.CFS_vruntime
                 End If
             End If
@@ -1212,13 +1213,11 @@ End Sub
 Private Sub ResumeCoroutine(task As TaskUnit)
     On Error GoTo ErrorHandler
 
-    If task.taskStatus <> "yielded" Then
-        Exit Sub
-    End If
+    If task.taskStatus <> CoStatus.Yielded Then Exit Sub
 
     ' 检查协程是否有效
     If Not task.HasValidCoroutine() Then
-        SetTaskStatus task, "error"
+        SetTaskStatus task, CoStatus.ERROR
         task.taskError = "协程引用无效"
         Exit Sub
     End If
@@ -1233,7 +1232,7 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     Dim coStatus As Long
     coStatus = lua_status(coThread)
     If coStatus <> LUA_OK And coStatus <> LUA_YIELD Then
-        SetTaskStatus task, "error"
+        SetTaskStatus task, CoStatus.ERROR
         task.taskError = "协程状态异常: " & coStatus
         Exit Sub
     End If
@@ -1253,7 +1252,7 @@ Private Sub ResumeCoroutine(task As TaskUnit)
         On Error GoTo ErrorHandler
 
         If Not wbExists Then
-            SetTaskStatus task, "error"
+            SetTaskStatus task, CoStatus.ERROR
             task.taskError = "工作簿已关闭: " & wbName
             Exit Sub
         End If
@@ -1317,7 +1316,7 @@ Private Sub ResumeCoroutine(task As TaskUnit)
 
     ' 处理结果（内部会调用 SetTaskStatus 处理终态）
     HandleCoroutineResult task, result, CLng(nres)
-    ' 【修复】每次 Resume 后都标记该任务的监控为脏
+    ' 每次 Resume 后都标记该任务的监控为脏
     MarkWatchesDirty "Task_" & task.taskId
     g_StateDirty = True
 
@@ -1334,7 +1333,7 @@ ErrorHandler:
     Dim errorDetails As String
     errorDetails = "Resume错误: " & Err.Description & " (行 " & Erl & ")"
 
-    SetTaskStatus task, "error"
+    SetTaskStatus task, CoStatus.ERROR
     task.taskError = errorDetails
 
     Debug.Print "=== Resume 错误 ===" & vbCrLf & errorDetails
@@ -1464,7 +1463,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
                 retData = GetValue(coThread, -1)
                 ParseYieldReturn task, retData, True
             End If
-            SetTaskStatus task, "done"
+            SetTaskStatus task, CoStatus.DONE
             task.taskProgress = 100
 
         Case LUA_YIELD
@@ -1475,8 +1474,8 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
                 ParseYieldReturn task, yieldData, False
             End If
             ' 只有未被 ParseYieldReturn 设置为终态时才设为 yielded
-            If task.taskStatus <> "done" And task.taskStatus <> "error" Then
-                SetTaskStatus task, "yielded"
+            If task.taskStatus <> CoStatus.DONE And task.taskStatus <> CoStatus.ERROR Then
+                SetTaskStatus task, CoStatus.YIELD
             End If
 
         Case Else
@@ -1486,7 +1485,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
             Else
                 task.taskError = "协程错误: 代码 " & result
             End If
-            SetTaskStatus task, "error"
+            SetTaskStatus task, CoStatus.ERROR
     End Select
 
     lua_settop coThread, stackTop
@@ -1494,7 +1493,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
 
 ErrorHandler:
     task.taskError = "处理结果错误: " & Err.Description
-    SetTaskStatus task, "error"
+    SetTaskStatus task, CoStatus.ERROR
     If coThread <> 0 Then lua_settop coThread, stackTop
 End Sub
 
@@ -1784,16 +1783,16 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
 
             Select Case key
                 Case "status"
-                    ' 只有在非final或者值不是"done"时才更新status
+                    ' 只有在非final或者值不是CoStatus.DONE时才更新status
                     Dim statusVal As String
                     statusVal = LCase(Trim(CStr(value)))
                     If Not isFinal Then
                         ' yield时,根据返回的status字段决定协程状态
                         Select Case statusVal
-                            Case "yielded", "done", "error"
+                            Case CoStatus.YIELD, CoStatus.DONE, CoStatus.ERROR
                                 task.taskStatus = statusVal
                             Case Else
-                                task.taskStatus = "yielded" ' 默认为yielded
+                                task.taskStatus = CoStatus.YIELD ' 默认为yielded
                         End Select
                     End If
                 Case "progress"
@@ -1851,26 +1850,25 @@ Private Sub CollectionAdd(col As Collection, key As String)
     End If
 End Sub
 ' 统一设置任务状态并处理副作用
-Private Sub SetTaskStatus(task As TaskUnit, newStatus As String)
+Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
     If task Is Nothing Then Exit Sub
     Dim taskId As String
     taskId = "Task_" & task.taskId
-    Dim oldStatus As String
+    Dim oldStatus As CoStatus
     oldStatus = task.taskStatus
     ' 更新状态
     task.taskStatus = newStatus
     ' 终态处理：释放协程
     Select Case newStatus
-        Case "done", "error", "terminated"
-            ' 【修改】改为调用主模块统一释放函数
+        Case CoStatus.Done, CoStatus.Error, CoStatus.Terminated
+            ' 统一释放函数
             ReleaseTaskCoroutine task
             CollectionRemove g_TaskQueue, taskId
-        Case "paused"
+        Case CoStatus.Paused
             ' 暂停不释放协程，但从队列移除
             CollectionRemove g_TaskQueue, taskId
-        Case "defined"
+        Case CoStatus.Defined
             ' 重置状态，确保协程已释放
-            ' 【修改】改为调用主模块统一释放函数
             ReleaseTaskCoroutine task
             CollectionRemove g_TaskQueue, taskId
     End Select
@@ -1879,7 +1877,7 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As String)
         g_StateDirty = True
         MarkWatchesDirty taskId
     End If
-    Debug.Print "任务状态变更: " & taskId & " [" & oldStatus & "] -> [" & newStatus & "]"
+    LogDebug "任务状态变更: " & taskId & " [" & oldStatus & "] -> [" & newStatus & "]"
 End Sub
 ' 统一释放任务的协程资源
 Public Sub ReleaseTaskCoroutine(task As TaskUnit)
@@ -1890,13 +1888,13 @@ Public Sub ReleaseTaskCoroutine(task As TaskUnit)
 
     ' 确保 Lua 状态机有效
     If g_LuaState = 0 Or Not g_Initialized Then
-        Debug.Print "ReleaseTaskCoroutine: Lua 状态机无效，跳过释放"
+        ' Debug.Print "ReleaseTaskCoroutine: Lua 状态机无效，跳过释放"
         task.ClearCoroutineRef
         Exit Sub
     End If
 
     ' 执行释放
-    Debug.Print "ReleaseTaskCoroutine: Task_" & task.taskId & " 释放协程 Ref=" & task.taskCoRef
+    ' Debug.Print "ReleaseTaskCoroutine: Task_" & task.taskId & " 释放协程 Ref=" & task.taskCoRef
     luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
 
     ' 清除任务中的引用
