@@ -68,11 +68,12 @@ Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
 ' ===== 协程全局变量 =====
 Public Enum CoStatus
-    DEFINED
-    YIELD
-    PAUSED
-    DONE
-    ERROR
+    CO_DEFINED
+    CO_YIELD
+    CO_PAUSED
+    CO_DONE
+    CO_ERROR
+    CO_TERMINATED
 End Enum
 Public g_Tasks As Object       ' task Id -> task Instance
 Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
@@ -532,7 +533,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .taskStartArgs = startArgs
         .taskResumeSpec = resumeSpec
         .taskCell = taskCell
-        .taskStatus = CoStatus.DEFINED
+        .taskStatus = CO_DEFINED
         .taskProgress = 0
         .taskMessage = vbNullString
         .taskValue = vbNull
@@ -584,11 +585,11 @@ Public Function LuaGet(taskId As String, field As String) As Variant
     Set task = g_Tasks(taskId)
     Dim taskstatus As String
     Select Case task.taskStatus
-        Case CoStatus.DEFINED: taskstatus = CoStatus.DEFINED
-        Case CoStatus.YIELD: taskstatus = CoStatus.YIELD
-        Case CoStatus.PAUSED: taskstatus = CoStatus.PAUSED
-        Case CoStatus.DONE: taskstatus = CoStatus.DONE
-        Case CoStatus.ERROR: taskstatus = CoStatus.ERROR
+        Case CO_DEFINED: taskstatus = CO_DEFINED
+        Case CO_DEFINED: taskstatus = CO_DEFINED
+        Case CO_PAUSED: taskstatus = CO_PAUSED
+        Case CO_DONE: taskstatus = CO_DONE
+        Case CO_ERROR: taskstatus = CO_ERROR
     End Select
 
     Select Case LCase(field)
@@ -606,7 +607,7 @@ Public Function LuaGet(taskId As String, field As String) As Variant
             Dim summary As String
             summary = "状态:" & taskstatus
             summary = summary & " | 进度:" & Format(task.taskProgress, "0.0") & "%"
-            If taskstatus = CoStatus.ERROR Then
+            If taskstatus = CO_ERROR Then
                 summary = summary & " | 错误:" & Left(task.taskError, 30)
             End If
             LuaGet = summary
@@ -962,7 +963,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     End If
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
-    If task.taskStatus <> CoStatus.Defined Then
+    If task.taskStatus <> CO_DEFINED Then
         MsgBox "错误：任务已启动或已完成，当前状态: " & task.taskStatus, vbExclamation
         Exit Sub
     End If
@@ -974,7 +975,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
-        SetTaskStatus task, CoStatus.ERROR
+        SetTaskStatus task, CO_ERROR
         task.taskError = "无法创建协程线程"
         Exit Sub
     End If
@@ -985,7 +986,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     ' 获取函数并移动到协程栈
     lua_getglobal g_LuaState, task.taskFunc
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
-        SetTaskStatus task, CoStatus.ERROR
+        SetTaskStatus task, CO_ERROR
         task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         lua_settop g_LuaState, 0
         Exit Sub
@@ -1009,7 +1010,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     ' 处理结果（内部会调用 SetTaskStatus）
     HandleCoroutineResult task, result, CLng(nres)
     ' 如果是 yield 状态，加入队列
-    If task.taskStatus = CoStatus.YIELD Then
+    If task.taskStatus = CO_YIELD Then
         task.CFS_vruntime = g_CFS_minVruntime
         task.CFS_lastScheduled = GetTickCount()
         CollectionAdd g_TaskQueue, taskId
@@ -1017,7 +1018,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     End If
     Exit Sub
 ErrorHandler:
-    SetTaskStatus task, CoStatus.ERROR
+    SetTaskStatus task, CO_ERROR
     task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
     MsgBox "启动协程失败: " & Err.Description, vbCritical
 End Sub
@@ -1119,7 +1120,7 @@ Private Sub ScheduleByCFS()
         Set task = g_Tasks(selectedTaskId)
 
         ' 只调度 yielded 状态
-        If task.taskStatus <> CoStatus.Yielded Then
+        If task.taskStatus <> CO_YIELD Then
             GoTo ContinueLoop
         End If
 
@@ -1147,7 +1148,7 @@ Private Sub ScheduleByCFS()
 
         ' 5. 终止态清理
         Select Case task.taskStatus
-            Case CoStatus.Done, CoStatus.Error
+            Case CO_DONE, CO_ERROR
                 CollectionRemove g_TaskQueue, selectedTaskId
         End Select
 
@@ -1168,7 +1169,7 @@ Private Function CFS_PickNextTask() As String
             Set task = g_Tasks(CStr(taskId))
 
             ' 只考虑 yielded 状态的任务
-            If task.taskStatus = CoStatus.YIELD Then
+            If task.taskStatus = CO_YIELD Then
                 If task.CFS_vruntime < minVruntime Then
                     minVruntime = task.CFS_vruntime
                     selectedId = CStr(taskId)
@@ -1200,7 +1201,7 @@ Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
         For Each tid In g_TaskQueue
             If g_Tasks.Exists(CStr(tid)) Then
                 Set t = g_Tasks(CStr(tid))
-                If t.taskStatus = CoStatus.YIELD And t.CFS_vruntime < minV Then
+                If t.taskStatus = CO_YIELD And t.CFS_vruntime < minV Then
                     minV = t.CFS_vruntime
                 End If
             End If
@@ -1213,11 +1214,11 @@ End Sub
 Private Sub ResumeCoroutine(task As TaskUnit)
     On Error GoTo ErrorHandler
 
-    If task.taskStatus <> CoStatus.Yielded Then Exit Sub
+    If task.taskStatus <> CO_YIELD Then Exit Sub
 
     ' 检查协程是否有效
     If Not task.HasValidCoroutine() Then
-        SetTaskStatus task, CoStatus.ERROR
+        SetTaskStatus task, CO_ERROR
         task.taskError = "协程引用无效"
         Exit Sub
     End If
@@ -1229,11 +1230,11 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     coThread = task.taskCoThread
 
     ' 检查协程状态
-    Dim coStatus As Long
-    coStatus = lua_status(coThread)
-    If coStatus <> LUA_OK And coStatus <> LUA_YIELD Then
-        SetTaskStatus task, CoStatus.ERROR
-        task.taskError = "协程状态异常: " & coStatus
+    Dim status As Long
+    status = lua_status(coThread)
+    If status <> LUA_OK And status <> LUA_YIELD Then
+        SetTaskStatus task, CO_ERROR
+        task.taskError = "协程状态异常: " & status
         Exit Sub
     End If
 
@@ -1252,7 +1253,7 @@ Private Sub ResumeCoroutine(task As TaskUnit)
         On Error GoTo ErrorHandler
 
         If Not wbExists Then
-            SetTaskStatus task, CoStatus.ERROR
+            SetTaskStatus task, CO_ERROR
             task.taskError = "工作簿已关闭: " & wbName
             Exit Sub
         End If
@@ -1333,7 +1334,7 @@ ErrorHandler:
     Dim errorDetails As String
     errorDetails = "Resume错误: " & Err.Description & " (行 " & Erl & ")"
 
-    SetTaskStatus task, CoStatus.ERROR
+    SetTaskStatus task, CO_ERROR
     task.taskError = errorDetails
 
     Debug.Print "=== Resume 错误 ===" & vbCrLf & errorDetails
@@ -1463,7 +1464,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
                 retData = GetValue(coThread, -1)
                 ParseYieldReturn task, retData, True
             End If
-            SetTaskStatus task, CoStatus.DONE
+            SetTaskStatus task, CO_DONE
             task.taskProgress = 100
 
         Case LUA_YIELD
@@ -1474,8 +1475,8 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
                 ParseYieldReturn task, yieldData, False
             End If
             ' 只有未被 ParseYieldReturn 设置为终态时才设为 yielded
-            If task.taskStatus <> CoStatus.DONE And task.taskStatus <> CoStatus.ERROR Then
-                SetTaskStatus task, CoStatus.YIELD
+            If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
+                SetTaskStatus task, CO_YIELD
             End If
 
         Case Else
@@ -1485,7 +1486,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
             Else
                 task.taskError = "协程错误: 代码 " & result
             End If
-            SetTaskStatus task, CoStatus.ERROR
+            SetTaskStatus task, CO_ERROR
     End Select
 
     lua_settop coThread, stackTop
@@ -1493,7 +1494,7 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
 
 ErrorHandler:
     task.taskError = "处理结果错误: " & Err.Description
-    SetTaskStatus task, CoStatus.ERROR
+    SetTaskStatus task, CO_ERROR
     If coThread <> 0 Then lua_settop coThread, stackTop
 End Sub
 
@@ -1783,16 +1784,16 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
 
             Select Case key
                 Case "status"
-                    ' 只有在非final或者值不是CoStatus.DONE时才更新status
+                    ' 只有在非final或者值不是CO_DONE时才更新status
                     Dim statusVal As String
                     statusVal = LCase(Trim(CStr(value)))
                     If Not isFinal Then
                         ' yield时,根据返回的status字段决定协程状态
                         Select Case statusVal
-                            Case CoStatus.YIELD, CoStatus.DONE, CoStatus.ERROR
+                            Case CO_YIELD, CO_DONE, CO_ERROR
                                 task.taskStatus = statusVal
                             Case Else
-                                task.taskStatus = CoStatus.YIELD ' 默认为yielded
+                                task.taskStatus = CO_YIELD ' 默认为yielded
                         End Select
                     End If
                 Case "progress"
@@ -1860,14 +1861,14 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
     task.taskStatus = newStatus
     ' 终态处理：释放协程
     Select Case newStatus
-        Case CoStatus.Done, CoStatus.Error, CoStatus.Terminated
+        Case CO_DONE, CO_ERROR, CO_TERMINATED
             ' 统一释放函数
             ReleaseTaskCoroutine task
             CollectionRemove g_TaskQueue, taskId
-        Case CoStatus.Paused
+        Case CO_PAUSED
             ' 暂停不释放协程，但从队列移除
             CollectionRemove g_TaskQueue, taskId
-        Case CoStatus.Defined
+        Case CO_DEFINED
             ' 重置状态，确保协程已释放
             ReleaseTaskCoroutine task
             CollectionRemove g_TaskQueue, taskId

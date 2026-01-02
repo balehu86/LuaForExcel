@@ -230,7 +230,7 @@ Private Sub LuaTaskMenu_StartTask()
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
         Exit Sub
     End If
-    If g_Tasks(taskId).taskStatus = CoStatus.DEFINED Then
+    If g_Tasks(taskId).taskStatus = CO_DEFINED Then
         StartLuaCoroutine taskId
         MsgBox "任务已启动: " & taskId, vbInformation
     Else
@@ -254,7 +254,7 @@ Private Sub LuaTaskMenu_PauseTask()
 
     If CollectionExists(g_TaskQueue, taskId) Then
         CollectionRemove g_TaskQueue, taskId
-        g_Tasks(taskId).taskStatus = CoStatus.PAUSED
+        g_Tasks(taskId).taskStatus = CO_PAUSED
         MsgBox "任务 " & taskId & " 已暂停。" & vbCrLf & _
                "使用 ResumeTask 恢复。", vbInformation, "任务已暂停"
     Else
@@ -278,13 +278,13 @@ Private Sub LuaTaskMenu_ResumeTask()
     Dim status As String
     status = g_Tasks(taskId).taskStatus
 
-    If status <> CoStatus.YIELD And status <> CoStatus.PAUSED Then
+    If status <> CO_YIELD And status <> CO_PAUSED Then
         MsgBox "任务 " & taskId & " 状态为 " & status & "，无法恢复。", vbExclamation, "无法恢复"
         Exit Sub
     End If
 
-    If status = CoStatus.PAUSED Then
-        g_Tasks(taskId).taskStatus = CoStatus.YIELD
+    If status = CO_PAUSED Then
+        g_Tasks(taskId).taskStatus = CO_YIELD
     End If
 
     If Not CollectionExists(g_TaskQueue, taskId) Then
@@ -326,7 +326,7 @@ Private Sub LuaTaskMenu_TerminateTask()
     Set task = g_Tasks(taskId)
     
     ' 使用统一的状态设置（会自动释放协程）
-    SetTaskStatus task, CoStatus.TERMINATED
+    SetTaskStatus task, CO_TERMINATED
 
     ' 清理监控索引
     If g_WatchesByTask.Exists(taskId) Then
@@ -424,7 +424,7 @@ Private Sub LuaTaskMenu_ShowDetail()
     End If
 
     ' 错误信息
-    If task.taskStatus = CoStatus.ERROR Then
+    If task.taskStatus = CO_ERROR Then
         msg = msg & vbCrLf & " 错误信息:" & vbCrLf
         msg = msg & "   " & task.taskError & vbCrLf
     End If
@@ -551,7 +551,7 @@ Private Sub LuaSchedulerMenu_StartAllWorkbookTasks()
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
         If task.taskWorkbook = wbName Then
-            If task.taskStatus = CoStatus.DEFINED Then
+            If task.taskStatus = CO_DEFINED Then
                 StartLuaCoroutine "Task_" & CStr(task.taskId)
                 count = count + 1
             End If
@@ -586,7 +586,7 @@ Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
     End If
 
     For Each taskId In g_Tasks.Keys
-        If g_Tasks(taskId).taskStatus = CoStatus.DEFINED Then
+        If g_Tasks(taskId).taskStatus = CO_DEFINED Then
             StartLuaCoroutine CStr(taskId)
             count = count + 1
         End If
@@ -616,7 +616,7 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     Dim status As String
     For Each taskId In g_Tasks.Keys
         status = g_Tasks(taskId).taskStatus
-        If status = CoStatus.DONE Or status = CoStatus.ERROR Or status = CoStatus.TERMINATED Then
+        If status = CO_DONE Or status = CO_ERROR Or status = CO_TERMINATED Then
             toRemove.Add CStr(taskId)
         End If
     Next
@@ -712,11 +712,11 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
         Select Case task.taskStatus
-            Case CoStatus.DEFINED: definedCount = definedCount + 1
-            Case CoStatus.YIELD: yieldedCount = yieldedCount + 1
-            Case CoStatus.DONE: doneCount = doneCount + 1
-            Case CoStatus.ERROR: errorCount = errorCount + 1
-            Case CoStatus.PAUSED: pausedCount = pausedCount + 1
+            Case CO_DEFINED: definedCount = definedCount + 1
+            Case CO_YIELD: yieldedCount = yieldedCount + 1
+            Case CO_DONE: doneCount = doneCount + 1
+            Case CO_ERROR: errorCount = errorCount + 1
+            Case CO_PAUSED: pausedCount = pausedCount + 1
         End Select
     Next
 
@@ -775,7 +775,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         msg = msg & "  消息: " & msgText & vbCrLf
 
         ' 如果有错误，显示错误信息
-        If task.taskStatus = CoStatus.ERROR Then
+        If task.taskStatus = CO_ERROR Then
             Dim errText As String
             errText = CStr(task.taskError)
             If Len(errText) > 60 Then errText = Left(errText, 57) & "..."
