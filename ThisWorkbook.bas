@@ -67,8 +67,7 @@ Private Sub App_WorkbookBeforeClose(ByVal Wb As Workbook, Cancel As Boolean)
     On Error Resume Next
     ' 跳过加载宏自身
     If Wb Is ThisWorkbook Then Exit Sub
-
-    ' CleanupWorkbookTasks 内部已调用 CleanupWorkbookWatches
+    ' 清理该工作簿的监视点和任务
     CleanupWorkbookTasks Wb.Name
 
     If Not g_Workbooks Is Nothing Then
