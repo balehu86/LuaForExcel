@@ -1,12 +1,12 @@
 ' ===== 日志工具 =====
 Public Sub LogDebug(msg As String)
-    If g_LogLevel >= 2 Then Debug.Print "[DEBUG] " & msg
+    If LOG_LEVEL >= 2 Then Debug.Print "[DEBUG] " & msg
 End Sub
 Public Sub LogInfo(msg As String)
-    If g_LogLevel >= 1 Then Debug.Print "[INFO] " & msg
+    If LOG_LEVEL >= 1 Then Debug.Print "[INFO] " & msg
 End Sub
 Public Sub LogError(msg As String)
-    If g_LogLevel >= 0 Then Debug.Print "[ERROR] " & msg
+    If LOG_LEVEL >= 0 Then Debug.Print "[ERROR] " & msg
     MsgBox msg, vbCritical, "错误"
 End Sub
 
@@ -50,7 +50,7 @@ Private Function GetTaskIdFromSelection() As String
 End Function
 
 ' 辅助函数：清理特定工作簿的任务
-Public Sub CleanupWorkbookTasks(wbName As String)
+Private Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
 
     If g_Tasks Is Nothing Then Exit Sub
@@ -91,36 +91,8 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     LogInfo "已清理工作簿任务: " & wbName
 End Sub
 
-' 辅助函数：清理特定任务的监视点
-Private Sub CleanupTaskWatches(task As TaskUnit)
-    On Error Resume Next
-
-    If task Is Nothing Then Exit Sub
-    If g_Watches Is Nothing Then Exit Sub
-
-    ' 使用任务的 taskWatches 集合进行清理
-    Dim wc As Variant
-    Dim removeList As Collection
-    Set removeList = New Collection
-
-    ' 收集要移除的 watch
-    For Each wc In task.taskWatches
-        removeList.Add CStr(wc)
-    Next
-
-    ' 从主索引移除
-    For Each wc In removeList
-        If g_Watches.Exists(CStr(wc)) Then
-            g_Watches.Remove CStr(wc)
-        End If
-    Next
-
-    ' 清空任务的 watch 集合
-    Set task.taskWatches = New Collection
-End Sub
-
 ' 辅助函数：清理特定工作簿的监视点
-Public Sub CleanupWorkbookWatches(wbName As String)
+Private Sub CleanupWorkbookWatches(wbName As String)
     On Error Resume Next
 
     If g_Watches Is Nothing Then Exit Sub
@@ -158,6 +130,55 @@ Public Sub CleanupWorkbookWatches(wbName As String)
         LogDebug "已清理工作簿 " & wbName & " 的 " & toRemove.Count & " 个监控"
     End If
 End Sub
+
+' 辅助函数：清理特定任务的监视点
+Private Sub CleanupTaskWatches(task As TaskUnit)
+    On Error Resume Next
+
+    If task Is Nothing Then Exit Sub
+    If g_Watches Is Nothing Then Exit Sub
+
+    ' 使用任务的 taskWatches 集合进行清理
+    Dim wc As Variant
+    Dim removeList As Collection
+    Set removeList = New Collection
+
+    ' 收集要移除的 watch
+    For Each wc In task.taskWatches
+        removeList.Add CStr(wc)
+    Next
+
+    ' 从主索引移除
+    For Each wc In removeList
+        If g_Watches.Exists(CStr(wc)) Then
+            g_Watches.Remove CStr(wc)
+        End If
+    Next
+
+    ' 清空任务的 watch 集合
+    Set task.taskWatches = New Collection
+End Sub
+
+' 辅助函数：将权重转换为近似的 nice 值
+Private Function WeightToNice(weight As Double) As Integer
+    Dim i As Integer
+    Dim minDiff As Double
+    Dim bestIndex As Integer
+
+    minDiff = 1E+308
+    bestIndex = 20  ' 默认 nice=0
+
+    For i = 0 To 39
+        Dim diff As Double
+        diff = Abs(weight - g_CFS_niceToWeight(i))
+        If diff < minDiff Then
+            minDiff = diff
+            bestIndex = i
+        End If
+    Next
+
+    WeightToNice = bestIndex - 20
+End Function
 ' ============================================
 ' 第七部分：可视化操作函数
 ' ============================================
@@ -207,11 +228,16 @@ Public Sub EnableLuaTaskMenu()
     Set luaConfigMenu = cMenu.Controls.Add(Type:=msoControlPopup, Temporary:=True)
     luaConfigMenu.Caption = "Lua 设置管理"
     luaConfigMenu.Tag = "luaConfigMenu"
-    ' 添加管理的子菜单
+        ' 添加管理的子菜单
     AddLuaMenuItem luaConfigMenu, "启用热重载", "LuaConfigMenu_EnableHotReload"
     AddLuaMenuItem luaConfigMenu, "禁用热重载", "LuaConfigMenu_DisableHotReload"
     AddLuaMenuItem luaConfigMenu, "手动重载 functions.lua", "LuaConfigMenu_ReloadFunctions"
     AddLuaMenuItem luaConfigMenu, "设置调度间隔（毫秒）", "LuaConfigMenu_SetSchedulerInterval"
+    AddLuaMenuItem luaConfigMenu, "设置目标延迟（毫秒）", "LuaConfigMenu_SetTargetLatency"
+    AddLuaMenuItem luaConfigMenu, "设置最小粒度（毫秒）", "LuaConfigMenu_SetMinGranularity"
+    AddLuaMenuItem luaConfigMenu, "启用自动权重调整", "LuaConfigMenu_EnableAutoWeight"
+    AddLuaMenuItem luaConfigMenu, "禁用自动权重调整", "LuaConfigMenu_DisableAutoWeight"
+    AddLuaMenuItem luaConfigMenu, "按Nice值设置权重", "LuaConfigMenu_SetTaskNice"
 
     ' 添加调试的主菜单
     Dim luaDebugMenu As CommandBarControl
@@ -437,7 +463,8 @@ Private Sub LuaTaskMenu_ShowDetail()
     msg = msg & "进度: " & Format(task.taskProgress, "0.00") & "%" & vbCrLf
     msg = msg & "消息: " & task.taskMessage & vbCrLf
     msg = msg & "  CFS vruntime: " & Format(task.CFS_vruntime, "0.00") & " ms" & vbCrLf
-    msg = msg & "  CFS 权重: " & task.CFS_weight & vbCrLf
+    msg = msg & "  CFS 权重: " & Format(task.CFS_weight, "0.0") & vbCrLf
+    msg = msg & "  CFS Nice值: " & WeightToNice(task.CFS_weight) & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
 
     ' 启动参数
@@ -918,6 +945,111 @@ Private Sub LuaConfigMenu_SetSchedulerInterval()
 
     g_SchedulerIntervalMilliSec = seconds
 End Sub
+
+' 设置目标延迟
+Private Sub LuaConfigMenu_SetTargetLatency()
+    Dim latency As Variant
+    Dim maxAllowed As Double
+    maxAllowed = g_SchedulerIntervalMilliSec * 0.8
+
+    latency = Application.InputBox( _
+        "请输入CFS目标延迟（ms），默认调度间隔的10%" & vbCrLf & _
+        "范围: 10 ~ " & maxAllowed & " (当前调度间隔的80%)", _
+        "CFS参数", g_CFS_targetLatency, Type:=1)
+
+    If latency = False Then Exit Sub
+    If latency < 10 Or latency > maxAllowed Then
+        MsgBox "目标延迟必须在 10-" & maxAllowed & " ms 范围内。", vbExclamation
+        Exit Sub
+    End If
+
+    g_CFS_targetLatency = CDbl(latency)
+End Sub
+
+' 设置最小粒度
+Private Sub LuaConfigMenu_SetMinGranularity()
+    Dim granularity As Variant
+    granularity = Application.InputBox( _
+            "请输入CFS最小执行粒度（ms，范围1-100）" & vbCrLf & _
+            "说明：单次任务执行的最小计时单位", _
+            "CFS参数", _
+            g_CFS_minGranularity, _
+            Type:=1 _
+        )
+
+    If granularity = False Then Exit Sub
+    If granularity < 1 Or granularity > 100 Then
+        MsgBox "最小粒度必须在 1-100 ms 范围内。", vbExclamation, "无效值"
+        Exit Sub
+    End If
+
+    g_CFS_minGranularity = CDbl(granularity)
+    MsgBox "CFS最小粒度已设置为: " & g_CFS_minGranularity & " ms", vbInformation
+End Sub
+
+' 启用自动权重调整
+Private Sub LuaConfigMenu_EnableAutoWeight()
+    g_CFS_autoWeight = True
+    MsgBox "自动权重调整已启用。" & vbCrLf & vbCrLf & _
+           "系统将根据任务的实际执行时间自动调整权重：" & vbCrLf & _
+           "- 执行时间过长的任务会降低权重" & vbCrLf & _
+           "- 执行时间较短的任务会提高权重", _
+           vbInformation, "自动权重"
+End Sub
+
+' 禁用自动权重调整
+Private Sub LuaConfigMenu_DisableAutoWeight()
+    g_CFS_autoWeight = False
+    MsgBox "自动权重调整已禁用。" & vbCrLf & _
+           "任务权重将保持手动设置的值。", _
+           vbInformation, "自动权重"
+End Sub
+
+' 按Nice值设置任务权重
+Private Sub LuaConfigMenu_SetTaskNice()
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+
+    If taskId = vbNullString Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+
+    Dim task As TaskUnit
+    Set task = g_Tasks(taskId)
+
+    ' 计算当前权重对应的近似 nice 值
+    Dim currentNice As Integer
+    currentNice = WeightToNice(task.CFS_weight)
+
+    Dim newNice As Variant
+    newNice = Application.InputBox( _
+        "设置任务优先级（Nice值，范围 -20 到 +19）" & vbCrLf & vbCrLf & _
+        "   -20 = 最高优先级（权重最大）" & vbCrLf & _
+        "     0 = 普通优先级（默认）" & vbCrLf & _
+        "   +19 = 最低优先级（权重最小）" & vbCrLf & vbCrLf & _
+        "当前权重: " & Format(task.CFS_weight, "0.0") & vbCrLf & _
+        "对应Nice值: " & currentNice, _
+        "Nice 值设置", _
+        currentNice, _
+        Type:=1)
+
+    If newNice = False Then Exit Sub
+    If newNice < -20 Or newNice > 19 Then
+        MsgBox "Nice值必须在 -20 到 +19 范围内。", vbExclamation, "无效值"
+        Exit Sub
+    End If
+
+    ' 转换 nice 值到数组索引（-20 对应 0，+19 对应 39）
+    Dim niceIndex As Integer
+    niceIndex = CInt(newNice) + 20
+
+    task.CFS_weight = g_CFS_niceToWeight(niceIndex)
+
+    MsgBox "任务 " & taskId & " 优先级已设置:" & vbCrLf & _
+           "  Nice值: " & newNice & vbCrLf & _
+           "  权重: " & Format(task.CFS_weight, "0.0"), vbInformation
+End Sub
 ' ====调试和诊断功能====
 ' 显示加载宏状态
 Private Sub LuaDebugMenu_ShowAddinStatus()
@@ -935,8 +1067,9 @@ Private Sub LuaDebugMenu_ShowAddinStatus()
     msg = msg & "调度算法: CFS (完全公平调度)" & vbCrLf
     msg = msg & "目标延迟: " & g_CFS_targetLatency & " ms" & vbCrLf
     msg = msg & "最小粒度: " & g_CFS_minGranularity & " ms" & vbCrLf
+    msg = msg & "自动权重: " & IIf(g_CFS_autoWeight, "已启用", "已禁用") & vbCrLf
     msg = msg & "当前 min_vruntime: " & Format(g_CFS_minVruntime, "0.00") & vbCrLf
-    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+    msg = msg & "----------------------------------------" & vbCrLf
     If g_Tasks Is Nothing Then
         msg = msg & "任务总数: 0" & vbCrLf
     Else
@@ -1023,9 +1156,12 @@ Private Sub LuaPerfMenu_ShowSchedulerStats()
 
     msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerStats.LastTime, "0.00") & " ms" & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
-    msg = msg & "调度算法: CFS" & vbCrLf
-    msg = msg & "调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf
-    msg = msg & "当前 min_vruntime: " & Format(g_CFS_minVruntime, "0.00") & " ms" & vbCrLf
+    msg = msg & "CFS 调度参数:" & vbCrLf
+    msg = msg & "  调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf
+    msg = msg & "  目标延迟: " & g_CFS_targetLatency & " ms" & vbCrLf
+    msg = msg & "  最小粒度: " & g_CFS_minGranularity & " ms" & vbCrLf
+    msg = msg & "  自动权重: " & IIf(g_CFS_autoWeight, "已启用", "已禁用") & vbCrLf
+    msg = msg & "  min_vruntime: " & Format(g_CFS_minVruntime, "0.00") & " ms" & vbCrLf
     msg = msg & vbCrLf & "当前状态: " & IIf(g_SchedulerRunning, "运行中", "已停止") & vbCrLf
     msg = msg & "活跃任务: " & g_TaskQueue.Count & vbCrLf
 

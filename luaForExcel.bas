@@ -60,10 +60,9 @@ Private Const LUA_OK = 0
 Private Const LUA_YIELD = 1
 Private Const LUA_ERRRUN = 2
 ' ===== 全局变量 =====
-Private g_LogLevel As Byte ' 日志等级：0=错误，1=信息，2=调试
 Private g_LuaState As LongPtr
 Private g_Initialized As Boolean
-Private g_HotReloadEnabled As Boolean
+Private g_HotReloadEnabled As Boolean ' 是否启用 hot-reload，默认开启
 Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
 Private g_CFS_autoWeight As Boolean  ' 自动调整权重开关
@@ -84,22 +83,15 @@ Public g_Watches As Object          ' Dictionary: watchCell -> WatchInfo
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
 Public g_NextTaskId As Integer         ' 新建下一个任务ID计数器
-Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)
+Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)，默认1000ms
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
 Private g_CFS_minVruntime As Double       ' 队列中最小的 vruntime（用于新任务初始化）
-Private g_CFS_targetLatency As Double     ' 目标延迟周期（ms），默认 100ms
-Private g_CFS_minGranularity As Double    ' 最小执行粒度（ms），默认 10ms
+Private g_CFS_targetLatency As Double     ' 目标延迟周期（ms），默认为调度间隔的十分之一
+Private g_CFS_minGranularity As Double    ' 最小执行粒度（ms），默认 5ms
 Private g_CFS_niceToWeight(0 To 39) As Double  ' nice 值到权重的映射表
 ' ===== 配置常量 =====
 Private Const CP_UTF8 As Long = 65001
 Private Const LOG_LEVEL As Byte = 1  ' 默认日志等级：0=错误，1=信息，2=调试
-Private Const DEFAULT_HOT_RELOAD_ENABLED As Boolean = True
-Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默认1000ms
-
-Private Const CFS_DEFAULT_WEIGHT As Double = 1024 ' 默认权重（对应 nice=0）
-Private Const CFS_TARGET_LATENCY As Double = 100  ' 目标最小延迟周期（ms）
-Private Const CFS_MIN_GRANULARITY As Double = 5  ' 最小执行粒度（ms）
-
 Private Const LUA_REGISTRYINDEX As Long = -1001000
 ' ===== 性能统计全局变量 =====
 Private Type SchedulerStats
@@ -121,8 +113,6 @@ Public Function InitLuaState() As Boolean
         Exit Function
     End If
 
-    g_LogLevel = LOG_LEVEL
-
     ' 创建Lua状态机
     g_LuaState = luaL_newstate()
     If g_LuaState = 0 Then
@@ -137,7 +127,7 @@ Public Function InitLuaState() As Boolean
     ' 固定为加载项目录下的functions.lua
     g_FunctionsPath = ThisWorkbook.Path & "\functions.lua"
     g_LastModified = #1/1/1900#
-    g_HotReloadEnabled = DEFAULT_HOT_RELOAD_ENABLED
+    g_HotReloadEnabled = True
 
     InitCoroutineSystem
 
@@ -160,11 +150,11 @@ End Function
 
 ' 初始化协程系统
 Private Sub InitCoroutineSystem()
-    If g_SchedulerIntervalMilliSec = 0 Then g_SchedulerIntervalMilliSec = SCHEDULER_INTERVAL_Milli_SEC
+    If g_SchedulerIntervalMilliSec = 0 Then g_SchedulerIntervalMilliSec = 1000
     ' CFS 参数初始化
     If g_CFS_minVruntime = 0 Then g_CFS_minVruntime = 0
-    If g_CFS_targetLatency = 0 Then g_CFS_targetLatency = CFS_TARGET_LATENCY
-    If g_CFS_minGranularity = 0 Then g_CFS_minGranularity = CFS_MIN_GRANULARITY
+    If g_CFS_targetLatency = 0 Then g_CFS_targetLatency = g_SchedulerIntervalMilliSec / 10  ' 默认为调度间隔的十分之一
+    If g_CFS_minGranularity = 0 Then g_CFS_minGranularity = 5
     g_CFS_autoWeight = False  ' 默认关闭自动权重调整
     ' 初始化 nice 到权重的映射表（简化版，只用 0-39 对应 nice -20 到 +19）
     ' 权重公式: weight = 1024 / 1.25^nice  (nice=0 时 weight=1024)
@@ -306,7 +296,7 @@ Private Function TryLoadFunctionsFile() As Boolean
         TryLoadFunctionsFile = False
         Exit Function
     End If
-    
+
     ' 第二步：加载到主状态
     TryLoadFunctionsFile = LoadFunctionsIntoMainState()
 End Function
@@ -543,7 +533,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .taskLastTime = 0
         .taskTotalTime = 0
         .taskTickCount = 0
-        .CFS_weight = CFS_DEFAULT_WEIGHT
+        .CFS_weight = 1024
         .CFS_vruntime = g_CFS_minVruntime  ' 从当前最小值开始
     End With
     g_Tasks.Add taskId, task
@@ -1055,12 +1045,22 @@ End Sub
 Private Sub ScheduleByCFS()
     If g_TaskQueue.Count = 0 Then Exit Sub
 
-    Dim tickBudget As Double
+    Dim tickBudget As Double ' 本次调度时间预算
     Dim taskStart As Double, taskElapsed As Double
     Dim selectedTask As TaskUnit
+    Dim taskCount As Long
 
-    ' 计算本次 tick 的时间预算
-    tickBudget = g_SchedulerIntervalMilliSec * 0.8  ' 留 20% 余量给 VBA 开销
+    ' 统计活跃任务数
+    taskCount = CountActiveTasks()
+    If taskCount = 0 Then Exit Sub
+
+    ' 计算本次 tick 的时间预算（使用 targetLatency）
+    tickBudget = g_CFS_targetLatency
+
+    ' 计算每个任务的理想时间片
+    Dim idealSlice As Double
+    idealSlice = tickBudget / taskCount
+    If idealSlice < g_CFS_minGranularity Then idealSlice = g_CFS_minGranularity
 
     Dim totalElapsed As Double
     totalElapsed = 0
@@ -1095,7 +1095,12 @@ Private Sub ScheduleByCFS()
         ' 3. 更新 vruntime
         CFS_UpdateVruntime selectedTask, taskElapsed
 
-        ' 4. 更新工作簿统计（保留此功能）
+        ' 4. 自动权重调整
+        If g_CFS_autoWeight Then
+            CFS_AutoAdjustWeight selectedTask, taskElapsed, idealSlice
+        End If
+
+        ' 5. 更新工作簿统计
         If g_Workbooks.Exists(selectedTask.taskWorkbook) Then
             With g_Workbooks(selectedTask.taskWorkbook)
                 .wbLastTime = taskElapsed
@@ -1104,7 +1109,7 @@ Private Sub ScheduleByCFS()
             End With
         End If
 
-        ' 5. 终止态清理
+        ' 6. 终止态清理
         Select Case selectedTask.taskStatus
             Case CO_DONE, CO_ERROR
                 TaskQueueRemove selectedTask
@@ -1112,6 +1117,64 @@ Private Sub ScheduleByCFS()
 
 ContinueLoop:
     Loop
+End Sub
+
+' 统计活跃任务数
+Private Function CountActiveTasks() As Long
+    Dim count As Long
+    Dim t As Variant
+    Dim task As TaskUnit
+
+    count = 0
+    For Each t In g_TaskQueue
+        Set task = t
+        If task.taskStatus = CO_YIELD Then
+            count = count + 1
+        End If
+    Next
+    CountActiveTasks = count
+End Function
+
+' 自动调整任务权重
+Private Sub CFS_AutoAdjustWeight(task As TaskUnit, actualTime As Double, idealSlice As Double)
+    ' 基于实际执行时间与理想时间片的比较调整权重
+    ' 如果任务执行时间远超理想时间片，降低权重（让其他任务有机会）
+    ' 如果任务执行时间远低于理想时间片，提高权重（它可以跑更多）
+
+    Dim ratio As Double
+    Dim adjustment As Double
+    Dim newWeight As Double
+
+    If idealSlice <= 0 Then Exit Sub
+
+    ratio = actualTime / idealSlice
+
+    ' 根据比例计算调整系数
+    If ratio > 2 Then
+        ' 执行时间过长，降低权重
+        adjustment = 0.95
+    ElseIf ratio > 1.5 Then
+        adjustment = 0.98
+    ElseIf ratio < 0.5 Then
+        ' 执行时间很短，提高权重
+        adjustment = 1.05
+    ElseIf ratio < 0.75 Then
+        adjustment = 1.02
+    Else
+        ' 在合理范围内，不调整
+        Exit Sub
+    End If
+
+    newWeight = task.CFS_weight * adjustment
+
+    ' 限制权重范围（使用 nice 值映射表的范围）
+    If newWeight < g_CFS_niceToWeight(39) Then
+        newWeight = g_CFS_niceToWeight(39)  ' 最低权重 ~12
+    ElseIf newWeight > g_CFS_niceToWeight(0) Then
+        newWeight = g_CFS_niceToWeight(0)   ' 最高权重 ~90000
+    End If
+
+    task.CFS_weight = newWeight
 End Sub
 ' 选择 vruntime 最小的任务（CFS 红黑树的简化实现）
 Private Function CFS_PickNextTask() As TaskUnit
@@ -1134,24 +1197,43 @@ End Function
 ' 更新任务的 vruntime
 Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
     Dim vruntimeDelta As Double
-    vruntimeDelta = actualRuntime * (CFS_DEFAULT_WEIGHT / task.CFS_weight)
+    Dim weightedRuntime As Double
+    
+    ' 确保最小执行粒度
+    If actualRuntime < g_CFS_minGranularity Then
+        actualRuntime = g_CFS_minGranularity
+    End If
+    
+    ' 计算加权虚拟运行时间
+    vruntimeDelta = actualRuntime * (1024 / task.CFS_weight)
 
     task.CFS_vruntime = task.CFS_vruntime + vruntimeDelta
     task.CFS_lastScheduled = GetTickCount()
 
     ' 更新全局最小 vruntime
-    If task.CFS_vruntime > g_CFS_minVruntime Then
-        Dim minV As Double
-        Dim t As Variant
-        Dim tsk As TaskUnit  ' 改名避免与参数冲突
+    UpdateGlobalMinVruntime
+End Sub
+' 更新全局最小 vruntime
+Private Sub UpdateGlobalMinVruntime()
+    Dim minV As Double
+    Dim t As Variant
+    Dim tsk As TaskUnit
+    Dim found As Boolean
 
-        minV = task.CFS_vruntime
-        For Each t In g_TaskQueue
-            Set tsk = t
-            If tsk.taskStatus = CO_YIELD And tsk.CFS_vruntime < minV Then
+    minV = 1E+308
+    found = False
+
+    For Each t In g_TaskQueue
+        Set tsk = t
+        If tsk.taskStatus = CO_YIELD Then
+            If tsk.CFS_vruntime < minV Then
                 minV = tsk.CFS_vruntime
+                found = True
             End If
-        Next
+        End If
+    Next
+
+    If found Then
         g_CFS_minVruntime = minV
     End If
 End Sub
@@ -1845,6 +1927,13 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
                 task.CFS_vruntime = g_CFS_minVruntime
                 task.CFS_lastScheduled = GetTickCount()
             End If
+            ' 新任务首次进入 YIELD 状态，使用 nice 值初始化权重
+            If oldStatus = CO_DEFINED Then
+                ' 默认 nice=0，使用索引 20
+                task.CFS_weight = g_CFS_niceToWeight(20)
+                task.CFS_vruntime = g_CFS_minVruntime
+                task.CFS_lastScheduled = GetTickCount()
+            End If
 
         Case CO_DEFINED
             ' 重置任务到初始状态
@@ -1859,7 +1948,7 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
             task.taskTotalTime = 0
             task.taskTickCount = 0
             task.CFS_vruntime = 0
-            task.CFS_weight = CFS_DEFAULT_WEIGHT
+            task.CFS_weight = 1024
             task.CFS_lastScheduled = 0
     End Select
 
