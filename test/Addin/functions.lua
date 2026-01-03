@@ -366,7 +366,7 @@ function progress_simulator(taskCell, maxSteps)
         local progress = (currentStep / steps) * 100
 
         coroutine.yield({
-            status = "yielded",
+            status = "yield",
             progress = progress,
             message = string.format(
                 "progress: 进度 %d/%d (%.1f%%)",
@@ -529,7 +529,7 @@ function my_coroutine_task(taskCell, arg1, arg2, ...)
         -- yield 暂停并返回状态
         -- 返回格式必须是字典 {}
         coroutine.yield({
-            status = "yielded",      -- 必须是 "yielded"
+            status = "yield",      -- 必须是 "yield"
             progress = progress,     -- 进度百分比 (0-100)
             message = "处理步骤 " .. i .. "/" .. total_steps,
             value = result           -- 当前步骤的结果（可选）
@@ -570,7 +570,7 @@ function robust_coroutine_task(taskCell, input_data)
             
             -- 报告进度
             coroutine.yield({
-                status = "yielded",
+                status = "yield",
                 progress = progress,
                 message = "步骤 " .. step .. " 完成",
                 value = step_result
@@ -614,7 +614,7 @@ function interactive_coroutine_task(taskCell, initial_value)
         
         -- yield 并接收下一次 resume 的参数
         local user_input1, user_input2 = coroutine.yield({
-            status = "yielded",
+            status = "yield",
             progress = step * 20,
             message = "等待输入，当前值: " .. current_value,
             value = current_value
@@ -651,7 +651,7 @@ end
 
 2. yield 返回格式（为一节或二阶列表、字典。列表默认作为为value，字典按如下规则）：
    {
-       status = "yielded",      -- 可选，应为yielded、done、error，指挥VBA调度器接下来怎么处理此协程，yielded：等待下一次resume；done：提前结束，被清理出协程队列；error：手动触发VBA调度错误，被清理出队列。如果省略此字段则默认视为yielded
+       status = "yield",      -- 可选，应为yield、done、error，指挥VBA调度器接下来怎么处理此协程，yield：等待下一次resume；done：提前结束，被清理出协程队列；error：手动触发VBA调度错误，被清理出队列。如果省略此字段则默认视为yield
        progress = 50,           -- 可选，进度百分比
        message = "消息",        -- 可选，状态消息
        value = result_data      -- 可选，当前结果，单值或列表
@@ -719,7 +719,7 @@ end
 -- 辅助函数：创建进度报告（字典格式）
 local function makeYieldResult(status, progress, message, value)
     return {
-        {"status", status or "yielded"},
+        {"status", status or "yield"},
         {"progress", progress or 0},
         {"message", message or ""},
         {"value", value}
@@ -761,7 +761,7 @@ function counter_task(taskCell, maxIterations, initialValue, stepValue)
     
     -- 第一次 yield，报告初始状态
     local resumeInput = coroutine.yield(makeYieldResult(
-        "yielded",
+        "yield",
         0,
         string.format("初始化完成，将运行 %d 次迭代", maxIterations),
         toRegion({{"迭代", "当前值", "输入", "累计"}})
@@ -865,7 +865,7 @@ function counter_task(taskCell, maxIterations, initialValue, stepValue)
         
         -- yield 当前状态，等待下次 resume
         resumeInput = coroutine.yield(makeYieldResult(
-            "yielded",
+            "yield",
             progress,
             string.format("迭代 %d/%d，当前值: %s", iteration, maxIterations, currentValue),
             resultRegion
@@ -886,7 +886,7 @@ function simple_counter(taskCell, times)
         
         if i < times then
             coroutine.yield(makeYieldResult(
-                "yielded",
+                "yield",
                 (i / times) * 100,
                 string.format("计数: %d / %d", i, times),
                 {{i, count}}
@@ -915,7 +915,7 @@ function region_processor(taskCell, operation)
     
     -- 首次 yield，等待输入
     local inputData = coroutine.yield(makeYieldResult(
-        "yielded",
+        "yield",
         0,
         "等待输入区域数据...",
         {{"状态", "等待输入"}}
@@ -990,7 +990,7 @@ function region_processor(taskCell, operation)
         
         -- yield 当前结果
         inputData = coroutine.yield(makeYieldResult(
-            "yielded",
+            "yield",
             batch,  -- 用批次数作为进度指示
             string.format("批次 %d: %s = %s (处理 %d 个值)", batch, operation, result, count),
             results
@@ -1022,7 +1022,7 @@ function matrix_builder(taskCell, targetRows, targetCols)
     
     -- 首次 yield
     local rowData = coroutine.yield(makeYieldResult(
-        "yielded",
+        "yield",
         0,
         string.format("准备构建 %dx%d 矩阵，请输入第 1 行", targetRows, targetCols),
         {{"状态", "等待第1行数据"}}
@@ -1085,7 +1085,7 @@ function matrix_builder(taskCell, targetRows, targetCols)
         
         -- yield 等待下一行
         rowData = coroutine.yield(makeYieldResult(
-            "yielded",
+            "yield",
             progress,
             string.format("已添加 %d/%d 行，请输入第 %d 行", rowCount, targetRows, rowCount + 1),
             displayMatrix

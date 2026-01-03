@@ -23,12 +23,15 @@ Public CFS_vruntime As Double      ' 虚拟运行时间（核心调度依据）
 Public CFS_weight As Double        ' 任务权重（默认1024，越大优先级越高）
 Public CFS_lastScheduled As Double ' 上次被调度的时间戳（GetTickCount）
 
+Public taskWatches As Collection ' 任务监视的Watchcell字符串的集合
+
 Private Sub Class_Initialize()
     taskCoRef = 0
     taskCoThread = 0
     CFS_vruntime = 0
     CFS_weight = 1024
     CFS_lastScheduled = 0
+    Set taskWatches = New Collection
 End Sub
 
 ' 检查协程是否有效

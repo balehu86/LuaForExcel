@@ -19,7 +19,6 @@ Private Sub Workbook_Open()
     If g_Workbooks Is Nothing Then Set g_Workbooks = CreateObject("Scripting.Dictionary")
     If g_TaskQueue Is Nothing Then Set g_TaskQueue = New Collection
     If g_Watches Is Nothing Then Set g_Watches = CreateObject("Scripting.Dictionary")
-    If g_WatchesByTask Is Nothing Then Set g_WatchesByTask = CreateObject("Scripting.Dictionary")
     ' 删除 g_DirtyWatches 初始化
     DisableLuaTaskMenu
     EnableLuaTaskMenu
@@ -42,7 +41,6 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
     Set g_TaskQueue = Nothing
     If Not g_Watches Is Nothing Then g_Watches.RemoveAll
     Set g_Watches = Nothing
-    ' 删除 g_DirtyWatches 清理
 End Sub
 ' ============================================
 ' 应用程序级事件管理

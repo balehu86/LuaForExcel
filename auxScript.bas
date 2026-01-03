@@ -76,18 +76,14 @@ Public Sub CleanupWorkbookTasks(wbName As String)
         ' 从队列移除
         CollectionRemove g_TaskQueue, CStr(taskId)
 
-        ' 清理监控索引
-        If g_WatchesByTask.Exists(CStr(taskId)) Then
-            Dim watchCells As Collection
-            Set watchCells = g_WatchesByTask(CStr(taskId))
-            Dim wc As Variant
-            For Each wc In watchCells
-                If g_Watches.Exists(CStr(wc)) Then
-                    g_Watches.Remove CStr(wc)
-                End If
-            Next wc
-            g_WatchesByTask.Remove CStr(taskId)
-        End If
+        ' 通过 task.taskWatches 清理
+        Dim wc As Variant
+        For Each wc In task.taskWatches
+            If g_Watches.Exists(CStr(wc)) Then
+                g_Watches.Remove CStr(wc)
+            End If
+        Next wc
+
 
         ' 释放并移除
         Set g_Tasks(CStr(taskId)) = Nothing
@@ -121,7 +117,7 @@ Public Sub CleanupWorkbookWatches(wbName As String)
     For Each removeKey In toRemove
         ' 同时清理二级索引
         If g_Watches.Exists(CStr(removeKey)) Then
-            RemoveFromWatchesByTask g_Watches(CStr(removeKey)).watchTaskId, CStr(removeKey)
+            RemoveFromTaskWatches g_Watches(CStr(removeKey)).watchTask, CStr(removeKey)
         End If
         g_Watches.Remove CStr(removeKey)
     Next
@@ -284,11 +280,12 @@ Private Sub LuaTaskMenu_ResumeTask()
     End If
 
     If status = CO_PAUSED Then
-        g_Tasks(taskId).taskStatus = CO_YIELD
+        SetTaskStatus g_Tasks(taskId), CO_YIELD
+        g_Tasks(taskId).CFS_vruntime = g_CFS_minVruntime
     End If
 
     If Not CollectionExists(g_TaskQueue, taskId) Then
-        CollectionAdd g_TaskQueue, taskId
+        TaskQueueAdd g_Tasks(taskId)
         StartSchedulerIfNeeded
         MsgBox "任务 " & taskId & " 已恢复。", vbInformation, "任务已恢复"
     Else
@@ -324,23 +321,16 @@ Private Sub LuaTaskMenu_TerminateTask()
 
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
-    
+
     ' 使用统一的状态设置（会自动释放协程）
     SetTaskStatus task, CO_TERMINATED
-
-    ' 清理监控索引
-    If g_WatchesByTask.Exists(taskId) Then
-        Dim watchCells As Collection
-        Set watchCells = g_WatchesByTask(taskId)
-        Dim wc As Variant
-        For Each wc In watchCells
-            If g_Watches.Exists(CStr(wc)) Then
-                g_Watches.Remove CStr(wc)
-            End If
-        Next wc
-        g_WatchesByTask.Remove taskId
-    End If
-
+    ' 通过 task.taskWatches 清理
+    Dim wc As Variant
+    For Each wc In task.taskWatches
+        If g_Watches.Exists(CStr(wc)) Then
+            g_Watches.Remove CStr(wc)
+        End If
+    Next
     ' 释放 TaskUnit 并从字典移除
     Set g_Tasks(taskId) = Nothing
     g_Tasks.Remove taskId
@@ -348,6 +338,28 @@ Private Sub LuaTaskMenu_TerminateTask()
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
 
+' 重置任务
+Private Sub LuaTaskMenu_ReSetTask()
+    On Error Resume Next
+    If g_Tasks Is Nothing Then
+        MsgBox "任务系统未初始化", vbExclamation
+        Exit Sub
+    End If
+
+    Dim taskId As String
+    taskId = GetTaskIdFromSelection()
+    If taskId = vbNullString Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        Exit Sub
+    End If
+    If Not g_Tasks.Exists(taskId) Then
+        MsgBox "任务不存在或已删除", vbExclamation
+        Exit Sub
+    End If
+
+    SetTaskStatus g_Tasks(taskId), CO_DEFINED
+    MsgBox "任务已重置为defined状态: " & taskId, vbInformation
+End Sub
 ' 查看任务详情
 Private Sub LuaTaskMenu_ShowDetail()
     On Error GoTo ErrorHandler
@@ -637,17 +649,12 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
         CollectionRemove g_TaskQueue, CStr(removeId)
 
         ' 清理监控索引
-        If g_WatchesByTask.Exists(CStr(removeId)) Then
-            Dim watchCells As Collection
-            Set watchCells = g_WatchesByTask(CStr(removeId))
-            Dim wc As Variant
-            For Each wc In watchCells
-                If g_Watches.Exists(CStr(wc)) Then
-                    g_Watches.Remove CStr(wc)
-                End If
-            Next wc
-            g_WatchesByTask.Remove CStr(removeId)
-        End If
+        Dim wc As Variant
+        For Each wc In task.taskWatches
+            If g_Watches.Exists(CStr(wc)) Then
+                g_Watches.Remove CStr(wc)
+            End If
+        Next
 
         ' 释放并移除
         Set g_Tasks(CStr(removeId)) = Nothing
@@ -1020,7 +1027,7 @@ Private Sub LuaPerfMenu_ResetStats()
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
         task.taskLastTime = 0
-        task.TaskTotalTime = 0
+        task.taskTotalTime = 0
         task.taskTickCount = 0
     Next
 
