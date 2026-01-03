@@ -50,7 +50,7 @@ Private Function GetTaskIdFromSelection() As String
 End Function
 
 ' 辅助函数：清理特定工作簿的任务
-Private Sub CleanupWorkbookTasks(wbName As String)
+Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
 
     If g_Tasks Is Nothing Then Exit Sub
@@ -1041,7 +1041,7 @@ Private Sub LuaConfigMenu_SetTaskNice()
     End If
 
     ' 转换 nice 值到数组索引（-20 对应 0，+19 对应 39）
-    Dim niceIndex As Integer
+    Dim niceIndex As Byte
     niceIndex = CInt(newNice) + 20
 
     task.CFS_weight = g_CFS_niceToWeight(niceIndex)

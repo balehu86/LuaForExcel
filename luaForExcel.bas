@@ -158,7 +158,7 @@ Private Sub InitCoroutineSystem()
     g_CFS_autoWeight = False  ' 默认关闭自动权重调整
     ' 初始化 nice 到权重的映射表（简化版，只用 0-39 对应 nice -20 到 +19）
     ' 权重公式: weight = 1024 / 1.25^nice  (nice=0 时 weight=1024)
-    Dim i As Integer
+    Dim i As Byte
     For i = 0 To 39
         g_CFS_niceToWeight(i) = 1024 / (1.25 ^ (i - 20))
     Next
@@ -459,12 +459,12 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     wbName = callerWb.Name
     On Error GoTo ErrorHandler
     ' 自动注册工作簿
-    If Not g_Workbooks.Exists(wbName) Then
-        Dim wbInfo As New WorkbookInfo
-        wbInfo.wbName = wbName
-        g_Workbooks.Add wbName, wbInfo
-        Debug.Print "LuaTask自动注册工作簿: " & wbName
-    End If
+    ' If Not g_Workbooks.Exists(wbName) Then
+    '     Dim wbInfo As New WorkbookInfo
+    '     wbInfo.wbName = wbName
+    '     g_Workbooks.Add wbName, wbInfo
+    '     Debug.Print "LuaTask自动注册工作簿: " & wbName
+    ' End If
 
     ' 检查是否已存在任务
     Dim existingTaskId As String
@@ -1198,12 +1198,12 @@ End Function
 Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
     Dim vruntimeDelta As Double
     Dim weightedRuntime As Double
-    
+
     ' 确保最小执行粒度
     If actualRuntime < g_CFS_minGranularity Then
         actualRuntime = g_CFS_minGranularity
     End If
-    
+
     ' 计算加权虚拟运行时间
     vruntimeDelta = actualRuntime * (1024 / task.CFS_weight)
 
