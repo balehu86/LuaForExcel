@@ -66,6 +66,7 @@ Private g_Initialized As Boolean
 Private g_HotReloadEnabled As Boolean
 Private g_FunctionsPath As String  ' 固定为加载项目录
 Private g_LastModified As Date
+Private g_CFS_autoWeight As Boolean  ' 自动调整权重开关
 ' ===== 协程全局变量 =====
 Public Enum CoStatus
     CO_DEFINED
@@ -97,7 +98,7 @@ Private Const SCHEDULER_INTERVAL_Milli_SEC As Long = 1000  ' 调度间隔，默�
 
 Private Const CFS_DEFAULT_WEIGHT As Double = 1024 ' 默认权重（对应 nice=0）
 Private Const CFS_TARGET_LATENCY As Double = 100  ' 目标最小延迟周期（ms）
-Private Const CFS_MIN_GRANULARITY As Double = 10  ' 最小执行粒度（ms）
+Private Const CFS_MIN_GRANULARITY As Double = 5  ' 最小执行粒度（ms）
 
 Private Const LUA_REGISTRYINDEX As Long = -1001000
 ' ===== 性能统计全局变量 =====
@@ -164,6 +165,7 @@ Private Sub InitCoroutineSystem()
     If g_CFS_minVruntime = 0 Then g_CFS_minVruntime = 0
     If g_CFS_targetLatency = 0 Then g_CFS_targetLatency = CFS_TARGET_LATENCY
     If g_CFS_minGranularity = 0 Then g_CFS_minGranularity = CFS_MIN_GRANULARITY
+    g_CFS_autoWeight = False  ' 默认关闭自动权重调整
     ' 初始化 nice 到权重的映射表（简化版，只用 0-39 对应 nice -20 到 +19）
     ' 权重公式: weight = 1024 / 1.25^nice  (nice=0 时 weight=1024)
     Dim i As Integer

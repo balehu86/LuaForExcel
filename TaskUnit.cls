@@ -29,7 +29,6 @@ Private Sub Class_Initialize()
     taskCoRef = 0
     taskCoThread = 0
     CFS_vruntime = 0
-    CFS_weight = 1024
     CFS_lastScheduled = 0
     Set taskWatches = New Collection
 End Sub
