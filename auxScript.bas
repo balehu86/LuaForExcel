@@ -52,75 +52,61 @@ End Function
 ' 辅助函数：清理特定工作簿的任务
 Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
-    If g_Tasks Is Nothing Then Exit Sub
 
+    If g_Tasks Is Nothing Then Exit Sub
     ' 收集要删除的任务ID
     Dim toRemove As Collection
     Set toRemove = New Collection
     Dim taskId As Variant
-
     For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
             toRemove.Add CStr(taskId)
         End If
     Next
-
-    ' 删除任务
-    Dim task As TaskUnit
+    ' 使用安全删除
     For Each taskId In toRemove
-        Set task = g_Tasks(CStr(taskId))
-
-        ' 【修改】改为调用主模块统一释放函数
-        ReleaseTaskCoroutine task
-
-        ' 从队列移除
-        CollectionRemove g_TaskQueue, CStr(taskId)
-
-        ' 通过 task.taskWatches 清理
-        Dim wc As Variant
-        For Each wc In task.taskWatches
-            If g_Watches.Exists(CStr(wc)) Then
-                g_Watches.Remove CStr(wc)
-            End If
-        Next wc
-
-
-        ' 释放并移除
-        Set g_Tasks(CStr(taskId)) = Nothing
-        g_Tasks.Remove CStr(taskId)
+        SafeDeleteTask CStr(taskId)
     Next
-
-    ' 清理工作簿的监控
+    ' 清理工作簿的监控（额外保险，处理可能遗漏的）
     CleanupWorkbookWatches wbName
-
+    ' 清理孤儿 Watch
+    CleanupOrphanWatches
     ' 清理工作簿记录
-    If g_Workbooks.Exists(wbName) Then
-        g_Workbooks.Remove wbName
+    If Not g_Workbooks Is Nothing Then
+        If g_Workbooks.Exists(wbName) Then
+            g_Workbooks.Remove wbName
+        End If
     End If
+
+    LogInfo "已清理工作簿任务: " & wbName
 End Sub
 
 ' 辅助函数：清理特定工作簿的监视点
-Public Sub CleanupWorkbookWatches(wbName As String)
+Private Sub CleanupTaskWatches(task As TaskUnit)
     On Error Resume Next
+    
+    If task Is Nothing Then Exit Sub
     If g_Watches Is Nothing Then Exit Sub
-    Dim toRemove As Collection
-    Set toRemove = New Collection
-    Dim watchCell As Variant
-    Dim watchInfo As WatchInfo
-    For Each watchCell In g_Watches.Keys
-        Set watchInfo = g_Watches(watchCell)
-        If watchInfo.watchWorkbook = wbName Then
-            toRemove.Add CStr(watchCell)
+    
+    ' 使用任务的 taskWatches 集合进行清理
+    Dim wc As Variant
+    Dim removeList As Collection
+    Set removeList = New Collection
+    
+    ' 收集要移除的 watch
+    For Each wc In task.taskWatches
+        removeList.Add CStr(wc)
+    Next
+    
+    ' 从主索引移除
+    For Each wc In removeList
+        If g_Watches.Exists(CStr(wc)) Then
+            g_Watches.Remove CStr(wc)
         End If
     Next
-    Dim removeKey As Variant
-    For Each removeKey In toRemove
-        ' 同时清理二级索引
-        If g_Watches.Exists(CStr(removeKey)) Then
-            RemoveFromTaskWatches g_Watches(CStr(removeKey)).watchTask, CStr(removeKey)
-        End If
-        g_Watches.Remove CStr(removeKey)
-    Next
+    
+    ' 清空任务的 watch 集合
+    Set task.taskWatches = New Collection
 End Sub
 ' ============================================
 ' 第七部分：可视化操作函数
@@ -146,6 +132,7 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaTaskMenu, "暂停任务", "LuaTaskMenu_PauseTask"
     AddLuaMenuItem luaTaskMenu, "恢复任务", "LuaTaskMenu_ResumeTask"
     AddLuaMenuItem luaTaskMenu, "终止任务", "LuaTaskMenu_TerminateTask"
+    AddLuaMenuItem luaTaskMenu, "重置任务", "LuaTaskMenu_ResetTask"
     AddLuaMenuItem luaTaskMenu, "查看任务详情", "LuaTaskMenu_ShowDetail"
     AddLuaMenuItem luaTaskMenu, "设置任务权重", "LuaConfigMenu_SetTaskWeight"
 
@@ -160,6 +147,7 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaSchedulerMenu, "启动本簿所有任务", "LuaSchedulerMenu_StartAllWorkbookTasks"
     AddLuaMenuItem luaSchedulerMenu, "启动所有 defined 任务", "LuaSchedulerMenu_StartAllDefinedTasks"
     AddLuaMenuItem luaSchedulerMenu, "清理所有完成、错误任务", "LuaSchedulerMenu_CleanupFinishedTasks"
+    AddLuaMenuItem luaSchedulerMenu, "清理所有孤儿监视点", "LuaSchedulerMenu_CleanupOrphanWatches"
     AddLuaMenuItem luaSchedulerMenu, "删除此工作簿任务", "LuaSchedulerMenu_CleanupWorkbookTasks"
     AddLuaMenuItem luaSchedulerMenu, "删除所有任务", "LuaSchedulerMenu_ClearAllTasks"
     AddLuaMenuItem luaSchedulerMenu, "显示所有任务信息", "LuaSchedulerMenu_ShowAllTasks"
@@ -182,6 +170,7 @@ Public Sub EnableLuaTaskMenu()
     luaDebugMenu.Tag = "luaDebugMenu"
     ' 添加调试的子菜单
     AddLuaMenuItem luaDebugMenu, "显示插件状态", "LuaDebugMenu_ShowAddinStatus"
+    AddLuaMenuItem luaDebugMenu, "显示监视器状态", "LuaDebugMenu_ShowWatchStatus"
 
     ' 在右键菜单最后添加性能统计菜单
     Dim luaPerfMenu As CommandBarControl
@@ -271,7 +260,7 @@ Private Sub LuaTaskMenu_ResumeTask()
         Exit Sub
     End If
 
-    Dim status As String
+    Dim status As CoStatus
     status = g_Tasks(taskId).taskStatus
 
     If status <> CO_YIELD And status <> CO_PAUSED Then
@@ -296,70 +285,64 @@ End Sub
 ' 终止任务
 Private Sub LuaTaskMenu_TerminateTask()
     On Error Resume Next
-
     If g_Tasks Is Nothing Then
         MsgBox "任务系统未初始化", vbExclamation
         Exit Sub
     End If
-
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
     If taskId = vbNullString Then
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
         Exit Sub
     End If
-
     If Not g_Tasks.Exists(taskId) Then
         MsgBox "任务不存在或已删除", vbExclamation
         Exit Sub
     End If
-
     Dim result As VbMsgBoxResult
     result = MsgBox("确定要终止并删除任务 " & taskId & " 吗？", _
                     vbQuestion + vbYesNo, "确认终止")
     If result = vbNo Then Exit Sub
-
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
-
-    ' 使用统一的状态设置（会自动释放协程）
-    SetTaskStatus task, CO_TERMINATED
-    ' 通过 task.taskWatches 清理
-    Dim wc As Variant
-    For Each wc In task.taskWatches
-        If g_Watches.Exists(CStr(wc)) Then
-            g_Watches.Remove CStr(wc)
-        End If
-    Next
-    ' 释放 TaskUnit 并从字典移除
-    Set g_Tasks(taskId) = Nothing
-    g_Tasks.Remove taskId
-
+    ' ★ 修复：使用安全删除
+    SafeDeleteTask taskId
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
 
 ' 重置任务
-Private Sub LuaTaskMenu_ReSetTask()
+Private Sub LuaTaskMenu_ResetTask()
     On Error Resume Next
     If g_Tasks Is Nothing Then
         MsgBox "任务系统未初始化", vbExclamation
         Exit Sub
     End If
-
     Dim taskId As String
     taskId = GetTaskIdFromSelection()
     If taskId = vbNullString Then
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
         Exit Sub
     End If
+    
     If Not g_Tasks.Exists(taskId) Then
         MsgBox "任务不存在或已删除", vbExclamation
         Exit Sub
     End If
+    Dim task As TaskUnit
+    Set task = g_Tasks(taskId)
 
-    SetTaskStatus g_Tasks(taskId), CO_DEFINED
-    MsgBox "任务已重置为defined状态: " & taskId, vbInformation
+    ' 检查是否可以重置
+    If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
+        MsgBox "只能重置已完成或错误状态的任务。" & vbCrLf & _
+               "当前状态: " & StatusToString(task.taskStatus), vbExclamation, "无法重置"
+        Exit Sub
+    End If
+
+    ' 执行重置
+    SetTaskStatus task, CO_DEFINED
+
+    MsgBox "任务已重置为 DEFINED 状态: " & taskId & vbCrLf & vbCrLf & _
+           "现在可以重新启动此任务。", vbInformation, "重置成功"
 End Sub
+
 ' 查看任务详情
 Private Sub LuaTaskMenu_ShowDetail()
     On Error GoTo ErrorHandler
@@ -610,58 +593,34 @@ End Sub
 ' 清理所有已完成或错误的任务
 Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     On Error Resume Next
-
     If g_Tasks Is Nothing Then
         InitCoroutineSystem
     End If
-
     If g_Tasks.Count = 0 Then
         MsgBox "当前没有任务需要清理。", vbInformation, "清理任务"
         Exit Sub
     End If
-
     ' 收集需要清理的任务ID
     Dim toRemove As Collection
     Set toRemove = New Collection
-
     Dim taskId As Variant
-    Dim status As String
+    Dim status As CoStatus
     For Each taskId In g_Tasks.Keys
         status = g_Tasks(taskId).taskStatus
         If status = CO_DONE Or status = CO_ERROR Or status = CO_TERMINATED Then
             toRemove.Add CStr(taskId)
         End If
     Next
-
-    ' 删除任务
+    ' ★ 修复：使用安全删除
     Dim removeId As Variant
     Dim count As Integer
     count = 0
-    Dim task As TaskUnit
-
     For Each removeId In toRemove
-        Set task = g_Tasks(CStr(removeId))
-
-        ' 确保协程已释放（终态应该已释放，双重保险）
-        ReleaseTaskCoroutine task
-
-        ' 从队列移除
-        CollectionRemove g_TaskQueue, CStr(removeId)
-
-        ' 清理监控索引
-        Dim wc As Variant
-        For Each wc In task.taskWatches
-            If g_Watches.Exists(CStr(wc)) Then
-                g_Watches.Remove CStr(wc)
-            End If
-        Next
-
-        ' 释放并移除
-        Set g_Tasks(CStr(removeId)) = Nothing
-        g_Tasks.Remove CStr(removeId)
+        SafeDeleteTask CStr(removeId)
         count = count + 1
     Next
-
+    ' 额外清理孤儿 Watch
+    CleanupOrphanWatches
     MsgBox "已清理 " & count & " 个已完成或错误的任务。" & vbCrLf & _
            "剩余任务: " & g_Tasks.Count, vbInformation, "清理完成"
 End Sub
@@ -674,6 +633,23 @@ Private Sub LuaSchedulerMenu_CleanupWorkbookTasks()
     MsgBox "已清理工作簿 " & wb & " 的任务。", vbInformation
 End Sub
 
+' 手动清理孤儿监控菜单
+Private Sub LuaSchedulerMenu_CleanupOrphanWatches()
+    Dim beforeCount As Long
+    beforeCount = g_Watches.Count
+
+    CleanupOrphanWatches
+
+    Dim afterCount As Long
+    afterCount = g_Watches.Count
+
+    MsgBox "孤儿监控清理完成。" & vbCrLf & vbCrLf & _
+           "清理前: " & beforeCount & " 个监控" & vbCrLf & _
+           "清理后: " & afterCount & " 个监控" & vbCrLf & _
+           "已清理: " & (beforeCount - afterCount) & " 个", _
+           vbInformation, "清理完成"
+End Sub
+
 ' 清空所有任务队列
 Private Sub LuaSchedulerMenu_ClearAllTasks()
     Dim result As VbMsgBoxResult
@@ -681,22 +657,31 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
                     "这将删除所有任务数据，无法恢复！", _
                     vbExclamation + vbYesNo, "确认清空")
     If result = vbNo Then Exit Sub
+
     ' 停止调度器
     StopScheduler
-
-    ' 【修改】改为调用主模块统一释放函数
+    ' ★ 修复：使用安全删除
     If Not g_Tasks Is Nothing Then
+        Dim taskIds As Collection
+        Set taskIds = New Collection
+        
+        ' 先收集所有ID
         Dim taskId As Variant
-        Dim task As TaskUnit
         For Each taskId In g_Tasks.Keys
-            Set task = g_Tasks(taskId)
-            ReleaseTaskCoroutine task
+            taskIds.Add CStr(taskId)
         Next
-        ' 清空所有数据
-        g_Tasks.RemoveAll
+        
+        ' 再逐个删除
+        For Each taskId In taskIds
+            SafeDeleteTask CStr(taskId)
+        Next
     End If
+    ' 清理孤儿 Watch
+    CleanupOrphanWatches
 
+    ' 重置队列
     Set g_TaskQueue = New Collection
+
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
 End Sub
 
@@ -897,6 +882,49 @@ Private Sub LuaDebugMenu_ShowAddinStatus()
 
     MsgBox msg, vbInformation, "加载宏状态"
 End Sub
+
+' 显示Watch状态（调试用）
+Private Sub LuaDebugMenu_ShowWatchStatus()
+    If g_Watches Is Nothing Or g_Watches.Count = 0 Then
+        MsgBox "当前没有任何监控。", vbInformation, "Watch状态"
+        Exit Sub
+    End If
+
+    Dim msg As String
+    msg = "========================================" & vbCrLf
+    msg = msg & "  Watch 监控状态" & vbCrLf
+    msg = msg & "========================================" & vbCrLf & vbCrLf
+    msg = msg & "监控总数: " & g_Watches.Count & vbCrLf
+    msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
+
+    Dim watchCell As Variant
+    Dim wi As WatchInfo
+    Dim orphanCount As Long
+    orphanCount = 0
+
+    For Each watchCell In g_Watches.Keys
+        Set wi = g_Watches(watchCell)
+
+        Dim isOrphan As Boolean
+        isOrphan = Not g_Tasks.Exists(wi.watchTaskId)
+        If isOrphan Then orphanCount = orphanCount + 1
+
+        msg = msg & "Watch: " & CStr(watchCell) & vbCrLf
+        msg = msg & "  任务: " & wi.watchTaskId & IIf(isOrphan, " [孤儿!]", "") & vbCrLf
+        msg = msg & "  字段: " & wi.watchField & vbCrLf
+        msg = msg & "  目标: " & wi.watchTargetCell & vbCrLf
+        msg = msg & "  脏标记: " & wi.watchDirty & vbCrLf
+        msg = msg & "----------------------------------------" & vbCrLf
+    Next
+
+    If orphanCount > 0 Then
+        msg = msg & vbCrLf & "⚠️ 发现 " & orphanCount & " 个孤儿监控！" & vbCrLf
+        msg = msg & "建议使用【清理孤儿监控】功能清理。" & vbCrLf
+    End If
+
+    MsgBox msg, vbInformation, "Watch监控状态 (" & g_Watches.Count & " 个)"
+End Sub
+
 ' ====性能统计功能====
 ' 显示调度器统计
 Private Sub LuaPerfMenu_ShowSchedulerStats()

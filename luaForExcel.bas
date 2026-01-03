@@ -593,7 +593,7 @@ Public Function LuaGet(taskId As String, field As String) As Variant
 
     Select Case LCase(field)
         Case "status"
-            LuaGet = taskStatus
+            LuaGet = taskstatus
         Case "progress"
             LuaGet = task.taskProgress
         Case "message"
@@ -720,8 +720,8 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         If paramsChanged Then
             ' 更新二级索引（如果 taskId 变化）
             If needUpdateIndex Then
-                RemoveFromTaskWatches g_Tasks(taskId), callerAddr
-                AddToTaskWatches g_Tasks(taskId), callerAddr
+                RemoveFromTaskWatches wi.watchTask, callerAddr  ' 使用旧的 task 对象
+                AddToTaskWatches g_Tasks(taskId), callerAddr    ' 使用新的 taskId
             End If
 
             ' 更新监控属性
@@ -887,31 +887,39 @@ Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbNa
 End Sub
 ' 辅助函数：添加到二级索引（防重复）
 Private Sub AddToTaskWatches(task As TaskUnit, watchCell As String)
+    If task Is Nothing Then Exit Sub
 
-    ' 先检查是否已存在，再添加
-    Dim col As Collection
-    Set col = task.taskWatches
     ' 检查是否已存在
     Dim exists As Boolean
     exists = False
-
     On Error Resume Next
     Dim dummy As Variant
-    dummy = col(watchCell)
-    exists = (Err.Number = 0)
-    Err.Clear
+    Dim i As Long
+    For i = 1 To task.taskWatches.Count
+        If task.taskWatches(i) = watchCell Then
+            exists = True
+            Exit For
+        End If
+    Next
     On Error GoTo 0
-
     ' 不存在才添加
     If Not exists Then
-        col.Add watchCell
+        task.taskWatches.Add watchCell
     End If
 End Sub
 ' 辅助函数：从二级索引移除
 Private Sub RemoveFromTaskWatches(task As TaskUnit, watchCell As String)
     On Error Resume Next
-    task.taskWatches.Remove watchCell
-    On Error GoTo 0
+
+    If task Is Nothing Then Exit Sub
+
+    Dim i As Long
+    For i = task.taskWatches.Count To 1 Step -1
+        If task.taskWatches(i) = watchCell Then
+            task.taskWatches.Remove i
+            Exit For
+        End If
+    Next
 End Sub
 ' 优化后的 MarkWatchesDirty - O(m) 复杂度
 Private Sub MarkWatchesDirty(task As TaskUnit)
@@ -1010,48 +1018,39 @@ Private Sub StartSchedulerIfNeeded()
     Application.OnTime g_NextScheduleTime, "SchedulerTick" 
 End Sub
 
-' 调度器心跳 - 主入口
+' 调度器心跳 - 主入口 （添加定期清理）
 Public Sub SchedulerTick()
     On Error GoTo ErrorHandler
-
     If Not g_SchedulerRunning Then Exit Sub
     If g_TaskQueue.Count = 0 Then
         g_SchedulerRunning = False
         Exit Sub
     End If
-
-    ' 在整个调度周期开始时禁用事件和计算
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
-
     Dim schedulerStart As Double
     schedulerStart = GetTickCount()
-
     ' 使用 CFS 调度算法 
     Call ScheduleByCFS
-
     ' 性能计时统计
     Dim schedulerElapsed As Double
     schedulerElapsed = GetTickCount() - schedulerStart
     g_SchedulerStats.LastTime = schedulerElapsed
     g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
     g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
-
-    ' 在周期末尾统一处理所有监控刷新
-    ' 只有状态真的变化时才处理
-    If g_StateDirty Then
-        RefreshWatches  ' 批量写入所有脏监控的目标单元格
-        g_StateDirty = False
-        ' 不再调用 ActiveSheet.Calculate
-        ' 因为我们是直接写值到目标单元格，不需要重新计算公式
+    ' ★ 修复：每100次调度清理一次孤儿Watch
+    If g_SchedulerStats.TotalCount Mod 100 = 0 Then
+        CleanupOrphanWatches
     End If
-
-    ' 恢复 Excel 状态
+    ' 刷新监控
+    If g_StateDirty Then
+        RefreshWatches
+        g_StateDirty = False
+    End If
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
-
     ' 重新安排下一次调度
     If g_TaskQueue.Count > 0 Then
         g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
@@ -1060,8 +1059,8 @@ Public Sub SchedulerTick()
         g_SchedulerRunning = False
     End If
     Exit Sub
+    
 ErrorHandler:
-    ' 确保恢复 Excel 状态
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
@@ -1248,8 +1247,9 @@ Private Sub ResumeCoroutine(task As TaskUnit)
                 If Len(paramStr) > 0 And Not wb Is Nothing Then
                     On Error Resume Next
                     Dim rng As Range
-                    Set rng = Nothing
-                    Set rng = wb.Range(paramStr)
+                    Dim ws As Worksheet
+                    Set ws = GetWorksheetFromAddress(task.taskCell, wb)
+                    Set rng = ws.Range(paramStr)
 
                     If Err.Number = 0 And Not rng Is Nothing Then
                         If rng.Cells.Count = 1 Then
@@ -1416,13 +1416,13 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
     Dim coThread As LongPtr
     coThread = task.taskCoThread
 
-    Dim stackTop As Long
-    stackTop = lua_gettop(coThread)
+    ' 处理前记录栈顶（此时栈上是 nres 个返回值）
+    Dim stackTopBefore As Long
+    stackTopBefore = lua_gettop(coThread)
 
     Select Case result
         Case LUA_OK
-            ' 正常完成
-            If nres > 0 And stackTop > 0 Then
+            If nres > 0 And stackTopBefore > 0 Then
                 Dim retData As Variant
                 retData = GetValue(coThread, -1)
                 ParseYieldReturn task, retData, True
@@ -1431,20 +1431,17 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
             task.taskProgress = 100
 
         Case LUA_YIELD
-            ' 挂起
-            If nres > 0 And stackTop > 0 Then
+            If nres > 0 And stackTopBefore > 0 Then
                 Dim yieldData As Variant
                 yieldData = GetValue(coThread, -1)
                 ParseYieldReturn task, yieldData, False
             End If
-            ' 只有未被 ParseYieldReturn 设置为终态时才设为 yielded
             If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
                 SetTaskStatus task, CO_YIELD
             End If
 
         Case Else
-            ' 错误
-            If nres > 0 And stackTop > 0 Then
+            If nres > 0 And stackTopBefore > 0 Then
                 task.taskError = GetStringFromState(coThread, -1)
             Else
                 task.taskError = "协程错误: 代码 " & result
@@ -1452,14 +1449,17 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
             SetTaskStatus task, CO_ERROR
     End Select
 
-    lua_settop coThread, stackTop
+    ' 清空协程栈上的返回值，为下次 resume 做准备
+    lua_settop coThread, 0  ' 更明确：直接清空而不是恢复
+
     Exit Sub
 
 ErrorHandler:
     task.taskError = "处理结果错误: " & Err.Description
     SetTaskStatus task, CO_ERROR
-    If coThread <> 0 Then lua_settop coThread, stackTop
+    If coThread <> 0 Then lua_settop coThread, 0
 End Sub
+
 
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
@@ -1754,13 +1754,13 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
                         ' yield时,根据返回的status字段决定协程状态
                         Select Case statusVal
                             Case "yield"
-                                task.taskStatus = CO_YIELD
+                                SetTaskStatus task, CO_YIELD
                             Case "done"
-                                task.taskStatus = CO_DONE
+                                SetTaskStatus task, CO_DONE
                             Case "error"
-                                task.taskStatus = CO_ERROR
+                                SetTaskStatus task, CO_ERROR
                             Case Else
-                                task.taskStatus = CO_YIELD ' 默认为yielded
+                                SetTaskStatus task, CO_YIELD ' 默认为yielded
                         End Select
                     End If
                 Case "progress"
@@ -1835,8 +1835,10 @@ Private Function CanTransition(fromStatus As CoStatus, toStatus As CoStatus) As 
                            toStatus = CO_PAUSED Or toStatus = CO_TERMINATED)
         Case CO_PAUSED
             CanTransition = (toStatus = CO_YIELD Or toStatus = CO_TERMINATED)
-        Case CO_DONE, CO_ERROR
-            CanTransition = (toStatus = CO_DEFINED)
+        Case CO_DONE
+            CanTransition = (toStatus = CO_DEFINED Or toStatus = CO_TERMINATED)
+        Case CO_ERROR
+            CanTransition = (toStatus = CO_DEFINED Or toStatus = CO_TERMINATED)
         Case CO_TERMINATED
             CanTransition = False
         Case Else
@@ -1846,51 +1848,70 @@ End Function
 ' 统一设置任务状态并处理副作用
 Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
     If task Is Nothing Then Exit Sub
-    
+
     Dim oldStatus As CoStatus
     oldStatus = task.taskStatus
-    
+
+    ' 相同状态不处理
+    If oldStatus = newStatus Then Exit Sub
+
     Dim taskIdStr As String
     taskIdStr = "Task_" & task.taskId
-    
+
     ' 状态转换验证
     If Not CanTransition(oldStatus, newStatus) Then
-        LogError "非法状态转换: " & oldStatus & " -> " & newStatus
+        LogError "非法状态转换: " & StatusToString(oldStatus) & " -> " & StatusToString(newStatus) & " (Task: " & taskIdStr & ")"
         Exit Sub
     End If
-    
+
     ' 更新状态
     task.taskStatus = newStatus
-    
+
     ' 根据新状态处理
     Select Case newStatus
-        Case CO_DONE, CO_ERROR, CO_TERMINATED
+        Case CO_DONE, CO_ERROR
+            ' 完成或错误：释放协程但保留任务数据
             ReleaseTaskCoroutine task
             TaskQueueRemove task
-        Case CO_PAUSED
+
+        Case CO_TERMINATED
+            ' 终止：释放协程并从队列移除
+            ReleaseTaskCoroutine task
             TaskQueueRemove task
-            ' 注意：PAUSED 保留协程，以便恢复
+
+        Case CO_PAUSED
+            ' 暂停：从队列移除但保留协程
+            TaskQueueRemove task
+
         Case CO_YIELD
             ' 从 PAUSED 恢复时，重置 CFS 参数
             If oldStatus = CO_PAUSED Then
                 task.CFS_vruntime = g_CFS_minVruntime
                 task.CFS_lastScheduled = GetTickCount()
             End If
+
         Case CO_DEFINED
-            ' 重置任务（从终态恢复）
+            ' ★ 修复：重置任务到初始状态
             ReleaseTaskCoroutine task
             TaskQueueRemove task
+            ' 重置任务属性
             task.taskProgress = 0
             task.taskMessage = vbNullString
             task.taskValue = Empty
             task.taskError = vbNullString
+            task.taskLastTime = 0
+            task.taskTotalTime = 0
+            task.taskTickCount = 0
+            task.CFS_vruntime = 0
+            task.CFS_weight = CFS_DEFAULT_WEIGHT
+            task.CFS_lastScheduled = 0
     End Select
-    
+
     ' 标记监控为脏
-    If oldStatus <> newStatus Then
-        g_StateDirty = True
-        MarkWatchesDirty task
-    End If
+    g_StateDirty = True
+    MarkWatchesDirty task
+
+    LogDebug "状态转换: " & taskIdStr & " " & StatusToString(oldStatus) & " -> " & StatusToString(newStatus)
 End Sub
 ' 统一释放任务的协程资源
 Public Sub ReleaseTaskCoroutine(task As TaskUnit)
@@ -1926,4 +1947,159 @@ Private Sub CollectionRemove(col As Collection, key As String)
     On Error Resume Next
     col.Remove key
     Err.Clear
+End Sub
+' 辅助函数：状态转字符串
+Private Function StatusToString(status As CoStatus) As String
+    Select Case status
+        Case CO_DEFINED: StatusToString = "DEFINED"
+        Case CO_YIELD: StatusToString = "YIELD"
+        Case CO_PAUSED: StatusToString = "PAUSED"
+        Case CO_DONE: StatusToString = "DONE"
+        Case CO_ERROR: StatusToString = "ERROR"
+        Case CO_TERMINATED: StatusToString = "TERMINATED"
+        Case Else: StatusToString = "UNKNOWN(" & status & ")"
+    End Select
+End Function
+' 清理孤儿 Watch（任务已删除但 Watch 仍存在）
+Public Sub CleanupOrphanWatches()
+    On Error Resume Next
+    
+    If g_Watches Is Nothing Then Exit Sub
+    If g_Watches.Count = 0 Then Exit Sub
+    
+    Dim toRemove As Collection
+    Set toRemove = New Collection
+    
+    Dim watchCell As Variant
+    Dim wi As WatchInfo
+    
+    ' 第一遍：收集孤儿
+    For Each watchCell In g_Watches.Keys
+        Set wi = g_Watches(watchCell)
+        
+        ' 检查任务是否存在
+        If Not g_Tasks.Exists(wi.watchTaskId) Then
+            toRemove.Add CStr(watchCell)
+        ' 检查 watchTask 引用是否有效
+        ElseIf wi.watchTask Is Nothing Then
+            toRemove.Add CStr(watchCell)
+        End If
+    Next
+    
+    ' 第二遍：移除孤儿
+    Dim removeKey As Variant
+    For Each removeKey In toRemove
+        g_Watches.Remove CStr(removeKey)
+    Next
+    
+    If toRemove.Count > 0 Then
+        LogInfo "清理了 " & toRemove.Count & " 个孤儿Watch"
+    End If
+End Sub
+' 安全删除任务（统一入口）
+Public Sub SafeDeleteTask(taskId As String)
+    On Error GoTo ErrorHandler
+    
+    If Not g_Tasks.Exists(taskId) Then
+        LogDebug "任务不存在，无需删除: " & taskId
+        Exit Sub
+    End If
+    
+    Dim task As TaskUnit
+    Set task = g_Tasks(taskId)
+    
+    ' 1. 先清理该任务的所有 Watch
+    CleanupTaskWatches task
+    
+    ' 2. 释放协程
+    ReleaseTaskCoroutine task
+    
+    ' 3. 从队列移除
+    TaskQueueRemove task
+    
+    ' 4. 释放任务对象
+    Set g_Tasks(taskId) = Nothing
+    g_Tasks.Remove taskId
+    
+    LogDebug "任务已安全删除: " & taskId
+    Exit Sub
+    
+ErrorHandler:
+    LogError "删除任务失败: " & taskId & " - " & Err.Description
+End Sub
+' ★ 新增辅助函数：从外部地址解析工作表
+Private Function GetWorksheetFromAddress(addr As String, wb As Workbook) As Worksheet
+    On Error Resume Next
+
+    ' addr 格式示例: "[Book1.xlsx]Sheet1!$A$1" 或 "'Sheet Name'!$A$1"
+    Dim sheetName As String
+    Dim exclamPos As Long
+    Dim bracketEnd As Long
+
+    Set GetWorksheetFromAddress = Nothing
+
+    ' 处理外部引用格式 [Book1.xlsx]Sheet1!$A$1
+    If Left(addr, 1) = "[" Then
+        bracketEnd = InStr(addr, "]")
+        exclamPos = InStr(addr, "!")
+        If exclamPos > bracketEnd Then
+            sheetName = Mid(addr, bracketEnd + 1, exclamPos - bracketEnd - 1)
+        End If
+    ElseIf InStr(addr, "!") > 0 Then
+        exclamPos = InStr(addr, "!")
+        sheetName = Left(addr, exclamPos - 1)
+    End If
+
+    ' 移除引号
+    sheetName = Replace(sheetName, "'", "")
+
+    If Len(sheetName) > 0 Then
+        Set GetWorksheetFromAddress = wb.Sheets(sheetName)
+    End If
+
+    ' 如果解析失败，使用活动工作表
+    If GetWorksheetFromAddress Is Nothing Then
+        Set GetWorksheetFromAddress = wb.ActiveSheet
+    End If
+End Function
+' ============================================
+' 清理特定工作簿的监视点
+' ============================================
+Public Sub CleanupWorkbookWatches(wbName As String)
+    On Error Resume Next
+    
+    If g_Watches Is Nothing Then Exit Sub
+    If g_Watches.Count = 0 Then Exit Sub
+    
+    ' 收集要移除的 watch
+    Dim toRemove As Collection
+    Set toRemove = New Collection
+    
+    Dim watchCell As Variant
+    Dim watchInfo As WatchInfo
+    
+    For Each watchCell In g_Watches.Keys
+        Set watchInfo = g_Watches(watchCell)
+        If watchInfo.watchWorkbook = wbName Then
+            toRemove.Add CStr(watchCell)
+        End If
+    Next
+    
+    ' 移除收集到的 watch
+    Dim removeKey As Variant
+    For Each removeKey In toRemove
+        If g_Watches.Exists(CStr(removeKey)) Then
+            Set watchInfo = g_Watches(CStr(removeKey))
+            ' 从任务的 taskWatches 集合中移除
+            If Not watchInfo.watchTask Is Nothing Then
+                RemoveFromTaskWatches watchInfo.watchTask, CStr(removeKey)
+            End If
+            ' 从主索引移除
+            g_Watches.Remove CStr(removeKey)
+        End If
+    Next
+    
+    If toRemove.Count > 0 Then
+        LogDebug "已清理工作簿 " & wbName & " 的 " & toRemove.Count & " 个监控"
+    End If
 End Sub
