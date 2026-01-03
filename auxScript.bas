@@ -65,7 +65,17 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     Next
     ' 使用安全删除
     For Each taskId In toRemove
-        SafeDeleteTask CStr(taskId)
+        Dim task As TaskUnit
+        Set task = g_Tasks(taskId)
+        ' 1. 先清理该任务的所有 Watch
+        CleanupTaskWatches task
+        ' 2. 释放协程
+        ReleaseTaskCoroutine task
+        ' 3. 从队列移除
+        TaskQueueRemove task
+        ' 4. 释放任务对象
+        Set g_Tasks(taskId) = Nothing
+        g_Tasks.Remove taskId
     Next
     ' 清理工作簿的监控（额外保险，处理可能遗漏的）
     CleanupWorkbookWatches wbName
@@ -81,32 +91,72 @@ Public Sub CleanupWorkbookTasks(wbName As String)
     LogInfo "已清理工作簿任务: " & wbName
 End Sub
 
-' 辅助函数：清理特定工作簿的监视点
+' 辅助函数：清理特定任务的监视点
 Private Sub CleanupTaskWatches(task As TaskUnit)
     On Error Resume Next
-    
+
     If task Is Nothing Then Exit Sub
     If g_Watches Is Nothing Then Exit Sub
-    
+
     ' 使用任务的 taskWatches 集合进行清理
     Dim wc As Variant
     Dim removeList As Collection
     Set removeList = New Collection
-    
+
     ' 收集要移除的 watch
     For Each wc In task.taskWatches
         removeList.Add CStr(wc)
     Next
-    
+
     ' 从主索引移除
     For Each wc In removeList
         If g_Watches.Exists(CStr(wc)) Then
             g_Watches.Remove CStr(wc)
         End If
     Next
-    
+
     ' 清空任务的 watch 集合
     Set task.taskWatches = New Collection
+End Sub
+
+' 辅助函数：清理特定工作簿的监视点
+Public Sub CleanupWorkbookWatches(wbName As String)
+    On Error Resume Next
+
+    If g_Watches Is Nothing Then Exit Sub
+    If g_Watches.Count = 0 Then Exit Sub
+
+    ' 收集要移除的 watch
+    Dim toRemove As Collection
+    Set toRemove = New Collection
+
+    Dim watchCell As Variant
+    Dim watchInfo As WatchInfo
+
+    For Each watchCell In g_Watches.Keys
+        Set watchInfo = g_Watches(watchCell)
+        If watchInfo.watchWorkbook = wbName Then
+            toRemove.Add CStr(watchCell)
+        End If
+    Next
+
+    ' 移除收集到的 watch
+    Dim removeKey As Variant
+    For Each removeKey In toRemove
+        If g_Watches.Exists(CStr(removeKey)) Then
+            Set watchInfo = g_Watches(CStr(removeKey))
+            ' 从任务的 taskWatches 集合中移除
+            If Not watchInfo.watchTask Is Nothing Then
+                RemoveFromTaskWatches watchInfo.watchTask, CStr(removeKey)
+            End If
+            ' 从主索引移除
+            g_Watches.Remove CStr(removeKey)
+        End If
+    Next
+
+    If toRemove.Count > 0 Then
+        LogDebug "已清理工作簿 " & wbName & " 的 " & toRemove.Count & " 个监控"
+    End If
 End Sub
 ' ============================================
 ' 第七部分：可视化操作函数
@@ -304,8 +354,19 @@ Private Sub LuaTaskMenu_TerminateTask()
     result = MsgBox("确定要终止并删除任务 " & taskId & " 吗？", _
                     vbQuestion + vbYesNo, "确认终止")
     If result = vbNo Then Exit Sub
-    ' ★ 修复：使用安全删除
-    SafeDeleteTask taskId
+
+    Dim task As TaskUnit
+    Set task = g_Tasks(taskId)
+
+    ' 1. 先清理该任务的所有 Watch
+    CleanupTaskWatches task
+    ' 2. 释放协程
+    ReleaseTaskCoroutine task
+    ' 3. 从队列移除
+    TaskQueueRemove task
+    ' 4. 释放任务对象
+    Set g_Tasks(taskId) = Nothing
+    g_Tasks.Remove taskId
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
 
@@ -617,8 +678,19 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     Dim count As Integer
     count = 0
     For Each removeId In toRemove
-        SafeDeleteTask CStr(removeId)
-        count = count + 1
+        Dim task As TaskUnit
+        Set task = g_Tasks(removeId)
+
+        ' 1. 先清理该任务的所有 Watch
+        CleanupTaskWatches task
+        ' 2. 释放协程
+        ReleaseTaskCoroutine task
+        ' 3. 从队列移除
+        TaskQueueRemove task
+        ' 4. 释放任务对象
+        Set g_Tasks(taskId) = Nothing
+        g_Tasks.Remove taskId
+            count = count + 1
     Next
     ' 额外清理孤儿 Watch
     CleanupOrphanWatches
@@ -661,20 +733,27 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
 
     ' 停止调度器
     StopScheduler
-    ' ★ 修复：使用安全删除
+    ' 使用安全删除
     If Not g_Tasks Is Nothing Then
-        Dim taskIds As Collection
-        Set taskIds = New Collection
-        
+        Dim taskIds As New Collection
+        Dim task As TaskUnit
         ' 先收集所有ID
         Dim taskId As Variant
         For Each taskId In g_Tasks.Keys
             taskIds.Add CStr(taskId)
         Next
-        
         ' 再逐个删除
         For Each taskId In taskIds
-            SafeDeleteTask CStr(taskId)
+            Set task = g_Tasks(taskId)
+            ' 1. 先清理该任务的所有 Watch
+            CleanupTaskWatches task
+            ' 2. 释放协程
+            ReleaseTaskCoroutine task
+            ' 3. 从队列移除
+            TaskQueueRemove task
+            ' 4. 释放任务对象
+            Set g_Tasks(taskId) = Nothing
+            g_Tasks.Remove taskId
         Next
     End If
     ' 清理孤儿 Watch

@@ -583,13 +583,7 @@ Public Function LuaGet(taskId As String, field As String) As Variant
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
     Dim taskstatus As String
-    Select Case task.taskStatus
-        Case CO_DEFINED: taskstatus = "defined"
-        Case CO_YIELD: taskstatus = "yield"
-        Case CO_PAUSED: taskstatus = "paused"
-        Case CO_DONE: taskstatus = "done"
-        Case CO_ERROR: taskstatus = "error"
-    End Select
+    taskstatus = StatusToString(task.taskStatus)
 
     Select Case LCase(field)
         Case "status"
@@ -1027,7 +1021,7 @@ Public Sub SchedulerTick()
     g_SchedulerStats.LastTime = schedulerElapsed
     g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
     g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
-    ' ★ 修复：每100次调度清理一次孤儿Watch
+    ' 每100次调度清理一次孤儿Watch
     If g_SchedulerStats.TotalCount Mod 100 = 0 Then
         CleanupOrphanWatches
     End If
@@ -1781,9 +1775,7 @@ Private Function FindTaskByCell(taskCell As String) As String
     FindTaskByCell = vbNullString
 End Function
 
-' ===== 辅助函数（新增）=====
-
-' 检查 Collection 中是否存在指定任务
+' 检查 g_TaskQueue 中是否存在指定任务
 Private Function TaskQueueExists(task As TaskUnit) As Boolean
     On Error Resume Next
     Dim t As Variant
@@ -1795,7 +1787,7 @@ Private Function TaskQueueExists(task As TaskUnit) As Boolean
     Next
     TaskQueueExists = False
 End Function
-' 安全地从 Collection 中移除元素
+' 安全地从 g_TaskQueue 中移除元素
 Private Sub TaskQueueRemove(task As TaskUnit)
     On Error Resume Next
     Dim i As Long
@@ -1806,7 +1798,7 @@ Private Sub TaskQueueRemove(task As TaskUnit)
         End If
     Next
 End Sub
-' 安全地向 Collection 添加元素（避免重复）
+' 安全地向 g_TaskQueue 添加元素（避免重复）
 Private Sub TaskQueueAdd(task As TaskUnit)
     If Not TaskQueueExists(task) Then
         g_TaskQueue.Add task
@@ -1882,13 +1874,6 @@ Public Sub ReleaseTaskCoroutine(task As TaskUnit)
     If task Is Nothing Then Exit Sub
     If task.taskCoRef = 0 Then Exit Sub
 
-    ' 确保 Lua 状态机有效
-    ' If g_LuaState = 0 Or Not g_Initialized Then
-    '     ' Debug.Print "ReleaseTaskCoroutine: Lua 状态机无效，跳过释放"
-    '     task.ClearCoroutineRef
-    '     Exit Sub
-    ' End If
-
     ' 执行释放
     ' Debug.Print "ReleaseTaskCoroutine: Task_" & task.taskId & " 释放协程 Ref=" & task.taskCoRef
     luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
@@ -1899,32 +1884,31 @@ End Sub
 ' 辅助函数：状态转字符串
 Private Function StatusToString(status As CoStatus) As String
     Select Case status
-        Case CO_DEFINED: StatusToString = "DEFINED"
-        Case CO_YIELD: StatusToString = "YIELD"
-        Case CO_PAUSED: StatusToString = "PAUSED"
-        Case CO_DONE: StatusToString = "DONE"
-        Case CO_ERROR: StatusToString = "ERROR"
-        Case CO_TERMINATED: StatusToString = "TERMINATED"
+        Case CO_DEFINED: StatusToString = "defined"
+        Case CO_YIELD: StatusToString = "yield"
+        Case CO_PAUSED: StatusToString = "paused"
+        Case CO_DONE: StatusToString = "done"
+        Case CO_ERROR: StatusToString = "error"
+        Case CO_TERMINATED: StatusToString = "terminated"
         Case Else: StatusToString = "UNKNOWN(" & status & ")"
     End Select
 End Function
 ' 清理孤儿 Watch（任务已删除但 Watch 仍存在）
 Public Sub CleanupOrphanWatches()
     On Error Resume Next
-    
+
     If g_Watches Is Nothing Then Exit Sub
     If g_Watches.Count = 0 Then Exit Sub
-    
-    Dim toRemove As Collection
-    Set toRemove = New Collection
-    
+
+    Dim toRemove As New Collection
+
     Dim watchCell As Variant
     Dim wi As WatchInfo
-    
+
     ' 第一遍：收集孤儿
     For Each watchCell In g_Watches.Keys
         Set wi = g_Watches(watchCell)
-        
+
         ' 检查任务是否存在
         If Not g_Tasks.Exists(wi.watchTaskId) Then
             toRemove.Add CStr(watchCell)
@@ -1933,44 +1917,16 @@ Public Sub CleanupOrphanWatches()
             toRemove.Add CStr(watchCell)
         End If
     Next
-    
+
     ' 第二遍：移除孤儿
     Dim removeKey As Variant
     For Each removeKey In toRemove
         g_Watches.Remove CStr(removeKey)
     Next
-    
+
     If toRemove.Count > 0 Then
         LogInfo "清理了 " & toRemove.Count & " 个孤儿Watch"
     End If
-End Sub
-' 安全删除任务（统一入口）
-Public Sub SafeDeleteTask(taskId As String)
-    On Error GoTo ErrorHandler
-
-    If Not g_Tasks.Exists(taskId) Then
-        LogDebug "任务不存在，无需删除: " & taskId
-        Exit Sub
-    End If
-
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
-
-    ' 1. 先清理该任务的所有 Watch
-    CleanupTaskWatches task
-    ' 2. 释放协程
-    ReleaseTaskCoroutine task
-    ' 3. 从队列移除
-    TaskQueueRemove task
-    ' 4. 释放任务对象
-    Set g_Tasks(taskId) = Nothing
-    g_Tasks.Remove taskId
-
-    LogDebug "任务已安全删除: " & taskId
-    Exit Sub
-
-ErrorHandler:
-    LogError "删除任务失败: " & taskId & " - " & Err.Description
 End Sub
 ' 辅助函数：从外部地址解析工作表
 Private Function GetWorksheetFromAddress(addr As String, wb As Workbook) As Worksheet
@@ -2007,44 +1963,3 @@ Private Function GetWorksheetFromAddress(addr As String, wb As Workbook) As Work
         Set GetWorksheetFromAddress = wb.ActiveSheet
     End If
 End Function
-' ============================================
-' 清理特定工作簿的监视点
-' ============================================
-Public Sub CleanupWorkbookWatches(wbName As String)
-    On Error Resume Next
-    
-    If g_Watches Is Nothing Then Exit Sub
-    If g_Watches.Count = 0 Then Exit Sub
-    
-    ' 收集要移除的 watch
-    Dim toRemove As Collection
-    Set toRemove = New Collection
-    
-    Dim watchCell As Variant
-    Dim watchInfo As WatchInfo
-    
-    For Each watchCell In g_Watches.Keys
-        Set watchInfo = g_Watches(watchCell)
-        If watchInfo.watchWorkbook = wbName Then
-            toRemove.Add CStr(watchCell)
-        End If
-    Next
-    
-    ' 移除收集到的 watch
-    Dim removeKey As Variant
-    For Each removeKey In toRemove
-        If g_Watches.Exists(CStr(removeKey)) Then
-            Set watchInfo = g_Watches(CStr(removeKey))
-            ' 从任务的 taskWatches 集合中移除
-            If Not watchInfo.watchTask Is Nothing Then
-                RemoveFromTaskWatches watchInfo.watchTask, CStr(removeKey)
-            End If
-            ' 从主索引移除
-            g_Watches.Remove CStr(removeKey)
-        End If
-    Next
-    
-    If toRemove.Count > 0 Then
-        LogDebug "已清理工作簿 " & wbName & " 的 " & toRemove.Count & " 个监控"
-    End If
-End Sub
