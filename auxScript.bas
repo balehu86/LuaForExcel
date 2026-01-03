@@ -237,8 +237,9 @@ Private Sub LuaTaskMenu_PauseTask()
         Exit Sub
     End If
 
-    If CollectionExists(g_TaskQueue, taskId) Then
-        CollectionRemove g_TaskQueue, taskId
+    If TaskQueueExists(g_Tasks(taskId)) Then
+        TaskQueueRemove g_Tasks(taskId)
+        SetTaskStatus g_Tasks(taskId), CO_PAUSED
         g_Tasks(taskId).taskStatus = CO_PAUSED
         MsgBox "任务 " & taskId & " 已暂停。" & vbCrLf & _
                "使用 ResumeTask 恢复。", vbInformation, "任务已暂停"
@@ -273,7 +274,7 @@ Private Sub LuaTaskMenu_ResumeTask()
         g_Tasks(taskId).CFS_vruntime = g_CFS_minVruntime
     End If
 
-    If Not CollectionExists(g_TaskQueue, taskId) Then
+    If Not TaskQueueExists(g_Tasks(taskId)) Then
         TaskQueueAdd g_Tasks(taskId)
         StartSchedulerIfNeeded
         MsgBox "任务 " & taskId & " 已恢复。", vbInformation, "任务已恢复"
@@ -426,7 +427,7 @@ Private Sub LuaTaskMenu_ShowDetail()
 
     ' 调度信息
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
-    msg = msg & "在活跃队列中: " & IIf(CollectionExists(g_TaskQueue, taskId), "是", "否") & vbCrLf
+    msg = msg & "在活跃队列中: " & IIf(TaskQueueExists(task), "是", "否") & vbCrLf
     msg = msg & "协程线程: " & IIf(task.taskCoThread = 0, "未创建", "0x" & Hex(task.taskCoThread)) & vbCrLf
 
     MsgBox msg, vbInformation, "任务详情 - " & taskId
@@ -715,7 +716,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
     ' 按工作簿统计任务数
     Dim wbTaskCount As Object
     Set wbTaskCount = CreateObject("Scripting.Dictionary")
-    
+
     For Each taskId In g_Tasks.Keys
         Set task = g_Tasks(taskId)
         If wbTaskCount.Exists(task.taskWorkbook) Then
@@ -775,16 +776,13 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         End If
 
         ' 显示是否在活跃队列中
-        If CollectionExists(g_TaskQueue, CStr(taskId)) Then
-            msg = msg & "  队列: 是" & vbCrLf
-        End If
-
+        msg = msg & "在活跃队列中: " & IIf(TaskQueueExists(task), "是", "否") & vbCrLf
         msg = msg & "----------------------------------------" & vbCrLf
     Next
 
     MsgBox msg, vbInformation, "Lua 协程任务列表 (" & g_Tasks.Count & " 个任务)"
     Exit Sub
-    
+
 ErrorHandler:
     MsgBox "显示任务信息时出错: " & Err.Description, vbCritical, "错误"
 End Sub

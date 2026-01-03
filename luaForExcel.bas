@@ -1896,20 +1896,6 @@ Public Sub ReleaseTaskCoroutine(task As TaskUnit)
     ' 清除任务中的引用
     task.ClearCoroutineRef
 End Sub
-' 检查 Collection 中是否存在指定键
-Private Function CollectionExists(col As Collection, key As String) As Boolean
-    On Error Resume Next
-    Dim dummy As Variant
-    dummy = col(key)
-    CollectionExists = (Err.Number = 0)
-    Err.Clear
-End Function
-' 安全地从 Collection 中移除元素（按键）
-Private Sub CollectionRemove(col As Collection, key As String)
-    On Error Resume Next
-    col.Remove key
-    Err.Clear
-End Sub
 ' 辅助函数：状态转字符串
 Private Function StatusToString(status As CoStatus) As String
     Select Case status
