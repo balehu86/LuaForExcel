@@ -789,14 +789,6 @@ Private Sub RefreshWatches()
         ' 只处理脏的监控
         If Not watchInfo.watchDirty Then GoTo NextWatch
 
-        ' 检查任务是否存在
-        If Not g_Tasks.Exists(watchInfo.watchTaskId) Then
-            ' 任务已删除，移除监控和二级索引
-            RemoveFromTaskWatches watchInfo.watchTask, CStr(watchCell)
-            g_Watches.Remove watchCell
-            GoTo NextWatch
-        End If
-
         Set task = watchInfo.watchTask
 
         ' 获取当前字段值
@@ -924,7 +916,6 @@ End Sub
 ' 优化后的 MarkWatchesDirty - O(m) 复杂度
 Private Sub MarkWatchesDirty(task As TaskUnit)
     On Error Resume Next
-    If task Is Nothing Then Exit Sub
 
     Dim wc As Variant
     For Each wc In task.taskWatches
@@ -953,9 +944,6 @@ Public Sub StartLuaCoroutine(taskId As String)
         MsgBox "错误：任务已启动或已完成，当前状态: " & task.taskStatus, vbExclamation
         Exit Sub
     End If
-
-    ' 统一释放旧协程（防止泄漏）
-    ReleaseTaskCoroutine task
 
     ' 创建协程并锚定到注册表
     Dim coThread As LongPtr
@@ -1179,11 +1167,11 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     If task.taskStatus <> CO_YIELD Then Exit Sub
 
     ' 检查协程是否有效
-    If Not task.HasValidCoroutine() Then
-        SetTaskStatus task, CO_ERROR
-        task.taskError = "协程引用无效"
-        Exit Sub
-    End If
+    ' If Not task.HasValidCoroutine() Then
+    '     SetTaskStatus task, CO_ERROR
+    '     task.taskError = "协程引用无效"
+    '     Exit Sub
+    ' End If
 
     Dim taskStart As Long
     taskStart = GetTickCount()
@@ -1192,13 +1180,13 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     coThread = task.taskCoThread
 
     ' 检查协程状态
-    Dim status As Long
-    status = lua_status(coThread)
-    If status <> LUA_OK And status <> LUA_YIELD Then
-        SetTaskStatus task, CO_ERROR
-        task.taskError = "协程状态异常: " & status
-        Exit Sub
-    End If
+    ' Dim status As Long
+    ' status = lua_status(coThread)
+    ' If status <> LUA_OK And status <> LUA_YIELD Then
+    '     SetTaskStatus task, CO_ERROR
+    '     task.taskError = "协程状态异常: " & status
+    '     Exit Sub
+    ' End If
 
     ' 检查工作簿是否仍然打开
     Dim wbName As String
@@ -1459,7 +1447,6 @@ ErrorHandler:
     SetTaskStatus task, CO_ERROR
     If coThread <> 0 Then lua_settop coThread, 0
 End Sub
-
 
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
@@ -1825,26 +1812,7 @@ Private Sub TaskQueueAdd(task As TaskUnit)
         g_TaskQueue.Add task
     End If
 End Sub
-' 状态转换验证函数
-Private Function CanTransition(fromStatus As CoStatus, toStatus As CoStatus) As Boolean
-    Select Case fromStatus
-        Case CO_DEFINED
-            CanTransition = (toStatus = CO_YIELD Or toStatus = CO_ERROR Or toStatus = CO_TERMINATED)
-        Case CO_YIELD
-            CanTransition = (toStatus = CO_DONE Or toStatus = CO_ERROR Or _
-                           toStatus = CO_PAUSED Or toStatus = CO_TERMINATED)
-        Case CO_PAUSED
-            CanTransition = (toStatus = CO_YIELD Or toStatus = CO_TERMINATED)
-        Case CO_DONE
-            CanTransition = (toStatus = CO_DEFINED Or toStatus = CO_TERMINATED)
-        Case CO_ERROR
-            CanTransition = (toStatus = CO_DEFINED Or toStatus = CO_TERMINATED)
-        Case CO_TERMINATED
-            CanTransition = False
-        Case Else
-            CanTransition = False
-    End Select
-End Function
+
 ' 统一设置任务状态并处理副作用
 Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
     If task Is Nothing Then Exit Sub
@@ -1857,12 +1825,6 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
 
     Dim taskIdStr As String
     taskIdStr = "Task_" & task.taskId
-
-    ' 状态转换验证
-    If Not CanTransition(oldStatus, newStatus) Then
-        LogError "非法状态转换: " & StatusToString(oldStatus) & " -> " & StatusToString(newStatus) & " (Task: " & taskIdStr & ")"
-        Exit Sub
-    End If
 
     ' 更新状态
     task.taskStatus = newStatus
@@ -1891,7 +1853,7 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus)
             End If
 
         Case CO_DEFINED
-            ' ★ 修复：重置任务到初始状态
+            ' 重置任务到初始状态
             ReleaseTaskCoroutine task
             TaskQueueRemove task
             ' 重置任务属性
@@ -1921,11 +1883,11 @@ Public Sub ReleaseTaskCoroutine(task As TaskUnit)
     If task.taskCoRef = 0 Then Exit Sub
 
     ' 确保 Lua 状态机有效
-    If g_LuaState = 0 Or Not g_Initialized Then
-        ' Debug.Print "ReleaseTaskCoroutine: Lua 状态机无效，跳过释放"
-        task.ClearCoroutineRef
-        Exit Sub
-    End If
+    ' If g_LuaState = 0 Or Not g_Initialized Then
+    '     ' Debug.Print "ReleaseTaskCoroutine: Lua 状态机无效，跳过释放"
+    '     task.ClearCoroutineRef
+    '     Exit Sub
+    ' End If
 
     ' 执行释放
     ' Debug.Print "ReleaseTaskCoroutine: Task_" & task.taskId & " 释放协程 Ref=" & task.taskCoRef
@@ -1999,35 +1961,32 @@ End Sub
 ' 安全删除任务（统一入口）
 Public Sub SafeDeleteTask(taskId As String)
     On Error GoTo ErrorHandler
-    
+
     If Not g_Tasks.Exists(taskId) Then
         LogDebug "任务不存在，无需删除: " & taskId
         Exit Sub
     End If
-    
+
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
-    
+
     ' 1. 先清理该任务的所有 Watch
     CleanupTaskWatches task
-    
     ' 2. 释放协程
     ReleaseTaskCoroutine task
-    
     ' 3. 从队列移除
     TaskQueueRemove task
-    
     ' 4. 释放任务对象
     Set g_Tasks(taskId) = Nothing
     g_Tasks.Remove taskId
-    
+
     LogDebug "任务已安全删除: " & taskId
     Exit Sub
-    
+
 ErrorHandler:
     LogError "删除任务失败: " & taskId & " - " & Err.Description
 End Sub
-' ★ 新增辅助函数：从外部地址解析工作表
+' 辅助函数：从外部地址解析工作表
 Private Function GetWorksheetFromAddress(addr As String, wb As Workbook) As Worksheet
     On Error Resume Next
 

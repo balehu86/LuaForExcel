@@ -34,11 +34,6 @@ Private Sub Class_Initialize()
     Set taskWatches = New Collection
 End Sub
 
-' 检查协程是否有效
-Public Function HasValidCoroutine() As Boolean
-    HasValidCoroutine = (taskCoRef <> 0 And taskCoThread <> 0)
-End Function
-
 ' 清除协程引用（仅清除本地存储，不执行释放）
 Public Sub ClearCoroutineRef()
     taskCoRef = 0
