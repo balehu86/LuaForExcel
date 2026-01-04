@@ -764,12 +764,6 @@ Private Sub RefreshWatches()
     Dim watchInfo As WatchInfo
     Dim task As TaskUnit
     Dim currentValue As Variant
-    Dim writeCount As Long
-    writeCount = 0
-
-    ' 收集所有需要写入的工作表，最后统一处理
-    Dim sheetsToRefresh As Object
-    Set sheetsToRefresh = CreateObject("Scripting.Dictionary")
 
     For Each watchCell In g_Watches.Keys
         Set watchInfo = g_Watches(watchCell)
@@ -806,9 +800,8 @@ Private Sub RefreshWatches()
 
         ' 写入目标单元格（直接写值，不触发计算）
         If needWrite Then
-            WriteToTargetCellDirect watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook, sheetsToRefresh
+            WriteToTargetCellDirect watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook
             watchInfo.watchLastValue = currentValue
-            writeCount = writeCount + 1
         End If
         ' 清除脏标记
         watchInfo.watchDirty = False
@@ -818,7 +811,7 @@ NextWatch:
     Next watchCell
 End Sub
 ' 直接写入目标单元格（不触发 Calculate）
-Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbName As String, sheetsDict As Object)
+Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbName As String)
     On Error Resume Next
     Dim targetRange As Range
     Dim wb As Workbook
@@ -962,6 +955,17 @@ Private Sub StartSchedulerIfNeeded()
     g_SchedulerRunning = True
     g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
     Application.OnTime g_NextScheduleTime, "SchedulerTick" 
+End Sub
+
+' 手动停止调度器
+Public Sub StopScheduler()
+    ' 停止调度标志
+    If g_SchedulerRunning Then
+        g_SchedulerRunning = False
+        ' 尝试取消所有 OnTime 调度
+        On Error Resume Next
+        Application.OnTime g_NextScheduleTime, "SchedulerTick", , False
+    End If
 End Sub
 
 ' 调度器心跳 - 主入口 （添加定期清理）
@@ -1286,39 +1290,6 @@ ErrorHandler:
     task.taskError = errorDetails
 
     Debug.Print "=== Resume 错误 ===" & vbCrLf & errorDetails
-End Sub
-
-' 手动停止调度器
-Public Sub StopScheduler()
-    ' 停止调度标志
-    If g_SchedulerRunning Then
-        g_SchedulerRunning = False
-        ' 尝试取消所有 OnTime 调度
-        On Error Resume Next
-        Application.OnTime g_NextScheduleTime, "SchedulerTick", , False
-        MsgBox "调度器已停止。" & vbCrLf & _
-            "活跃任务将不会继续执行。" & vbCrLf & vbCrLf
-    End If
-End Sub
-
-' 恢复调度器
-Private Sub ResumeScheduler()
-    If g_TaskQueue Is Nothing Or g_TaskQueue.Count = 0 Then
-        MsgBox "队列中没有任务，无需启动调度器。", vbExclamation, "无任务"
-        Exit Sub
-    End If
-
-    If g_SchedulerRunning Then
-        MsgBox "调度器已在运行中。", vbInformation, "调度器状态"
-        Exit Sub
-    End If
-
-    g_SchedulerRunning = True
-    g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
-    Application.OnTime g_NextScheduleTime, "SchedulerTick"
-
-    MsgBox "调度器已启动。" & vbCrLf & _
-           "当前队列任务数: " & g_TaskQueue.Count, vbInformation, "调度器已启动"
 End Sub
 ' ============================================
 ' 第六部分：辅助函数（内部使用）
@@ -1899,41 +1870,6 @@ Private Function StatusToString(status As CoStatus) As String
         Case Else: StatusToString = "UNKNOWN(" & status & ")"
     End Select
 End Function
-' 清理孤儿 Watch（任务已删除但 Watch 仍存在）
-Public Sub CleanupOrphanWatches()
-    On Error Resume Next
-
-    If g_Watches Is Nothing Then Exit Sub
-    If g_Watches.Count = 0 Then Exit Sub
-
-    Dim toRemove As New Collection
-
-    Dim watchCell As Variant
-    Dim wi As WatchInfo
-
-    ' 第一遍：收集孤儿
-    For Each watchCell In g_Watches.Keys
-        Set wi = g_Watches(watchCell)
-
-        ' 检查任务是否存在
-        If Not g_Tasks.Exists(wi.watchTaskId) Then
-            toRemove.Add CStr(watchCell)
-        ' 检查 watchTask 引用是否有效
-        ElseIf wi.watchTask Is Nothing Then
-            toRemove.Add CStr(watchCell)
-        End If
-    Next
-
-    ' 第二遍：移除孤儿
-    Dim removeKey As Variant
-    For Each removeKey In toRemove
-        g_Watches.Remove CStr(removeKey)
-    Next
-
-    If toRemove.Count > 0 Then
-        LogInfo "清理了 " & toRemove.Count & " 个孤儿Watch"
-    End If
-End Sub
 ' 辅助函数：从外部地址解析工作表
 Private Function GetWorksheetFromAddress(addr As String, wb As Workbook) As Worksheet
     On Error Resume Next

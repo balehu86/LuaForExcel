@@ -10,30 +10,6 @@ Public Sub LogError(msg As String)
     MsgBox msg, vbCritical, "错误"
 End Sub
 
-' 辅助函数：获取数组维度
-Private Function ArrayDimensions(arr As Variant) As String
-    On Error Resume Next
-    Dim dims As String
-    Dim i As Long
-
-    For i = 1 To 10  ' 最多检查10维
-        Dim ub As Long
-        ub = UBound(arr, i)
-        If Err.Number <> 0 Then
-            Exit For
-        End If
-
-        Dim lb As Long
-        lb = LBound(arr, i)
-
-        If dims <> vbNullString Then dims = dims & " x "
-        dims = dims & (ub - lb + 1)
-    Next i
-
-    If dims = vbNullString Then dims = "未知"
-    ArrayDimensions = dims
-End Function
-
 ' 辅助函数：增加子菜单项
 Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAction As String)
     Dim ctrl As CommandBarControl
@@ -65,6 +41,42 @@ Private Function SafeGetTaskFromSelection(ByRef task As TaskUnit, ByRef taskId A
     Set task = g_Tasks(taskId)
     SafeGetTaskFromSelection = True
 End Function
+
+' 清理孤儿 Watch（任务已删除但 Watch 仍存在）
+Public Sub CleanupOrphanWatches()
+    On Error Resume Next
+
+    If g_Watches Is Nothing Then Exit Sub
+    If g_Watches.Count = 0 Then Exit Sub
+
+    Dim toRemove As New Collection
+
+    Dim watchCell As Variant
+    Dim wi As WatchInfo
+
+    ' 第一遍：收集孤儿
+    For Each watchCell In g_Watches.Keys
+        Set wi = g_Watches(watchCell)
+
+        ' 检查任务是否存在
+        If Not g_Tasks.Exists(wi.watchTaskId) Then
+            toRemove.Add CStr(watchCell)
+        ' 检查 watchTask 引用是否有效
+        ElseIf wi.watchTask Is Nothing Then
+            toRemove.Add CStr(watchCell)
+        End If
+    Next
+
+    ' 第二遍：移除孤儿
+    Dim removeKey As Variant
+    For Each removeKey In toRemove
+        g_Watches.Remove CStr(removeKey)
+    Next
+
+    If toRemove.Count > 0 Then
+        LogInfo "清理了 " & toRemove.Count & " 个孤儿Watch"
+    End If
+End Sub
 
 ' 辅助函数：清理特定工作簿的任务
 Public Sub CleanupWorkbookTasks(wbName As String)
@@ -423,8 +435,26 @@ Private Sub LuaTaskMenu_ShowDetail()
     msg = msg & vbCrLf & "当前值:" & vbCrLf
     Dim value As Variant
     value = task.taskValue
+    ' 获取task.value数组维度
+    Dim dims As String
+    Dim i As Byte
+    For i = 1 To 10  ' 最多检查10维
+        Dim ub As Long
+        ub = UBound(value, i)
+        If Err.Number <> 0 Then
+            Exit For
+        End If
+
+        Dim lb As Long
+        lb = LBound(value, i)
+
+        If dims <> vbNullString Then dims = dims & " x "
+        dims = dims & (ub - lb + 1)
+    Next i
+    If dims = vbNullString Then dims = "未知"
+
     If IsArray(value) Then
-        msg = msg & "   (数组，维度: " & ArrayDimensions(value) & ")" & vbCrLf
+        msg = msg & "   (数组，维度: " & dims & ")" & vbCrLf
     ElseIf IsEmpty(value) Then
         msg = msg & "   (空)" & vbCrLf
     Else
@@ -609,18 +639,18 @@ End Sub
 ' 清理所有已完成或错误的任务
 Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     On Error Resume Next
-    
+
     If g_Tasks Is Nothing Then InitCoroutineSystem
     If g_Tasks.Count = 0 Then
         MsgBox "当前没有任务需要清理。", vbInformation, "清理任务"
         Exit Sub
     End If
-    
+
     ' 收集需要清理的任务
     Dim toRemove As Collection
     Set toRemove = New Collection
     Dim taskId As Variant
-    
+
     For Each taskId In g_Tasks.Keys
         Dim status As CoStatus
         status = g_Tasks(taskId).taskStatus
@@ -628,21 +658,21 @@ Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
             toRemove.Add g_Tasks(taskId)
         End If
     Next
-    
+
     ' 批量清理
     Dim t As Variant
     Dim task As TaskUnit
     Dim count As Long
     count = 0
-    
+
     For Each t In toRemove
         Set task = t  ' 转换为 TaskUnit 类型
         SetTaskStatus task, CO_TERMINATED
         count = count + 1
     Next
-    
+
     CleanupOrphanWatches
-    
+
     MsgBox "已清理 " & count & " 个任务。" & vbCrLf & _
            "剩余任务: " & g_Tasks.Count, vbInformation, "清理完成"
 End Sub
