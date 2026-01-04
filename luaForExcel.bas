@@ -1071,22 +1071,6 @@ Private Sub ScheduleByCFS()
         End If
     Loop
 End Sub
-
-' 统计活跃任务数
-Private Function CountActiveTasks() As Long
-    Dim count As Long
-    Dim t As Variant
-    Dim task As TaskUnit
-
-    count = 0
-    For Each t In g_TaskQueue
-        Set task = t
-        If task.taskStatus = CO_YIELD Then
-            count = count + 1
-        End If
-    Next
-    CountActiveTasks = count
-End Function
 ' 自动调整任务权重
 Private Sub CFS_AutoAdjustWeight(task As TaskUnit, actualTime As Double, idealSlice As Double)
     ' 基于实际执行时间与理想时间片的比较调整权重
