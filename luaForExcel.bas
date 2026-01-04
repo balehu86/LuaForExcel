@@ -460,13 +460,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
 
     wbName = callerWb.Name
     On Error GoTo ErrorHandler
-    ' 自动注册工作簿
-    ' If Not g_Workbooks.Exists(wbName) Then
-    '     Dim wbInfo As New WorkbookInfo
-    '     wbInfo.wbName = wbName
-    '     g_Workbooks.Add wbName, wbInfo
-    '     Debug.Print "LuaTask自动注册工作簿: " & wbName
-    ' End If
 
     ' 检查是否已存在任务
     Dim existingTaskId As String
@@ -536,7 +529,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .taskTotalTime = 0
         .taskTickCount = 0
         .CFS_weight = 1024
-        .CFS_vruntime = g_CFS_minVruntime  ' 从当前最小值开始
+        .CFS_vruntime = g_CFS_minVruntime
     End With
     g_Tasks.Add taskId, task
 
@@ -548,7 +541,6 @@ ErrorHandler:
     errorDetails = "Task错误:" & vbCrLf
     errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
     errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
-    ' ' 输出到立即窗口便于调试
     Debug.Print "=== Task错误详情 ==="
     Debug.Print errorDetails
     Debug.Print "======================="
@@ -1292,7 +1284,6 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
             lua_pushstring L, CStr(value)
     End Select
 End Sub
-
 
 ' 统一数组压栈函数 - 支持主状态机和协程线程
 Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
