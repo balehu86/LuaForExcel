@@ -707,8 +707,8 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         If paramsChanged Then
             ' 更新二级索引（如果 taskId 变化）
             If needUpdateIndex Then
-                wi.watchTask.RemoveWatche callerAddr  ' 使用旧的 task 对象
-                g_Tasks(taskId).AddWatche callerAddr    ' 使用新的 taskId
+                wi.watchTask.RemoveWatch callerAddr  ' 使用旧的 task 对象
+                g_Tasks(taskId).AddWatch callerAddr    ' 使用新的 taskId
             End If
 
             ' 更新监控属性
@@ -743,7 +743,7 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
         ' 添加到主索引
         g_Watches.Add callerAddr, wi
         ' 添加到二级索引
-        g_Tasks(taskId).AddWatche callerAddr
+        g_Tasks(taskId).AddWatch callerAddr
     End If
 
     ' 返回静态描述文本
@@ -863,7 +863,6 @@ Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbNa
         targetRange.value = value
     End If
 End Sub
-
 ' 优化后的 MarkWatchesDirty - O(m) 复杂度
 Private Sub MarkWatchesDirty(task As TaskUnit)
     On Error Resume Next
@@ -1038,10 +1037,6 @@ Private Sub ScheduleByCFS()
         ' 1. 选择 vruntime 最小的任务
         Set selectedTask = CFS_PickNextTask()
 
-        If selectedTask Is Nothing Then Exit Do
-        ' 只调度 yielded 状态
-        If selectedTask.taskStatus <> CO_YIELD Then GoTo ContinueLoop
-
         ' 2. 执行任务
         taskStart = GetTickCount()
         ResumeCoroutine selectedTask
@@ -1085,7 +1080,6 @@ Private Function CountActiveTasks() As Long
     Next
     CountActiveTasks = count
 End Function
-
 ' 自动调整任务权重
 Private Sub CFS_AutoAdjustWeight(task As TaskUnit, actualTime As Double, idealSlice As Double)
     ' 基于实际执行时间与理想时间片的比较调整权重
@@ -1148,13 +1142,11 @@ End Function
 ' 更新任务的 vruntime
 Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
     Dim vruntimeDelta As Double
-    Dim weightedRuntime As Double
 
     ' 确保最小执行粒度
     If actualRuntime < g_CFS_minGranularity Then
         actualRuntime = g_CFS_minGranularity
     End If
-
     ' 计算加权虚拟运行时间
     vruntimeDelta = actualRuntime * (1024 / task.CFS_weight)
 
@@ -1162,18 +1154,12 @@ Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
     task.CFS_lastScheduled = GetTickCount()
 
     ' 更新全局最小 vruntime
-    UpdateGlobalMinVruntime
-End Sub
-' 更新全局最小 vruntime
-Private Sub UpdateGlobalMinVruntime()
     Dim minV As Double
     Dim t As Variant
     Dim tsk As TaskUnit
     Dim found As Boolean
-
     minV = 1E+308
     found = False
-
     For Each t In g_TaskQueue
         Set tsk = t
         If tsk.taskStatus = CO_YIELD Then
@@ -1192,8 +1178,6 @@ End Sub
 ' Resume 协程
 Private Sub ResumeCoroutine(task As TaskUnit)
     On Error GoTo ErrorHandler
-
-    If task.taskStatus <> CO_YIELD Then Exit Sub
 
     Dim taskStart As Long
     taskStart = GetTickCount()

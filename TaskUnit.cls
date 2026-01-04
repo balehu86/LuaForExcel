@@ -40,7 +40,7 @@ Public Sub ClearCoroutineRef()
 End Sub
 
 ' 添加监控单元格到任务的监控列表
-Public Sub AddWatche(watchCell As String)
+Public Sub AddWatch(watchCell As String)
     ' 检查是否已存在
     Dim exists As Boolean
     exists = False
@@ -60,7 +60,7 @@ Public Sub AddWatche(watchCell As String)
 End Sub
 
 ' 从任务的监控列表中移除监控单元格
-Public Sub RemoveWatches(watchCell As String)
+Public Sub RemoveWatch(watchCell As String)
     On Error Resume Next
     Dim i As Long
     For i = Me.taskWatches.Count To 1 Step -1

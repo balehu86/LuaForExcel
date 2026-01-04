@@ -132,7 +132,7 @@ Private Sub CleanupWorkbookWatches(wbName As String)
             Set watchInfo = g_Watches(CStr(removeKey))
             ' 从任务的 taskWatches 集合中移除
             If Not watchInfo.watchTask Is Nothing Then
-                RemoveFromTaskWatches watchInfo.watchTask, CStr(removeKey)
+                watchInfo.watchTask.RemoveWatch CStr(removeKey)
             End If
             ' 从主索引移除
             g_Watches.Remove CStr(removeKey)
