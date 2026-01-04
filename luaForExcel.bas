@@ -89,6 +89,7 @@ Private g_CFS_minVruntime As Double       ' 队列中最小的 vruntime（用于
 Private g_CFS_targetLatency As Double     ' 目标延迟周期（ms），默认为调度间隔的十分之一
 Private g_CFS_minGranularity As Double    ' 最小执行粒度（ms），默认 5ms
 Private g_CFS_niceToWeight(0 To 39) As Double  ' nice 值到权重的映射表
+Private g_ActiveTaskCount As Long ' 当前队列中活跃任务数
 ' ===== 配置常量 =====
 Private Const CP_UTF8 As Long = 65001
 Private Const LOG_LEVEL As Byte = 1  ' 默认日志等级：0=错误，1=信息，2=调试
@@ -175,6 +176,7 @@ Private Sub InitCoroutineSystem()
 
     If g_NextTaskId = 0 Then g_NextTaskId = 1
     g_StateDirty = False
+    g_ActiveTaskCount = 0
 End Sub
 
 ' 清理 Lua 状态机
@@ -1005,7 +1007,6 @@ Public Sub SchedulerTick()
         g_SchedulerRunning = False
     End If
     Exit Sub
-    
 ErrorHandler:
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
@@ -1023,10 +1024,10 @@ Private Sub ScheduleByCFS()
     Dim taskCount As Long
 
     ' 统计活跃任务数
-    taskCount = CountActiveTasks()
+    taskCount = g_ActiveTaskCount
     If taskCount = 0 Then Exit Sub
 
-    ' 计算本次 tick 的时间预算（使用 targetLatency）
+    ' 计算本次 tick 的时间预算
     tickBudget = g_CFS_targetLatency
 
     ' 计算每个任务的理想时间片
@@ -1040,6 +1041,7 @@ Private Sub ScheduleByCFS()
     Do While totalElapsed < tickBudget And g_TaskQueue.Count > 0
         ' 1. 选择 vruntime 最小的任务
         Set selectedTask = CFS_PickNextTask()
+        If selectedTask Is Nothing Then Exit Do
 
         ' 2. 执行任务
         taskStart = GetTickCount()
@@ -1048,8 +1050,11 @@ Private Sub ScheduleByCFS()
         If taskElapsed < g_CFS_minGranularity Then taskElapsed = g_CFS_minGranularity
         totalElapsed = totalElapsed + taskElapsed
 
-        ' 3. 更新 vruntime
-        CFS_UpdateVruntime selectedTask, taskElapsed
+        ' 3. 更新 vruntime 并重新排序
+        ' 只有任务仍在队列中才更新
+        If selectedTask.taskStatus = CO_YIELD Then
+            CFS_UpdateVruntime selectedTask, taskElapsed
+        End If
 
         ' 4. 自动权重调整
         If g_CFS_autoWeight Then
@@ -1064,8 +1069,6 @@ Private Sub ScheduleByCFS()
                 .wbTickCount = .wbTickCount + 1
             End With
         End If
-        ' 终态处理已经在 HandleCoroutineResult -> SetTaskStatus 中完成
-ContinueLoop:
     Loop
 End Sub
 
@@ -1125,57 +1128,47 @@ Private Sub CFS_AutoAdjustWeight(task As TaskUnit, actualTime As Double, idealSl
 
     task.CFS_weight = newWeight
 End Sub
-' 选择 vruntime 最小的任务（CFS 红黑树的简化实现）
+' 选择 vruntime 最小的任务 - O(1)，有序队列保证队首就是最小的
 Private Function CFS_PickNextTask() As TaskUnit
-    Dim minVruntime As Double
-    Dim t As Variant
-    Dim task As TaskUnit
-    minVruntime = 1E+308  ' Double 最大值
+    On Error Resume Next
     Set CFS_PickNextTask = Nothing
-    For Each t In g_TaskQueue
-        Set task = t
-        ' 只考虑 yielded 状态的任务
+
+    If g_TaskQueue.Count = 0 Then Exit Function
+
+    ' 从队首开始找第一个 YIELD 状态的任务
+    Dim i As Long
+    Dim task As TaskUnit
+
+    For i = 1 To g_TaskQueue.Count
+        Set task = g_TaskQueue(i)
         If task.taskStatus = CO_YIELD Then
-            If task.CFS_vruntime < minVruntime Then
-                minVruntime = task.CFS_vruntime
-                Set CFS_PickNextTask = task
-            End If
+            Set CFS_PickNextTask = task
+            Exit Function
         End If
     Next
 End Function
-' 更新任务的 vruntime
+' 更新任务的 vruntime 并重新排序
 Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
-    Dim vruntimeDelta As Double
-
     ' 确保最小执行粒度
     If actualRuntime < g_CFS_minGranularity Then
         actualRuntime = g_CFS_minGranularity
     End If
+
     ' 计算加权虚拟运行时间
+    Dim vruntimeDelta As Double
     vruntimeDelta = actualRuntime * (1024 / task.CFS_weight)
 
     task.CFS_vruntime = task.CFS_vruntime + vruntimeDelta
     task.CFS_lastScheduled = GetTickCount()
 
-    ' 更新全局最小 vruntime
-    Dim minV As Double
-    Dim t As Variant
-    Dim tsk As TaskUnit
-    Dim found As Boolean
-    minV = 1E+308
-    found = False
-    For Each t In g_TaskQueue
-        Set tsk = t
-        If tsk.taskStatus = CO_YIELD Then
-            If tsk.CFS_vruntime < minV Then
-                minV = tsk.CFS_vruntime
-                found = True
-            End If
-        End If
-    Next
+    ' 重新调整队列位置（维护有序性）
+    TaskQueueReposition task
 
-    If found Then
-        g_CFS_minVruntime = minV
+    ' 更新全局最小 vruntime（队首就是最小的）
+    If g_TaskQueue.Count > 0 Then
+        Dim firstTask As TaskUnit
+        Set firstTask = g_TaskQueue(1)
+        g_CFS_minVruntime = firstTask.CFS_vruntime
     End If
 End Sub
 
@@ -1295,10 +1288,14 @@ End Sub
 ' 第六部分：辅助函数（内部使用）
 ' ============================================
 ' 统一压栈函数 - 简化版
+' 统一压栈函数 - 迭代版本（避免递归）
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
+    ' 先解包 Range（迭代展开，避免递归）
+    Do While TypeName(value) = "Range"
+        value = value.value
+    Loop
+    ' 处理实际值
     Select Case True
-        Case TypeName(value) = "Range"
-            PushValue L, value.value  ' 递归处理Range
         Case IsArray(value)
             PushArray L, value
         Case IsEmpty(value), IsNull(value)
@@ -1311,6 +1308,7 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
             lua_pushstring L, CStr(value)
     End Select
 End Sub
+
 
 ' 统一数组压栈函数 - 支持主状态机和协程线程
 Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
@@ -1714,19 +1712,21 @@ Private Function FindTaskByCell(taskCell As String) As String
     FindTaskByCell = vbNullString
 End Function
 
-' 检查 g_TaskQueue 中是否存在指定任务
+' 检查 g_TaskQueue 中是否存在指定任务 - O(n)
+' 注：有序队列仍需遍历检查存在性
 Private Function TaskQueueExists(task As TaskUnit) As Boolean
     On Error Resume Next
-    Dim t As Variant
-    For Each t In g_TaskQueue
-        If t Is task Then
+    Dim i As Long
+    For i = 1 To g_TaskQueue.Count
+        If g_TaskQueue(i) Is task Then
             TaskQueueExists = True
             Exit Function
         End If
     Next
     TaskQueueExists = False
 End Function
-' 安全地从 g_TaskQueue 中移除元素
+
+' 从 g_TaskQueue 中移除元素 - O(n)
 Private Sub TaskQueueRemove(task As TaskUnit)
     On Error Resume Next
     Dim i As Long
@@ -1737,11 +1737,48 @@ Private Sub TaskQueueRemove(task As TaskUnit)
         End If
     Next
 End Sub
-' 安全地向 g_TaskQueue 添加元素（避免重复）
-Private Sub TaskQueueAdd(task As TaskUnit)
-    If Not TaskQueueExists(task) Then
+
+' 有序插入任务到队列（按 vruntime 升序）- O(n)
+' 队列头部是 vruntime 最小的任务
+Private Sub TaskQueueAddSorted(task As TaskUnit)
+    On Error Resume Next
+
+    ' 先检查是否已存在
+    If TaskQueueExists(task) Then Exit Sub
+
+    ' 空队列直接添加
+    If g_TaskQueue.Count = 0 Then
         g_TaskQueue.Add task
+        Exit Sub
     End If
+
+    ' 找到插入位置（按 vruntime 升序）
+    Dim i As Long
+    Dim currentTask As TaskUnit
+
+    For i = 1 To g_TaskQueue.Count
+        Set currentTask = g_TaskQueue(i)
+        If task.CFS_vruntime < currentTask.CFS_vruntime Then
+            ' 插入到位置 i 之前
+            If i = 1 Then
+                g_TaskQueue.Add task, Before:=1
+            Else
+                g_TaskQueue.Add task, Before:=i
+            End If
+            Exit Sub
+        End If
+    Next
+
+    ' 如果 vruntime 最大，添加到末尾
+    g_TaskQueue.Add task
+End Sub
+
+' 重新调整任务在队列中的位置（vruntime 更新后调用）- O(n)
+Private Sub TaskQueueReposition(task As TaskUnit)
+    ' 先移除
+    TaskQueueRemove task
+    ' 重新有序插入
+    TaskQueueAddSorted task
 End Sub
 
 ' 统一设置任务状态并处理所有副作用
@@ -1750,14 +1787,14 @@ End Sub
 ' options: 可选参数，用于控制特殊行为
 '   - "DELETE": 状态设置后从 g_Tasks 中删除任务
 '   - "COROUTINE": 不释放协程（用于暂停等场景）
-Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional options As String = VbNullString)
+Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional options As String = vbNullString)
     If task Is Nothing Then Exit Sub
 
     Dim oldStatus As CoStatus
     oldStatus = task.taskStatus
 
     ' 相同状态不处理（除非有特殊选项）
-    If oldStatus = newStatus And options = VbNullString Then Exit Sub
+    If oldStatus = newStatus And options = vbNullString Then Exit Sub
 
     Dim taskIdStr As String
     taskIdStr = "Task_" & task.taskId
@@ -1767,8 +1804,19 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional opti
     shouldDelete = InStr(1, options, "DELETE", vbTextCompare) > 0
     keepCoroutine = InStr(1, options, "COROUTINE", vbTextCompare) > 0
 
+    ' ===== 更新活跃任务计数器（状态变更前） =====
+    If oldStatus = CO_YIELD Then
+        g_ActiveTaskCount = g_ActiveTaskCount - 1
+    End If
+
     ' 更新状态
     task.taskStatus = newStatus
+
+    ' ===== 更新活跃任务计数器（状态变更后） =====
+    If newStatus = CO_YIELD Then
+        g_ActiveTaskCount = g_ActiveTaskCount + 1
+    End If
+
     ' 根据新状态处理副作用
     Select Case newStatus
         Case CO_DONE, CO_ERROR
@@ -1783,17 +1831,18 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional opti
                     g_Tasks.Remove taskIdStr
                 End If
             End If
+            
         Case CO_TERMINATED
             ' 终止：释放协程，从队列移除，清理 Watch
             If Not keepCoroutine Then ReleaseTaskCoroutine task
             TaskQueueRemove task
-
             CleanupTaskWatches task
             ' 终止状态默认从任务列表删除
             If g_Tasks.Exists(taskIdStr) Then
                 Set g_Tasks(taskIdStr) = Nothing
                 g_Tasks.Remove taskIdStr
             End If
+            
         Case CO_PAUSED
             ' 暂停：从队列移除但保留协程
             TaskQueueRemove task
@@ -1803,7 +1852,7 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional opti
             If oldStatus = CO_PAUSED Then
                 task.CFS_vruntime = g_CFS_minVruntime
                 task.CFS_lastScheduled = GetTickCount()
-                TaskQueueAdd task
+                TaskQueueAddSorted task  ' 使用有序插入
             End If
             ' 新任务首次进入 YIELD 状态，使用 nice 值初始化权重
             If oldStatus = CO_DEFINED Then
@@ -1811,7 +1860,7 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional opti
                 task.CFS_weight = g_CFS_niceToWeight(20)
                 task.CFS_vruntime = g_CFS_minVruntime
                 task.CFS_lastScheduled = GetTickCount()
-                TaskQueueAdd task
+                TaskQueueAddSorted task  ' 使用有序插入
             End If
 
         Case CO_DEFINED

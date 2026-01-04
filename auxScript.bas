@@ -437,20 +437,20 @@ Private Sub LuaTaskMenu_ShowDetail()
     value = task.taskValue
     ' 获取task.value数组维度
     Dim dims As String
-    Dim i As Byte
-    For i = 1 To 10  ' 最多检查10维
+    Dim f As Byte
+    For f = 1 To 10  ' 最多检查10维
         Dim ub As Long
-        ub = UBound(value, i)
+        ub = UBound(value, f)
         If Err.Number <> 0 Then
             Exit For
         End If
 
         Dim lb As Long
-        lb = LBound(value, i)
+        lb = LBound(value, f)
 
         If dims <> vbNullString Then dims = dims & " x "
         dims = dims & (ub - lb + 1)
-    Next i
+    Next f
     If dims = vbNullString Then dims = "未知"
 
     If IsArray(value) Then
