@@ -49,38 +49,51 @@ Private Function GetTaskIdFromSelection() As String
     GetTaskIdFromSelection = FindTaskByCell(cellAddr)
 End Function
 
+' 新增通用错误处理辅助函数
+Private Function SafeGetTaskFromSelection(ByRef task As TaskUnit, ByRef taskId As String) As Boolean
+    taskId = GetTaskIdFromSelection()
+    If taskId = vbNullString Then
+        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+        SafeGetTaskFromSelection = False
+        Exit Function
+    End If
+    If Not g_Tasks.Exists(taskId) Then
+        MsgBox "任务不存在或已删除", vbExclamation
+        SafeGetTaskFromSelection = False
+        Exit Function
+    End If
+    Set task = g_Tasks(taskId)
+    SafeGetTaskFromSelection = True
+End Function
+
 ' 辅助函数：清理特定工作簿的任务
 Public Sub CleanupWorkbookTasks(wbName As String)
     On Error Resume Next
-
     If g_Tasks Is Nothing Then Exit Sub
-    ' 收集要删除的任务ID
+
+    ' 收集该工作簿的所有任务
     Dim toRemove As Collection
     Set toRemove = New Collection
     Dim taskId As Variant
+
     For Each taskId In g_Tasks.Keys
         If g_Tasks(CStr(taskId)).taskWorkbook = wbName Then
-            toRemove.Add CStr(taskId)
+            toRemove.Add g_Tasks(CStr(taskId))
         End If
     Next
-    ' 使用安全删除
-    For Each taskId In toRemove
-        Dim task As TaskUnit
-        Set task = g_Tasks(taskId)
-        ' 1. 先清理该任务的所有 Watch
-        CleanupTaskWatches task
-        ' 2. 释放协程
-        ReleaseTaskCoroutine task
-        ' 3. 从队列移除
-        TaskQueueRemove task
-        ' 4. 释放任务对象
-        Set g_Tasks(taskId) = Nothing
-        g_Tasks.Remove taskId
+
+    ' 批量终止
+    Dim t As Variant
+    Dim task As TaskUnit
+    For Each t In toRemove
+        Set task = t  ' 转换为 TaskUnit 类型
+        SetTaskStatus task, CO_TERMINATED
     Next
-    ' 清理工作簿的监控（额外保险，处理可能遗漏的）
+
+    ' 清理工作簿的监控
     CleanupWorkbookWatches wbName
-    ' 清理孤儿 Watch
     CleanupOrphanWatches
+
     ' 清理工作簿记录
     If Not g_Workbooks Is Nothing Then
         If g_Workbooks.Exists(wbName) Then
@@ -285,150 +298,64 @@ End Sub
 
 ' 启动任务
 Private Sub LuaTaskMenu_StartTask()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+    Dim task As TaskUnit, taskId As String
+    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+
+    If task.taskStatus <> CO_DEFINED Then
+        MsgBox "任务状态为 " & StatusToString(task.taskStatus) & "，无法启动。", vbExclamation
         Exit Sub
     End If
-    If g_Tasks(taskId).taskStatus = CO_DEFINED Then
-        StartLuaCoroutine taskId
-        MsgBox "任务已启动: " & taskId, vbInformation
-    Else
-        MsgBox "任务状态为 " & g_Tasks(taskId).taskStatus & "，无法启动。", vbExclamation
-    End If
+    StartLuaCoroutine taskId
+    MsgBox "任务已启动: " & taskId, vbInformation
 End Sub
 
 ' 暂停任务
 Private Sub LuaTaskMenu_PauseTask()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+    Dim task As TaskUnit, taskId As String
+    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If task.taskStatus <> CO_YIELD Then
+        MsgBox "只能暂停正在运行的任务。当前状态: " & StatusToString(task.taskStatus), vbExclamation
         Exit Sub
     End If
-
-    If Not g_Tasks.Exists(taskId) Then
-        MsgBox "任务已不存在。", vbExclamation
-        Exit Sub
-    End If
-
-    If TaskQueueExists(g_Tasks(taskId)) Then
-        TaskQueueRemove g_Tasks(taskId)
-        SetTaskStatus g_Tasks(taskId), CO_PAUSED
-        g_Tasks(taskId).taskStatus = CO_PAUSED
-        MsgBox "任务 " & taskId & " 已暂停。" & vbCrLf & _
-               "使用 ResumeTask 恢复。", vbInformation, "任务已暂停"
-    Else
-        MsgBox "任务 " & taskId & " 不在活跃队列中。", vbExclamation, "提示"
-    End If
+    
+    SetTaskStatus task, CO_PAUSED
+    MsgBox "任务 " & taskId & " 已暂停。", vbInformation
 End Sub
 
 ' 恢复任务
 Private Sub LuaTaskMenu_ResumeTask()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+    Dim task As TaskUnit, taskId As String
+    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If task.taskStatus <> CO_PAUSED Then
+        MsgBox "只能恢复已暂停的任务。当前状态: " & StatusToString(task.taskStatus), vbExclamation
         Exit Sub
     End If
-    If Not g_Tasks.Exists(taskId) Then
-        MsgBox "任务 " & taskId & " 不存在。", vbCritical, "错误"
-        Exit Sub
-    End If
-
-    Dim status As CoStatus
-    status = g_Tasks(taskId).taskStatus
-
-    If status <> CO_YIELD And status <> CO_PAUSED Then
-        MsgBox "任务 " & taskId & " 状态为 " & status & "，无法恢复。", vbExclamation, "无法恢复"
-        Exit Sub
-    End If
-
-    If status = CO_PAUSED Then
-        SetTaskStatus g_Tasks(taskId), CO_YIELD
-        g_Tasks(taskId).CFS_vruntime = g_CFS_minVruntime
-    End If
-
-    If Not TaskQueueExists(g_Tasks(taskId)) Then
-        TaskQueueAdd g_Tasks(taskId)
-        StartSchedulerIfNeeded
-        MsgBox "任务 " & taskId & " 已恢复。", vbInformation, "任务已恢复"
-    Else
-        MsgBox "任务 " & taskId & " 已在活跃队列中。", vbInformation, "提示"
-    End If
+    SetTaskStatus task, CO_YIELD
+    StartSchedulerIfNeeded
+    MsgBox "任务 " & taskId & " 已恢复。", vbInformation
 End Sub
 
 ' 终止任务
 Private Sub LuaTaskMenu_TerminateTask()
-    On Error Resume Next
-    If g_Tasks Is Nothing Then
-        MsgBox "任务系统未初始化", vbExclamation
-        Exit Sub
-    End If
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
-    If Not g_Tasks.Exists(taskId) Then
-        MsgBox "任务不存在或已删除", vbExclamation
-        Exit Sub
-    End If
-    Dim result As VbMsgBoxResult
-    result = MsgBox("确定要终止并删除任务 " & taskId & " 吗？", _
-                    vbQuestion + vbYesNo, "确认终止")
-    If result = vbNo Then Exit Sub
-
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
-
-    ' 1. 先清理该任务的所有 Watch
-    CleanupTaskWatches task
-    ' 2. 释放协程
-    ReleaseTaskCoroutine task
-    ' 3. 从队列移除
-    TaskQueueRemove task
-    ' 4. 释放任务对象
-    Set g_Tasks(taskId) = Nothing
-    g_Tasks.Remove taskId
+    Dim task As TaskUnit, taskId As String
+    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If MsgBox("确定要终止并删除任务 " & taskId & " 吗？", vbQuestion + vbYesNo, "确认终止") = vbNo Then Exit Sub
+    SetTaskStatus task, CO_TERMINATED
     MsgBox "任务已终止并删除: " & taskId, vbInformation
 End Sub
 
 ' 重置任务
 Private Sub LuaTaskMenu_ResetTask()
-    On Error Resume Next
-    If g_Tasks Is Nothing Then
-        MsgBox "任务系统未初始化", vbExclamation
-        Exit Sub
-    End If
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
-    
-    If Not g_Tasks.Exists(taskId) Then
-        MsgBox "任务不存在或已删除", vbExclamation
-        Exit Sub
-    End If
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
-
-    ' 检查是否可以重置
-    If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
-        MsgBox "只能重置已完成或错误状态的任务。" & vbCrLf & _
+    Dim task As TaskUnit, taskId As String
+    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR And task.taskStatus <> CO_TERMINATED Then
+        MsgBox "只能重置已完成、错误或已终止状态的任务。" & vbCrLf & _
                "当前状态: " & StatusToString(task.taskStatus), vbExclamation, "无法重置"
         Exit Sub
     End If
-
-    ' 执行重置
     SetTaskStatus task, CO_DEFINED
-
-    MsgBox "任务已重置为 DEFINED 状态: " & taskId & vbCrLf & vbCrLf & _
-           "现在可以重新启动此任务。", vbInformation, "重置成功"
+    RefreshWatches
+    MsgBox "任务已重置为 DEFINED 状态: " & taskId, vbInformation, "重置成功"
 End Sub
 
 ' 查看任务详情
@@ -682,46 +609,41 @@ End Sub
 ' 清理所有已完成或错误的任务
 Private Sub LuaSchedulerMenu_CleanupFinishedTasks()
     On Error Resume Next
-    If g_Tasks Is Nothing Then
-        InitCoroutineSystem
-    End If
+    
+    If g_Tasks Is Nothing Then InitCoroutineSystem
     If g_Tasks.Count = 0 Then
         MsgBox "当前没有任务需要清理。", vbInformation, "清理任务"
         Exit Sub
     End If
-    ' 收集需要清理的任务ID
+    
+    ' 收集需要清理的任务
     Dim toRemove As Collection
     Set toRemove = New Collection
     Dim taskId As Variant
-    Dim status As CoStatus
+    
     For Each taskId In g_Tasks.Keys
+        Dim status As CoStatus
         status = g_Tasks(taskId).taskStatus
         If status = CO_DONE Or status = CO_ERROR Or status = CO_TERMINATED Then
-            toRemove.Add CStr(taskId)
+            toRemove.Add g_Tasks(taskId)
         End If
     Next
-    ' ★ 修复：使用安全删除
-    Dim removeId As Variant
-    Dim count As Integer
+    
+    ' 批量清理
+    Dim t As Variant
+    Dim task As TaskUnit
+    Dim count As Long
     count = 0
-    For Each removeId In toRemove
-        Dim task As TaskUnit
-        Set task = g_Tasks(removeId)
-
-        ' 1. 先清理该任务的所有 Watch
-        CleanupTaskWatches task
-        ' 2. 释放协程
-        ReleaseTaskCoroutine task
-        ' 3. 从队列移除
-        TaskQueueRemove task
-        ' 4. 释放任务对象
-        Set g_Tasks(taskId) = Nothing
-        g_Tasks.Remove taskId
-            count = count + 1
+    
+    For Each t In toRemove
+        Set task = t  ' 转换为 TaskUnit 类型
+        SetTaskStatus task, CO_TERMINATED
+        count = count + 1
     Next
-    ' 额外清理孤儿 Watch
+    
     CleanupOrphanWatches
-    MsgBox "已清理 " & count & " 个已完成或错误的任务。" & vbCrLf & _
+    
+    MsgBox "已清理 " & count & " 个任务。" & vbCrLf & _
            "剩余任务: " & g_Tasks.Count, vbInformation, "清理完成"
 End Sub
 
@@ -757,37 +679,27 @@ Private Sub LuaSchedulerMenu_ClearAllTasks()
                     "这将删除所有任务数据，无法恢复！", _
                     vbExclamation + vbYesNo, "确认清空")
     If result = vbNo Then Exit Sub
-
-    ' 停止调度器
     StopScheduler
-    ' 使用安全删除
+
     If Not g_Tasks Is Nothing Then
-        Dim taskIds As New Collection
-        Dim task As TaskUnit
-        ' 先收集所有ID
+        ' 收集所有任务
+        Dim tasks As New Collection
         Dim taskId As Variant
         For Each taskId In g_Tasks.Keys
-            taskIds.Add CStr(taskId)
+            tasks.Add g_Tasks(taskId)
         Next
-        ' 再逐个删除
-        For Each taskId In taskIds
-            Set task = g_Tasks(taskId)
-            ' 1. 先清理该任务的所有 Watch
-            CleanupTaskWatches task
-            ' 2. 释放协程
-            ReleaseTaskCoroutine task
-            ' 3. 从队列移除
-            TaskQueueRemove task
-            ' 4. 释放任务对象
-            Set g_Tasks(taskId) = Nothing
-            g_Tasks.Remove taskId
+
+        ' 逐个终止
+        Dim t As Variant
+        Dim task As TaskUnit
+        For Each t In tasks
+            Set task = t  ' 转换为 TaskUnit 类型
+            SetTaskStatus task, CO_TERMINATED
         Next
     End If
-    ' 清理孤儿 Watch
-    CleanupOrphanWatches
 
-    ' 重置队列
     Set g_TaskQueue = New Collection
+    CleanupOrphanWatches
 
     MsgBox "所有任务已清空。", vbInformation, "清空完成"
 End Sub
