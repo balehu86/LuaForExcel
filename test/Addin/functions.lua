@@ -1094,3 +1094,66 @@ function matrix_builder(taskCell, targetRows, targetCols)
 end
 
 print("functions.lua 已加载 - 协程示例")
+
+-- ============================================
+-- 累加器协程函数
+-- 功能：监控输入单元格，累加所有输入的数字，输出到目标单元格
+-- ============================================
+-- 累加器函数
+-- 参数：
+--   taskCell: 任务所在单元格地址（自动传入）
+--   inputCell: 要监控的输入单元格地址（如 "A1"）
+--   outputCell: 输出累加结果的单元格地址（如 "B1"，可选）
+function accumulator(taskCell, inputCell, outputCell)
+    -- 初始化
+    local sum = 0           -- 累加总和
+    local lastValue = nil   -- 上次读取的值
+    local count = 0         -- 累加次数
+    local history = {}      -- 历史记录（可选）
+    
+    -- 默认输出到输入单元格右边一格
+    outputCell = outputCell or nil
+    
+    -- 主循环
+    while true do
+        -- 通过 resume 参数获取当前输入单元格的值
+        -- resumeSpec 中指定 inputCell，调度器会自动读取并传入
+        local currentValue = coroutine.yield({
+            status = "yield",
+            progress = 0,
+            message = "等待输入... 当前累计: " .. sum .. " (共" .. count .. "次)",
+            value = {
+                sum = sum,
+                count = count,
+                lastInput = lastValue or "无"
+            }
+        })
+        
+        -- 检查是否有新的有效数字输入
+        if currentValue ~= nil then
+            local numValue = tonumber(currentValue)
+            
+            if numValue ~= nil then
+                -- 检查是否与上次值不同（避免重复累加）
+                if lastValue ~= numValue then
+                    -- 累加
+                    sum = sum + numValue
+                    count = count + 1
+                    lastValue = numValue
+                    
+                    -- 记录历史
+                    table.insert(history, {
+                        input = numValue,
+                        sum = sum,
+                        time = os.time()
+                    })
+                    
+                    -- 只保留最近100条记录
+                    if #history > 100 then
+                        table.remove(history, 1)
+                    end
+                end
+            end
+        end
+    end
+end
