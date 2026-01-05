@@ -351,6 +351,10 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaConfigMenu, "设置最小粒度（毫秒）", "LuaConfigMenu_SetMinGranularity"
     AddLuaMenuItem luaConfigMenu, "启用自动权重调整", "LuaConfigMenu_EnableAutoWeight"
     AddLuaMenuItem luaConfigMenu, "禁用自动权重调整", "LuaConfigMenu_DisableAutoWeight"
+    AddLuaMenuItem luaConfigMenu, "---", ""  ' 分隔线（可选）
+    AddLuaMenuItem luaConfigMenu, "设置为单轮模式", "LuaConfigMenu_SetSingleMode"
+    AddLuaMenuItem luaConfigMenu, "设置为时间片模式", "LuaConfigMenu_SetTimeSliceMode"
+    AddLuaMenuItem luaConfigMenu, "查看当前调度模式", "LuaConfigMenu_ShowScheduleMode"
 
     ' 添加调试的主菜单
     Dim luaDebugMenu As CommandBarControl
@@ -1044,6 +1048,50 @@ Private Sub LuaConfigMenu_DisableAutoWeight()
            "任务权重将保持手动设置的值。", _
            vbInformation, "自动权重"
 End Sub
+
+' 设置为单轮模式
+Private Sub LuaConfigMenu_SetSingleMode()
+    g_ScheduleMode = SCHEDULE_MODE_SINGLE
+    MsgBox "已切换到单轮模式。" & vbCrLf & vbCrLf & _
+           "每个调度周期只执行一个任务。" & vbCrLf & _
+           "适用于任务执行时间较长或需要严格控制的场景。", _
+           vbInformation, "调度模式"
+End Sub
+
+' 设置为时间片模式
+Private Sub LuaConfigMenu_SetTimeSliceMode()
+    g_ScheduleMode = SCHEDULE_MODE_TIMESLICE
+    MsgBox "已切换到时间片模式。" & vbCrLf & vbCrLf & _
+           "每个调度周期执行 " & g_CFS_targetLatency & " ms 的任务。" & vbCrLf & _
+           "可通过【设置目标延迟】调整每周期执行时间。" & vbCrLf & _
+           "适用于多任务并发、需要公平调度的场景。", _
+           vbInformation, "调度模式"
+End Sub
+
+' 查看当前调度模式
+Private Sub LuaConfigMenu_ShowScheduleMode()
+    Dim modeStr As String
+    Dim modeDesc As String
+
+    Select Case g_ScheduleMode
+        Case SCHEDULE_MODE_SINGLE
+            modeStr = "单轮模式"
+            modeDesc = "每个调度周期只执行一个任务"
+        Case SCHEDULE_MODE_TIMESLICE
+            modeStr = "时间片模式"
+            modeDesc = "每个调度周期执行 " & g_CFS_targetLatency & " ms 的任务"
+        Case Else
+            modeStr = "未知"
+            modeDesc = "请重新设置调度模式"
+    End Select
+
+    MsgBox "当前调度模式: " & modeStr & vbCrLf & vbCrLf & _
+           "说明: " & modeDesc & vbCrLf & vbCrLf & _
+           "调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf & _
+           "目标延迟: " & g_CFS_targetLatency & " ms" & vbCrLf & _
+           "活跃任务数: " & g_ActiveTaskCount, _
+           vbInformation, "调度模式信息"
+End Sub
 ' ====调试和诊断功能====
 ' 显示加载宏状态
 Private Sub LuaDebugMenu_ShowAddinStatus()
@@ -1062,6 +1110,9 @@ Private Sub LuaDebugMenu_ShowAddinStatus()
     msg = msg & "目标延迟: " & g_CFS_targetLatency & " ms" & vbCrLf
     msg = msg & "最小粒度: " & g_CFS_minGranularity & " ms" & vbCrLf
     msg = msg & "自动权重: " & IIf(g_CFS_autoWeight, "已启用", "已禁用") & vbCrLf
+    msg = msg & "自动权重: " & IIf(g_CFS_autoWeight, "已启用", "已禁用") & vbCrLf
+    msg = msg & "调度模式: " & IIf(g_ScheduleMode = SCHEDULE_MODE_SINGLE, "单轮模式", "时间片模式") & vbCrLf
+    msg = msg & "当前 min_vruntime: " & Format(g_CFS_minVruntime, "0.00") & vbCrLf
     msg = msg & "当前 min_vruntime: " & Format(g_CFS_minVruntime, "0.00") & vbCrLf
     msg = msg & "----------------------------------------" & vbCrLf
     If g_Tasks Is Nothing Then
@@ -1151,6 +1202,9 @@ Private Sub LuaPerfMenu_ShowSchedulerStats()
     msg = msg & vbCrLf & "上次调度: " & Format(g_SchedulerStats.LastTime, "0.00") & " ms" & vbCrLf
     msg = msg & vbCrLf & "----------------------------------------" & vbCrLf
     msg = msg & "CFS 调度参数:" & vbCrLf
+    msg = msg & "CFS 调度参数:" & vbCrLf
+    msg = msg & "  调度模式: " & IIf(g_ScheduleMode = SCHEDULE_MODE_SINGLE, "单轮模式", "时间片模式") & vbCrLf
+    msg = msg & "  调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf
     msg = msg & "  调度间隔: " & g_SchedulerIntervalMilliSec & " ms" & vbCrLf
     msg = msg & "  目标延迟: " & g_CFS_targetLatency & " ms" & vbCrLf
     msg = msg & "  最小粒度: " & g_CFS_minGranularity & " ms" & vbCrLf

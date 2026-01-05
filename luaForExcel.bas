@@ -73,6 +73,10 @@ Private g_HotReloadEnabled As Boolean ' 是否启用 hot-reload，默认开启
 Private g_FunctionsPath As String     ' 固定为加载项目录
 Private g_LastModified As Date        ' functions.lua 上次修改，用于热重载
 Private g_CFS_autoWeight As Boolean   ' 自动调整权重开关
+' 调度模式：0=单轮模式（每tick只运行一个任务），1=时间片模式（每tick运行x ms）
+Private g_ScheduleMode As Long
+Private Const SCHEDULE_MODE_SINGLE As Long = 0    ' 单轮模式
+Private Const SCHEDULE_MODE_TIMESLICE As Long = 1 ' 时间片模式
 ' ===== 协程全局变量 =====
 Public Enum CoStatus ' task 的状态枚举
     CO_DEFINED
@@ -164,6 +168,8 @@ Private Sub InitCoroutineSystem()
     If g_CFS_targetLatency = 0 Then g_CFS_targetLatency = g_SchedulerIntervalMilliSec / 10  ' 默认为调度间隔的十分之一
     If g_CFS_minGranularity = 0 Then g_CFS_minGranularity = 5
     g_CFS_autoWeight = False  ' 默认关闭自动权重调整
+    ' 调度模式初始化（默认单轮模式）
+    If g_ScheduleMode = 0 Then g_ScheduleMode = SCHEDULE_MODE_SINGLE
     ' 初始化 nice 到权重的映射表（简化版，只用 0-39 对应 nice -20 到 +19）
     ' 权重公式: weight = 1024 / 1.25^nice  (nice=0 时 weight=1024)
     Dim i As Byte
@@ -1123,53 +1129,42 @@ ErrorHandler:
     Debug.Print "SchedulerTick Error: " & Err.Description
 End Sub
 
-' CFS 调度核心算法
+' CFS 调度核心算法 - 支持两种模式
 Private Sub ScheduleByCFS()
     If g_TaskQueue.Count = 0 Then Exit Sub
-
     Dim tickBudget As Double ' 本次调度时间预算
     Dim taskStart As Double, taskElapsed As Double
     Dim selectedTask As TaskUnit
     Dim taskCount As Long
-
+    Dim totalElapsed As Double
+    Dim idealSlice As Double
+    Dim continueLoop As Boolean
     ' 统计活跃任务数
     taskCount = g_ActiveTaskCount
     If taskCount = 0 Then Exit Sub
-
-    ' 计算本次 tick 的时间预算
+    ' 计算本次 tick 的时间预算和理想时间片
     tickBudget = g_CFS_targetLatency
-
-    ' 计算每个任务的理想时间片
-    Dim idealSlice As Double
     idealSlice = tickBudget / taskCount
     If idealSlice < g_CFS_minGranularity Then idealSlice = g_CFS_minGranularity
-
-    Dim totalElapsed As Double
     totalElapsed = 0
-
-    Do While totalElapsed < tickBudget And g_TaskQueue.Count > 0
+    Do
         ' 1. 选择 vruntime 最小的任务
         Set selectedTask = CFS_PickNextTask()
         If selectedTask Is Nothing Then Exit Do
-
         ' 2. 执行任务
         taskStart = GetTickCount()
         ResumeCoroutine selectedTask
         taskElapsed = GetTickCount() - taskStart
         If taskElapsed < g_CFS_minGranularity Then taskElapsed = g_CFS_minGranularity
         totalElapsed = totalElapsed + taskElapsed
-
-        ' 3. 更新 vruntime 并重新排序
-        ' 只有任务仍在队列中才更新
+        ' 3. 更新 vruntime 并重新排序（只有任务仍在队列中才更新）
         If selectedTask.taskStatus = CO_YIELD Then
             CFS_UpdateVruntime selectedTask, taskElapsed
         End If
-
         ' 4. 自动权重调整
         If g_CFS_autoWeight Then
             CFS_AutoAdjustWeight selectedTask, taskElapsed, idealSlice
         End If
-
         ' 5. 更新工作簿统计
         If g_Workbooks.Exists(selectedTask.taskWorkbook) Then
             With g_Workbooks(selectedTask.taskWorkbook)
@@ -1178,7 +1173,19 @@ Private Sub ScheduleByCFS()
                 .wbTickCount = .wbTickCount + 1
             End With
         End If
-    Loop
+        ' 6. 根据调度模式决定是否继续循环
+        Select Case g_ScheduleMode
+            Case SCHEDULE_MODE_SINGLE
+                ' 单轮模式：执行一个任务后立即退出
+                continueLoop = False
+            Case SCHEDULE_MODE_TIMESLICE
+                ' 时间片模式：继续执行直到用完时间预算或队列为空
+                continueLoop = (totalElapsed < tickBudget) And (g_TaskQueue.Count > 0)
+            Case Else
+                ' 默认单轮模式
+                continueLoop = False
+        End Select
+    Loop While continueLoop
 End Sub
 ' 自动调整任务权重
 Private Sub CFS_AutoAdjustWeight(task As TaskUnit, actualTime As Double, idealSlice As Double)
