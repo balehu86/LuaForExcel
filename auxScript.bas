@@ -204,6 +204,74 @@ Private Function WeightToNice(weight As Double) As Integer
 
     WeightToNice = bestIndex - 20
 End Function
+
+' 格式化 Resume 参数规格（辅助函数）
+Private Function FormatResumeSpecs(task As TaskUnit) As String
+    On Error GoTo ErrorHandler
+
+    Dim result As String
+    result = ""
+
+    Dim specs As Variant
+    specs = task.ResumeSpecParsed
+
+    If Not IsArray(specs) Then
+        FormatResumeSpecs = "   (无)" & vbCrLf
+        Exit Function
+    End If
+
+    Dim lb As Long, ub As Long
+    On Error Resume Next
+    lb = LBound(specs)
+    ub = UBound(specs)
+    If Err.Number <> 0 Then
+        FormatResumeSpecs = "   (无)" & vbCrLf
+        Exit Function
+    End If
+    On Error GoTo ErrorHandler
+
+    If ub < lb Then
+        FormatResumeSpecs = "   (无)" & vbCrLf
+        Exit Function
+    End If
+
+    Dim i As Long
+    For i = lb To ub
+        Dim spec As Object
+        Set spec = specs(i)
+
+        Dim specType As Long
+        specType = CLng(spec("type"))
+
+        Dim typeStr As String
+        Select Case specType
+            Case PARAM_LITERAL: typeStr = "字面量"
+            Case PARAM_CELL_REF: typeStr = "单元格引用"
+            Case PARAM_RANGE_REF: typeStr = "区域引用"
+            Case PARAM_DYNAMIC_STRING: typeStr = "动态字符串"
+            Case Else: typeStr = "未知(" & specType & ")"
+        End Select
+
+        result = result & "   [" & i & "] " & typeStr
+
+        Select Case specType
+            Case PARAM_LITERAL
+                result = result & " = " & CStr(spec("value"))
+            Case PARAM_CELL_REF, PARAM_RANGE_REF
+                result = result & " -> [" & spec("workbook") & "]" & spec("worksheet") & "!" & spec("address")
+            Case PARAM_DYNAMIC_STRING
+                result = result & " -> $" & spec("refString")
+        End Select
+
+        result = result & vbCrLf
+    Next i
+
+    FormatResumeSpecs = result
+    Exit Function
+
+ErrorHandler:
+    FormatResumeSpecs = "   (解析错误: " & Err.Description & ")" & vbCrLf
+End Function
 ' ============================================
 ' 第七部分：可视化操作函数
 ' ============================================
@@ -360,11 +428,15 @@ End Sub
 Private Sub LuaTaskMenu_ResetTask()
     Dim task As TaskUnit, taskId As String
     If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
-    If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR And task.taskStatus <> CO_TERMINATED Then
-        MsgBox "只能重置已完成、错误或已终止状态的任务。" & vbCrLf & _
-               "当前状态: " & StatusToString(task.taskStatus), vbExclamation, "无法重置"
-        Exit Sub
+    ' 如果任务正在运行，需要先确认
+    If task.taskStatus = CO_YIELD Then
+        Dim result As VbMsgBoxResult
+        result = MsgBox("任务正在运行中，确定要重置吗？" & vbCrLf & vbCrLf & _
+                        "重置将停止任务并清除所有进度。", _
+                        vbQuestion + vbYesNo, "确认重置")
+        If result = vbNo Then Exit Sub
     End If
+
     SetTaskStatus task, CO_DEFINED
     RefreshWatches
     MsgBox "任务已重置为 DEFINED 状态: " & taskId, vbInformation, "重置成功"
@@ -388,8 +460,10 @@ Private Sub LuaTaskMenu_ShowDetail()
         MsgBox "任务 " & taskId & " 不存在！", vbCritical, "错误"
         Exit Sub
     End If
+    
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
+    
     Dim msg As String
     msg = "========================================" & vbCrLf
     msg = msg & "  任务详细信息" & vbCrLf
@@ -398,7 +472,7 @@ Private Sub LuaTaskMenu_ShowDetail()
     msg = msg & "任务ID: " & taskId & vbCrLf
     msg = msg & "函数名: " & task.taskFunc & vbCrLf
     msg = msg & "单元格: " & task.taskCell & vbCrLf
-    msg = msg & "状态: " & task.taskStatus & vbCrLf
+    msg = msg & "状态: " & StatusToString(task.taskStatus) & vbCrLf
     msg = msg & "进度: " & Format(task.taskProgress, "0.00") & "%" & vbCrLf
     msg = msg & "消息: " & task.taskMessage & vbCrLf
     msg = msg & "  CFS vruntime: " & Format(task.CFS_vruntime, "0.00") & " ms" & vbCrLf
@@ -412,50 +486,39 @@ Private Sub LuaTaskMenu_ShowDetail()
     startArgs = task.taskStartArgs
     If IsArray(startArgs) Then
         Dim i As Long
-        For i = LBound(startArgs) To UBound(startArgs)
-            msg = msg & "   [" & i & "] " & CStr(startArgs(i)) & vbCrLf
-        Next i
+        Dim lb As Long, ub As Long
+        On Error Resume Next
+        lb = LBound(startArgs)
+        ub = UBound(startArgs)
+        If Err.Number = 0 Then
+            On Error GoTo ErrorHandler
+            For i = lb To ub
+                msg = msg & "   [" & i & "] " & CStr(startArgs(i)) & vbCrLf
+            Next i
+        Else
+            Err.Clear
+            On Error GoTo ErrorHandler
+            msg = msg & "   (无)" & vbCrLf
+        End If
     Else
         msg = msg & "   (无)" & vbCrLf
     End If
 
-    ' Resume 参数
-    msg = msg & vbCrLf & "Resume 参数:" & vbCrLf
-    Dim resumeSpec As Variant
-    resumeSpec = task.taskResumeSpec
-    If IsArray(resumeSpec) Then
-        For i = LBound(resumeSpec) To UBound(resumeSpec)
-            msg = msg & "   [" & i & "] " & CStr(resumeSpec(i)) & vbCrLf
-        Next i
-    Else
-        msg = msg & "   (无)" & vbCrLf
-    End If
-
+    ' Resume 参数规格
+    msg = msg & vbCrLf & "Resume 参数规格:" & vbCrLf
+    msg = msg & FormatResumeSpecs(task)
+    
     ' 当前值
     msg = msg & vbCrLf & "当前值:" & vbCrLf
     Dim value As Variant
     value = task.taskValue
-    ' 获取task.value数组维度
-    Dim dims As String
-    Dim f As Byte
-    For f = 1 To 10  ' 最多检查10维
-        Dim ub As Long
-        ub = UBound(value, f)
-        If Err.Number <> 0 Then
-            Exit For
-        End If
-
-        Dim lb As Long
-        lb = LBound(value, f)
-
-        If dims <> vbNullString Then dims = dims & " x "
-        dims = dims & (ub - lb + 1)
-    Next f
-    If dims = vbNullString Then dims = "未知"
-
+    
     If IsArray(value) Then
+        ' 获取数组维度信息
+        Dim dims As String
+        dims = GetArrayDimensions(value)
         msg = msg & "   (数组，维度: " & dims & ")" & vbCrLf
-    ElseIf IsEmpty(value) Then
+    ElseIf IsEmpty(value) Or IsNull(value) Then
         msg = msg & "   (空)" & vbCrLf
     Else
         Dim valueStr As String
@@ -481,6 +544,31 @@ Private Sub LuaTaskMenu_ShowDetail()
 ErrorHandler:
     MsgBox "显示任务详情时出错: " & Err.Description, vbCritical, "错误"
 End Sub
+
+' 获取数组维度信息（辅助函数）
+Private Function GetArrayDimensions(arr As Variant) As String
+    On Error Resume Next
+
+    Dim dims As String
+    dims = ""
+
+    Dim d As Integer
+    For d = 1 To 10
+        Dim lb As Long, ub As Long
+        lb = LBound(arr, d)
+        If Err.Number <> 0 Then
+            Err.Clear
+            Exit For
+        End If
+        ub = UBound(arr, d)
+
+        If dims <> "" Then dims = dims & " x "
+        dims = dims & (ub - lb + 1)
+    Next d
+
+    If dims = "" Then dims = "未知"
+    GetArrayDimensions = dims
+End Function
 
 ' 设置任务权重
 Private Sub LuaConfigMenu_SetTaskWeight()

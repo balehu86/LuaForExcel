@@ -59,6 +59,11 @@ Private Const LUA_TFUNCTION = 6
 Private Const LUA_OK = 0
 Private Const LUA_YIELD = 1
 Private Const LUA_ERRRUN = 2
+' ===== 参数规格类型常量（供 TaskUnit 使用）=====
+Public Const PARAM_LITERAL As Long = 0          ' 字面量（数值、布尔、普通字符串）
+Public Const PARAM_CELL_REF As Long = 1         ' 单元格引用（Range 对象传入）
+Public Const PARAM_RANGE_REF As Long = 2        ' 区域引用（Range 对象传入，多单元格）
+Public Const PARAM_DYNAMIC_STRING As Long = 3   ' 动态字符串（"$B1" 格式）
 ' ===== 全局变量 =====
 Private g_LuaState As LongPtr
 Private g_Initialized As Boolean
@@ -436,14 +441,16 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         Exit Function
     End If
 
-    ' 获取调用单元格地址和工作簿名
+    ' 获取调用单元格地址和工作簿/工作表
     Dim taskCell As String
     Dim wbName As String
     Dim callerWb As Workbook
+    Dim callerWs As Worksheet
 
     On Error Resume Next
     taskCell = Application.Caller.Address(External:=True)
     Set callerWb = Application.Caller.Worksheet.Parent
+    Set callerWs = Application.Caller.Worksheet
 
     ' 检查调用者工作簿是否存在
     If callerWb Is Nothing Then
@@ -454,7 +461,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     ' 防止在xlam文件中创建任务
     If callerWb.FileFormat = xlAddIn Then
         LuaTask = "#ERROR: 不能在宏文件中创建任务"
-        MsgBox "禁止在宏文件里创建任务", vbCritical, "LuaTask:Warning"
         Exit Function
     End If
 
@@ -474,10 +480,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     Dim funcName As String
     funcName = CStr(params(0))
 
-    Dim startArgs As Variant, resumeSpec As Variant
-    startArgs = Array()
-    resumeSpec = Array()
-
     Dim phase As Long
     phase = 0
 
@@ -487,30 +489,60 @@ Public Function LuaTask(ParamArray params() As Variant) As String
 
     Dim i As Long
     For i = 1 To UBound(params)
+        ' 检查是否是分隔符
         If VarType(params(i)) = vbString Then
-            If params(i) = "|" Then
+            If CStr(params(i)) = "|" Then
                 phase = 1
-            Else
-                Select Case phase
-                    Case 0: startList.Add params(i)
-                    Case 1: resumeList.Add params(i)
-                End Select
+                GoTo NextParam
             End If
-        Else
-            Select Case phase
-                Case 0: startList.Add params(i)
-                Case 1: resumeList.Add params(i)
-            End Select
         End If
+        
+        ' 根据阶段添加到对应列表
+        ' 注意：Range 对象需要用 Object 方式添加以保留引用
+        Select Case phase
+            Case 0
+                If TypeName(params(i)) = "Range" Then
+                    ' 对于启动参数，Range 直接取值
+                    startList.Add params(i).Value
+                Else
+                    startList.Add params(i)
+                End If
+            Case 1
+                ' 对于 Resume 参数，保留 Range 对象引用
+                If TypeName(params(i)) = "Range" Then
+                    ' 创建一个包含 Range 信息的 Dictionary
+                    Dim rangeInfo As Object
+                    Set rangeInfo = CreateObject("Scripting.Dictionary")
+                    rangeInfo("isRange") = True
+                    rangeInfo("address") = params(i).Address(False, False)
+                    rangeInfo("workbook") = params(i).Worksheet.Parent.Name
+                    rangeInfo("worksheet") = params(i).Worksheet.Name
+                    rangeInfo("cellCount") = params(i).Cells.Count
+                    resumeList.Add rangeInfo
+                Else
+                    resumeList.Add params(i)
+                End If
+        End Select
+NextParam:
     Next i
 
-    If startList.Count > 0 Then startArgs = startList.ToArray()
-    If resumeList.Count > 0 Then resumeSpec = resumeList.ToArray()
+    Dim startArgs As Variant, resumeSpec As Variant
+    If startList.Count > 0 Then
+        startArgs = startList.ToArray()
+    Else
+        startArgs = Array()
+    End If
+    
+    If resumeList.Count > 0 Then
+        resumeSpec = resumeList.ToArray()
+    Else
+        resumeSpec = Array()
+    End If
 
-    Dim taskId As String
-    taskId = "Task_" & CStr(g_NextTaskId)
+    Dim taskIdStr As String
+    taskIdStr = "Task_" & CStr(g_NextTaskId)
 
-    ' 注册任务
+    ' 创建任务
     Dim task As New TaskUnit
     With task
         .taskId = g_NextTaskId
@@ -531,20 +563,19 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .CFS_weight = 1024
         .CFS_vruntime = g_CFS_minVruntime
     End With
-    g_Tasks.Add taskId, task
+    
+    ' 解析 Resume 参数规格
+    task.ParseResumeSpecs resumeSpec, callerWb, callerWs
+    
+    g_Tasks.Add taskIdStr, task
 
-    LuaTask = taskId
+    LuaTask = taskIdStr
     g_NextTaskId = g_NextTaskId + 1
     Exit Function
+    
 ErrorHandler:
-    Dim errorDetails As String
-    errorDetails = "Task错误:" & vbCrLf
-    errorDetails = errorDetails & "错误号: " & Err.Number & vbCrLf
-    errorDetails = errorDetails & "描述: " & Err.Description & vbCrLf
-    Debug.Print "=== Task错误详情 ==="
-    Debug.Print errorDetails
-    Debug.Print "======================="
-    LuaTask = "#ERROR: Task" & Err.Description
+    Debug.Print "LuaTask Error: " & Err.Number & " - " & Err.Description
+    LuaTask = "#ERROR: " & Err.Description
 End Function
 
 ' 读取任务状态（静态读取，不自动刷新）
@@ -1163,7 +1194,7 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     wbName = task.taskWorkbook
     Dim wb As Workbook
 
-    If Not IsEmpty(wbName) And wbName <> vbNullString And wbName <> "" Then
+    If Len(wbName) > 0 Then
         Dim wbExists As Boolean
         wbExists = False
 
@@ -1177,58 +1208,33 @@ Private Sub ResumeCoroutine(task As TaskUnit)
             task.taskError = "工作簿已关闭: " & wbName
             Exit Sub
         End If
-    Else
-        wbName = vbNullString
-        Set wb = Nothing
     End If
 
     ' 清空协程栈
     lua_settop coThread, 0
 
-    ' 准备 resume 参数
-    Dim resumeSpec As Variant
-    resumeSpec = task.taskResumeSpec
-
+    ' 使用新的参数解析机制获取动态参数
+    Dim resumeArgs As Variant
+    resumeArgs = task.GetResumeArgs()
+    
     Dim nargs As Long
     nargs = 0
 
-    If IsArray(resumeSpec) Then
-        Dim i As Long
-        For i = LBound(resumeSpec) To UBound(resumeSpec)
-            Dim param As Variant
-            param = resumeSpec(i)
-
-            If VarType(param) = vbString Then
-                Dim paramStr As String
-                paramStr = Trim(CStr(param))
-
-                If Len(paramStr) > 0 And Not wb Is Nothing Then
-                    On Error Resume Next
-                    Dim rng As Range
-                    Dim ws As Worksheet
-                    Set ws = GetWorksheetFromAddress(task.taskCell, wb)
-                    Set rng = ws.Range(paramStr)
-
-                    If Err.Number = 0 And Not rng Is Nothing Then
-                        If rng.Cells.Count = 1 Then
-                            PushValue coThread, rng.Value
-                        Else
-                            PushValue coThread, rng.Value
-                        End If
-                    Else
-                        PushValue coThread, paramStr
-                    End If
-                    Err.Clear
-                    On Error GoTo ErrorHandler
-                Else
-                    PushValue coThread, paramStr
-                End If
-            Else
-                PushValue coThread, param
-            End If
-
-            nargs = nargs + 1
-        Next
+    ' 压入参数
+    If IsArray(resumeArgs) Then
+        Dim lb As Long, ub As Long
+        On Error Resume Next
+        lb = LBound(resumeArgs)
+        ub = UBound(resumeArgs)
+        If Err.Number = 0 Then
+            On Error GoTo ErrorHandler
+            Dim i As Long
+            For i = lb To ub
+                PushValue coThread, resumeArgs(i)
+                nargs = nargs + 1
+            Next i
+        End If
+        On Error GoTo ErrorHandler
     End If
 
     ' 执行 resume
@@ -1236,9 +1242,10 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
 
-    ' 处理结果（内部会调用 SetTaskStatus 处理终态）
+    ' 处理结果
     HandleCoroutineResult task, result, CLng(nres)
-    ' 每次 Resume 后都标记该任务的监控为脏
+    
+    ' 标记监控为脏
     MarkWatchesDirty task
     g_StateDirty = True
 
@@ -1253,17 +1260,16 @@ Private Sub ResumeCoroutine(task As TaskUnit)
 
 ErrorHandler:
     Dim errorDetails As String
-    errorDetails = "Resume错误: " & Err.Description & " (行 " & Erl & ")"
+    errorDetails = "Resume错误: " & Err.Description
 
     SetTaskStatus task, CO_ERROR
     task.taskError = errorDetails
 
-    Debug.Print "=== Resume 错误 ===" & vbCrLf & errorDetails
+    Debug.Print "ResumeCoroutine Error: " & errorDetails
 End Sub
 ' ============================================
 ' 第六部分：辅助函数（内部使用）
 ' ============================================
-' 统一压栈函数 - 简化版
 ' 统一压栈函数 - 迭代版本（避免递归）
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
     ' 先解包 Range（迭代展开，避免递归）
