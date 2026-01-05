@@ -787,28 +787,38 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
 ErrorHandler:
     LuaWatch = "#ERROR: " & Err.Description
 End Function
-' 刷新所有脏的监控（批量写入，不触发重算）
 Private Sub RefreshWatches()
     On Error Resume Next
-
     If g_Watches Is Nothing Then Exit Sub
     If g_Watches.Count = 0 Then Exit Sub
+    ' 缓存已查找的工作簿
+    Dim wbCache As Object
+    Set wbCache = CreateObject("Scripting.Dictionary")
 
     Dim watchCell As Variant
     Dim watchInfo As WatchInfo
     Dim task As TaskUnit
     Dim currentValue As Variant
-
     For Each watchCell In g_Watches.Keys
         Set watchInfo = g_Watches(watchCell)
         ' 只处理脏的监控
         If Not watchInfo.watchDirty Then GoTo NextWatch
-
+        ' 验证任务引用有效性
+        If Not g_Tasks.Exists(watchInfo.watchTaskId) Then
+            watchInfo.watchDirty = False
+            GoTo NextWatch
+        End If
+        ' 验证对象引用一致性
+        If watchInfo.watchTask Is Nothing Then
+            Set watchInfo.watchTask = g_Tasks(watchInfo.watchTaskId)
+        ElseIf Not (watchInfo.watchTask Is g_Tasks(watchInfo.watchTaskId)) Then
+            Set watchInfo.watchTask = g_Tasks(watchInfo.watchTaskId)
+        End If
         Set task = watchInfo.watchTask
         ' 获取当前字段值
         Select Case watchInfo.watchField
             Case "status"
-                currentValue = task.taskStatus
+                currentValue = StatusToString(task.taskStatus)
             Case "progress"
                 currentValue = task.taskProgress
             Case "message"
@@ -820,37 +830,46 @@ Private Sub RefreshWatches()
             Case Else
                 currentValue = "#未知字段"
         End Select
-
-        ' 检查值是否真的变化了（避免不必要的写入）
+        ' 检查值是否真的变化了
         Dim needWrite As Boolean
         needWrite = False
         If IsEmpty(watchInfo.watchLastValue) Then
             needWrite = True
         ElseIf IsArray(currentValue) Or IsArray(watchInfo.watchLastValue) Then
-            needWrite = True  ' 数组总是写入
+            needWrite = True
         ElseIf currentValue <> watchInfo.watchLastValue Then
             needWrite = True
         End If
-
-        ' 写入目标单元格（直接写值，不触发计算）
+        ' 写入目标单元格
         If needWrite Then
-            WriteToTargetCellDirect watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook
+            ' 使用缓存的工作簿引用
+            WriteToTargetCellCached watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook, wbCache
             watchInfo.watchLastValue = currentValue
         End If
+
         ' 清除脏标记
         watchInfo.watchDirty = False
+
 NextWatch:
-    ' 只在有实际写入时，统一刷新一次
-    ' 这里不再调用 Calculate，因为直接写值不需要重算
     Next watchCell
+    ' 清理缓存
+    Set wbCache = Nothing
 End Sub
-' 直接写入目标单元格（不触发 Calculate）
-Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbName As String)
+' 带缓存的写入函数
+Private Sub WriteToTargetCellCached(targetAddr As String, value As Variant, wbName As String, wbCache As Object)
     On Error Resume Next
     Dim targetRange As Range
     Dim wb As Workbook
+    ' 先从缓存查找工作簿
+    If wbCache.Exists(wbName) Then
+        Set wb = wbCache(wbName)
+    Else
+        Set wb = Application.Workbooks(wbName)
+        If Not wb Is Nothing Then
+            wbCache.Add wbName, wb
+        End If
+    End If
 
-    Set wb = Application.Workbooks(wbName)
     If wb Is Nothing Then Exit Sub
     ' 解析地址
     Dim sheetName As String
@@ -882,10 +901,21 @@ Private Sub WriteToTargetCellDirect(targetAddr As String, value As Variant, wbNa
         Set targetRange = wb.ActiveSheet.Range(cellAddr)
     End If
     If targetRange Is Nothing Then Exit Sub
-    ' 直接写值，不触发事件和计算
+    ' 直接写值
     If IsArray(value) Then
-        targetRange.Resize(UBound(value, 1) - LBound(value, 1) + 1, _
-                          UBound(value, 2) - LBound(value, 2) + 1).value = value
+        On Error Resume Next
+        Dim rows As Long, cols As Long
+        rows = UBound(value, 1) - LBound(value, 1) + 1
+        cols = UBound(value, 2) - LBound(value, 2) + 1
+        If Err.Number = 0 Then
+            targetRange.Resize(rows, cols).value = value
+        Else
+            Err.Clear
+            ' 一维数组
+            rows = UBound(value) - LBound(value) + 1
+            targetRange.Resize(1, rows).value = value
+        End If
+        On Error Resume Next
     Else
         targetRange.value = value
     End If
@@ -925,15 +955,22 @@ Public Sub StartLuaCoroutine(taskId As String)
         MsgBox "错误：任务已启动或已完成，当前状态: " & StatusToString(task.taskStatus), vbExclamation
         Exit Sub
     End If
+    
+    ' ★ 修复1：保存主状态机栈顶
+    Dim mainStackTop As Long
+    mainStackTop = lua_gettop(g_LuaState)
+    
     ' 创建协程并锚定到注册表
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
         task.taskError = "无法创建协程线程"
         SetTaskStatus task, CO_ERROR
+        lua_settop g_LuaState, mainStackTop  ' ★ 恢复主栈
         Exit Sub
     End If
 
+    ' ★ 修复2：luaL_ref 会弹出栈顶的 thread，这是正确的
     task.taskCoRef = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
     task.taskCoThread = coThread
 
@@ -942,31 +979,45 @@ Public Sub StartLuaCoroutine(taskId As String)
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
         task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         SetTaskStatus task, CO_ERROR
-        lua_settop g_LuaState, 0
+        lua_settop g_LuaState, mainStackTop  ' ★ 恢复主栈
         Exit Sub
     End If
 
     lua_xmove g_LuaState, coThread, 1
+    
+    ' ★ xmove 后恢复主栈（函数已移走）
+    lua_settop g_LuaState, mainStackTop
+    
+    ' 压入第一个参数：任务单元格地址
     PushUTF8ToState coThread, task.taskCell
 
     Dim nargs As Long
     nargs = 1
 
+    ' 压入启动参数
     Dim startArgs As Variant
     startArgs = task.taskStartArgs
     If IsArray(startArgs) Then
         Dim i As Long
-        For i = LBound(startArgs) To UBound(startArgs)
-            PushValue coThread, startArgs(i)
-            nargs = nargs + 1
-        Next i
+        On Error Resume Next
+        Dim lb As Long, ub As Long
+        lb = LBound(startArgs)
+        ub = UBound(startArgs)
+        If Err.Number = 0 Then
+            On Error GoTo ErrorHandler
+            For i = lb To ub
+                PushValue coThread, startArgs(i)
+                nargs = nargs + 1
+            Next i
+        End If
+        On Error GoTo ErrorHandler
     End If
 
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
 
-    ' 处理结果（HandleCoroutineResult 内部会调用 SetTaskStatus）
+    ' 处理结果
     HandleCoroutineResult task, result, CLng(nres)
 
     ' 如果是 yield 状态，启动调度器
@@ -979,6 +1030,8 @@ Public Sub StartLuaCoroutine(taskId As String)
 ErrorHandler:
     task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
     SetTaskStatus task, CO_ERROR
+    ' 确保错误时也恢复主栈
+    If g_LuaState <> 0 Then lua_settop g_LuaState, mainStackTop
     MsgBox "启动协程失败: " & Err.Description, vbCritical
 End Sub
 
@@ -1151,17 +1204,42 @@ Private Function CFS_PickNextTask() As TaskUnit
 
     If g_TaskQueue.Count = 0 Then Exit Function
 
-    ' 从队首开始找第一个 YIELD 状态的任务
+    ' 收集需要移除的无效任务
+    Dim toRemove As Collection
+    Set toRemove = New Collection
+
     Dim i As Long
     Dim task As TaskUnit
+    Dim foundTask As TaskUnit
+    Set foundTask = Nothing
 
     For i = 1 To g_TaskQueue.Count
         Set task = g_TaskQueue(i)
+
+        ' 检查任务状态
         If task.taskStatus = CO_YIELD Then
-            Set CFS_PickNextTask = task
-            Exit Function
+            ' 找到第一个有效任务
+            If foundTask Is Nothing Then
+                Set foundTask = task
+            End If
+        Else
+            ' 非 YIELD 状态的任务应该被移除
+            toRemove.Add i
         End If
     Next
+
+    ' 从后向前移除无效任务（避免索引错乱）
+    Dim removeIdx As Variant
+    For i = toRemove.Count To 1 Step -1
+        g_TaskQueue.Remove CLng(toRemove(i))
+    Next
+
+    ' 如果移除了任务，更新活跃计数
+    If toRemove.Count > 0 Then
+        LogDebug "CFS_PickNextTask: 清理了 " & toRemove.Count & " 个无效任务"
+    End If
+
+    Set CFS_PickNextTask = foundTask
 End Function
 ' 更新任务的 vruntime 并重新排序
 Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
@@ -1292,24 +1370,37 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
                 retData = GetValue(coThread, -1)
                 ParseYieldReturn task, retData, True
             End If
-            SetTaskStatus task, CO_DONE  ' 自动处理队列移除等
+            ' 只有 ParseYieldReturn 没有设置状态时才设置 DONE
+            If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
+                SetTaskStatus task, CO_DONE
+            End If
+
         Case LUA_YIELD
+            ' 先解析返回值，让 ParseYieldReturn 决定状态
+            Dim statusSetByLua As Boolean
+            statusSetByLua = False
+
             If nres > 0 And stackTopBefore > 0 Then
                 Dim yieldData As Variant
                 yieldData = GetValue(coThread, -1)
-                ParseYieldReturn task, yieldData, False
+                ' 传入标记，让 ParseYieldReturn 记录是否设置了状态
+                statusSetByLua = ParseYieldReturn(task, yieldData, False)
             End If
-            ' 只有在 ParseYieldReturn 没有设置其他状态时才设置 YIELD
-            If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
-                SetTaskStatus task, CO_YIELD
+
+            ' 只有 Lua 没有显式设置状态时，才默认设置为 YIELD
+            If Not statusSetByLua Then
+                If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
+                    SetTaskStatus task, CO_YIELD
+                End If
             End If
+
         Case Else
             If nres > 0 And stackTopBefore > 0 Then
                 task.taskError = GetStringFromState(coThread, -1)
             Else
                 task.taskError = "协程错误: 代码 " & result
             End If
-            SetTaskStatus task, CO_ERROR  ' 自动处理队列移除等
+            SetTaskStatus task, CO_ERROR
     End Select
     lua_settop coThread, 0
     Exit Sub
@@ -1319,14 +1410,17 @@ ErrorHandler:
     If coThread <> 0 Then lua_settop coThread, 0
 End Sub
 
+
 ' 解析 yield/return 字典
-Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boolean)
+Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boolean) As Boolean
     On Error Resume Next
+
+    ParseYieldReturn = False  ' 默认没有设置状态
 
     ' 如果不是数组，直接作为 value 处理
     If Not IsArray(data) Then
         task.taskValue = data
-        Exit Sub
+        Exit Function
     End If
 
     ' 检查是否为字典格式（二维数组，第二维为2列）
@@ -1348,24 +1442,25 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
             Dim key As String
             Dim value As Variant
 
-            ' 键已经是正确的 Unicode 字符串（来自 GetStringFromState）
             key = LCase(Trim(CStr(data(i, 1))))
             value = data(i, 2)
 
             Select Case key
                 Case "status"
-                    ' 只有在非final或者值不是CO_DONE时才更新status
+                    ' 记录 Lua 显式设置了状态
                     Dim statusVal As String
                     statusVal = LCase(Trim(CStr(value)))
                     If Not isFinal Then
-                        ' yield时,根据返回的status字段决定协程状态
                         Select Case statusVal
                             Case "yield"
                                 SetTaskStatus task, CO_YIELD
+                                ParseYieldReturn = True  ' 标记已设置
                             Case "done"
                                 SetTaskStatus task, CO_DONE
+                                ParseYieldReturn = True
                             Case "error"
                                 SetTaskStatus task, CO_ERROR
+                                ParseYieldReturn = True
                             Case Else
                                 SetTaskStatus task, CO_YIELD ' 默认为yielded
                         End Select
@@ -1375,19 +1470,18 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
                     task.taskProgress = CDbl(value)
                     On Error GoTo 0
                 Case "message"
-                    ' value 已经是正确的 Unicode 字符串
                     task.taskMessage = CStr(value)
                 Case "value"
                     task.taskValue = value
                 Case "write"
-                    ' 动态写入处理
+                    ' 动态写入处理（保留）
             End Select
         Next
     Else
         ' 不是字典格式，整个数组作为 value
         task.taskValue = data
     End If
-End Sub
+End Function
 
 ' 统一压栈函数 - 迭代版本（避免递归）
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
@@ -1478,22 +1572,24 @@ End Function
 Private Function StringToUTF8(ByVal str As String) As Byte()
     Dim utf8Bytes() As Byte
     Dim utf8Len As Long
+    ' 空字符串返回空数组（长度为0）
     If Len(str) = 0 Then
-        ReDim utf8Bytes(0 To 0)
-        utf8Bytes(0) = 0
+        ReDim utf8Bytes(0 To -1)  ' 空数组
         StringToUTF8 = utf8Bytes
         Exit Function
     End If
     ' 获取所需缓冲区大小
     utf8Len = WideCharToMultiByte(CP_UTF8, 0, StrPtr(str), Len(str), 0, 0, 0, 0)
     If utf8Len = 0 Then
-        ReDim utf8Bytes(0 To 0)
+        ReDim utf8Bytes(0 To -1)  ' 转换失败返回空数组
         StringToUTF8 = utf8Bytes
         Exit Function
     End If
-    ' 分配缓冲区（lua_pushlstring 使用显式长度，不需要 null 终止符）
+
+    ' 分配缓冲区
     ReDim utf8Bytes(0 To utf8Len - 1)
-    ' 第二次调用：执行转换
+
+    ' 执行转换
     WideCharToMultiByte CP_UTF8, 0, StrPtr(str), Len(str), VarPtr(utf8Bytes(0)), utf8Len, 0, 0
     StringToUTF8 = utf8Bytes
 End Function
@@ -1525,19 +1621,29 @@ Private Function UTF8ToString(ByVal ptr As LongPtr, ByVal byteLen As Long) As St
 End Function
 ' 安全的字符串压栈（自动处理 UTF-8 转换）
 Private Sub PushUTF8ToState(ByVal L As LongPtr, ByVal str As String)
+    ' 空字符串统一处理
     If Len(str) = 0 Then
-        ' 空字符串：压入空的 Lua 字符串
+        lua_pushlstring L, 0, 0  ' 压入空的 Lua 字符串
+        Exit Sub
+    End If
+    Dim utf8Bytes() As Byte
+    utf8Bytes = StringToUTF8(str)
+    ' 检查转换结果
+    Dim actualLen As LongPtr
+    On Error Resume Next
+    actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
+    If Err.Number <> 0 Then
+        ' 空数组情况
+        Err.Clear
         lua_pushlstring L, 0, 0
         Exit Sub
     End If
+    On Error GoTo 0
 
-    Dim utf8Bytes() As Byte
-    utf8Bytes = StringToUTF8(str)
-
-    ' 正确计算实际的 UTF-8 字节长度
-    Dim actualLen As LongPtr
-    actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
-
+    If actualLen <= 0 Then
+        lua_pushlstring L, 0, 0
+        Exit Sub
+    End If
     lua_pushlstring L, VarPtr(utf8Bytes(0)), actualLen
 End Sub
 ' 从 Lua 栈获取字符串
@@ -1905,7 +2011,7 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional opti
                 Set g_Tasks(taskIdStr) = Nothing
                 g_Tasks.Remove taskIdStr
             End If
-            
+
         Case CO_PAUSED
             ' 暂停：从队列移除但保留协程
             TaskQueueRemove task
@@ -1958,14 +2064,27 @@ End Sub
 
 ' 统一释放任务的协程资源
 Public Sub ReleaseTaskCoroutine(task As TaskUnit)
-    On Error Resume Next
-
+    ' 修复3：添加完整的安全检查
     If task Is Nothing Then Exit Sub
     If task.taskCoRef = 0 Then Exit Sub
 
+    ' 检查 Lua 状态机是否有效
+    If g_LuaState = 0 Then
+        ' Lua 已关闭，只清除引用不调用 API
+        task.ClearCoroutineRef
+        Exit Sub
+    End If
+
+    ' 检查是否已初始化
+    If Not g_Initialized Then
+        task.ClearCoroutineRef
+        Exit Sub
+    End If
+
     ' 执行释放
-    ' Debug.Print "ReleaseTaskCoroutine: Task_" & task.taskId & " 释放协程 Ref=" & task.taskCoRef
+    On Error Resume Next
     luaL_unref g_LuaState, LUA_REGISTRYINDEX, task.taskCoRef
+    On Error GoTo 0
 
     ' 清除任务中的引用
     task.ClearCoroutineRef
