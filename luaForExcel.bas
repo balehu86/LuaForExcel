@@ -947,7 +947,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     End If
 
     lua_xmove g_LuaState, coThread, 1
-    LuaPushStringUTF8 coThread, task.taskCell
+    PushUTF8ToState coThread, task.taskCell
 
     Dim nargs As Long
     nargs = 1
@@ -1276,74 +1276,8 @@ ErrorHandler:
     Debug.Print "ResumeCoroutine Error: " & errorDetails
 End Sub
 ' ============================================
-' 第六部分：辅助函数（内部使用）
+' 第六部分：推栈压栈函数
 ' ============================================
-' 统一压栈函数 - 迭代版本（避免递归）
-Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
-    ' 处理 Range 对象：获取其值
-    Do While TypeName(value) = "Range"
-        value = value.value
-    Loop
-
-    Select Case VarType(value)
-        Case vbEmpty, vbNull
-            lua_pushnil L
-        Case vbBoolean
-            lua_pushboolean L, IIf(value, 1, 0)
-        Case vbByte, vbInteger, vbLong, vbSingle, vbDouble, vbCurrency, vbDecimal, vbLongLong
-            lua_pushnumber L, CDbl(value)
-        Case vbString
-            LuaPushStringUTF8 L, CStr(value)
-        Case vbArray To vbArray + vbVariant
-            PushArray L, value
-        Case Else
-            If IsArray(value) Then
-                PushArray L, value
-            ElseIf IsNumeric(value) Then
-                lua_pushnumber L, CDbl(value)
-            Else
-                LuaPushStringUTF8 L, CStr(value)
-            End If
-    End Select
-End Sub
-
-' 统一数组压栈函数 - 支持主状态机和协程线程
-Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
-    Dim i As Long, j As Long
-    Dim rows As Long, cols As Long
-
-    ' 处理一维数组
-    On Error Resume Next
-    rows = UBound(arr, 1) - LBound(arr, 1) + 1
-    cols = UBound(arr, 2) - LBound(arr, 2) + 1
-
-    If Err.Number <> 0 Then
-        ' 一维数组
-        Err.Clear
-        On Error GoTo 0
-        rows = UBound(arr) - LBound(arr) + 1
-
-        lua_createtable L, rows, 0
-        For i = LBound(arr) To UBound(arr)
-            PushValue L, arr(i)  ' 递归调用 PushValue
-            lua_rawseti L, -2, i - LBound(arr) + 1
-        Next i
-        Exit Sub
-    End If
-    On Error GoTo 0
-
-    ' 二维数组
-    lua_createtable L, rows, 0
-    For i = LBound(arr, 1) To UBound(arr, 1)
-        lua_createtable L, cols, 0
-        For j = LBound(arr, 2) To UBound(arr, 2)
-            PushValue L, arr(i, j)  ' 递归调用 PushValue
-            lua_rawseti L, -2, j - LBound(arr, 2) + 1
-        Next j
-        lua_rawseti L, -2, i - LBound(arr, 1) + 1
-    Next i
-End Sub
-
 ' 处理协程返回结果
 Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long)
     On Error GoTo ErrorHandler
@@ -1384,327 +1318,6 @@ ErrorHandler:
     SetTaskStatus task, CO_ERROR
     If coThread <> 0 Then lua_settop coThread, 0
 End Sub
-' VBA 字符串 (Unicode) -> UTF-8 字节数组
-Private Function StringToUTF8(ByVal str As String) As Byte()
-    Dim utf8Bytes() As Byte
-    Dim utf8Len As Long
-    If Len(str) = 0 Then
-        ReDim utf8Bytes(0 To 0)
-        utf8Bytes(0) = 0
-        StringToUTF8 = utf8Bytes
-        Exit Function
-    End If
-    ' 获取所需缓冲区大小
-    utf8Len = WideCharToMultiByte(CP_UTF8, 0, StrPtr(str), Len(str), 0, 0, 0, 0)
-    If utf8Len = 0 Then
-        ReDim utf8Bytes(0 To 0)
-        StringToUTF8 = utf8Bytes
-        Exit Function
-    End If
-    ' 分配缓冲区（lua_pushlstring 使用显式长度，不需要 null 终止符）
-    ReDim utf8Bytes(0 To utf8Len - 1)
-    ' 第二次调用：执行转换
-    WideCharToMultiByte CP_UTF8, 0, StrPtr(str), Len(str), VarPtr(utf8Bytes(0)), utf8Len, 0, 0
-    StringToUTF8 = utf8Bytes
-End Function
-' UTF-8 字节指针 -> VBA 字符串 (已有，优化版本)
-Private Function UTF8ToString(ByRef utf8Data As Variant, Optional ByVal byteLen As Long = -1) As String
-    Dim utf8Bytes() As Byte
-    Dim actualLen As Long
-    Dim nChars As Long
-
-    ' 根据输入类型处理
-    If VarType(utf8Data) = vbLongPtr Or VarType(utf8Data) = vbLong Then
-        ' 指针模式：需要 byteLen 参数
-        Dim ptr As LongPtr
-        ptr = CLngPtr(utf8Data)
-
-        If ptr = 0 Or byteLen <= 0 Then
-            UTF8ToString = vbNullString
-            Exit Function
-        End If
-
-        ReDim utf8Bytes(0 To byteLen - 1)
-        CopyMemory utf8Bytes(0), ByVal ptr, byteLen
-        actualLen = byteLen
-    Else
-        ' 字节数组模式
-        utf8Bytes = utf8Data
-        actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
-    End If
-
-    If actualLen = 0 Then
-        UTF8ToString = vbNullString
-        Exit Function
-    End If
-
-    ' 计算 Unicode 字符数
-    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, 0, 0)
-    If nChars = 0 Then
-        ' 转换失败，尝试 ASCII 回退
-        UTF8ToString = StrConv(utf8Bytes, vbUnicode)
-        Exit Function
-    End If
-
-    ' 执行转换
-    UTF8ToString = String$(nChars, vbNullChar)
-    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, StrPtr(UTF8ToString), nChars
-End Function
-' 安全的字符串压栈（自动处理 UTF-8 转换）
-Private Sub LuaPushStringUTF8(ByVal L As LongPtr, ByVal str As String)
-    If Len(str) = 0 Then
-        ' 空字符串：压入空的 Lua 字符串
-        lua_pushlstring L, 0, 0
-        Exit Sub
-    End If
-
-    Dim utf8Bytes() As Byte
-    utf8Bytes = StringToUTF8(str)
-
-    ' 正确计算实际的 UTF-8 字节长度
-    Dim actualLen As LongPtr
-    actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
-
-    lua_pushlstring L, VarPtr(utf8Bytes(0)), actualLen
-End Sub
-' 从 Lua 栈获取字符串
-Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
-    Dim ptr As LongPtr
-    Dim strLen As LongPtr  ' 使用 LongPtr 接收长度
-
-    strLen = 0
-    ptr = lua_tolstring(L, idx, VarPtr(strLen))
-
-    If ptr = 0 Or strLen = 0 Then
-        GetStringFromState = vbNullString
-        Exit Function
-    End If
-
-    ' 直接调用统一转换函数
-    GetStringFromState = UTF8ToString(ptr, CLng(strLen))
-End Function
-
-' 从 Lua 栈获取值
-Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
-    Select Case lua_type(L, idx)
-        Case LUA_TNIL
-            GetValue = Empty
-        Case LUA_TBOOLEAN
-            GetValue = (lua_toboolean(L, idx) <> 0)
-        Case LUA_TNUMBER
-            GetValue = lua_tonumberx(L, idx, 0)
-        Case LUA_TSTRING
-            ' 使用 UTF-8 安全的字符串获取
-            GetValue = GetStringFromState(L, idx)
-        Case LUA_TTABLE
-            GetValue = TableToVariant(L, idx)
-        Case Else
-            GetValue = "#LUA_TYPE_" & lua_type(L, idx)
-    End Select
-End Function
-
-' 将 Lua table 转换为 VBA Variant (字典或数组)
-Private Function TableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Variant
-    On Error GoTo ErrorHandler
-
-    ' 标准化索引为正数
-    If idx < 0 Then
-        idx = lua_gettop(L) + idx + 1
-    End If
-
-    ' 检查数组长度
-    Dim length As LongPtr
-    length = lua_rawlen(L, idx)
-
-    ' 如果长度为0，尝试判断是否为字典
-    If length = 0 Then
-        ' 尝试获取第一个键值对
-        Dim topBefore As Long
-        topBefore = lua_gettop(L)
-
-        lua_pushnil L
-        If lua_next(L, idx) <> 0 Then
-            ' 有内容，是字典
-            lua_settop L, topBefore  ' 恢复栈
-            TableToVariant = TableToDictArray(L, idx)
-        Else
-            ' 空表
-            TableToVariant = Empty
-        End If
-        Exit Function
-    End If
-
-    ' 检查是否为纯数组（所有键都是1到length的连续整数）
-    Dim isPureArray As Boolean
-    isPureArray = True
-
-    Dim testTop As Long
-    testTop = lua_gettop(L)
-
-    lua_pushnil L
-    Do While lua_next(L, idx) <> 0
-        Dim keyType As Long
-        keyType = lua_type(L, -2)
-
-        If keyType <> LUA_TNUMBER Then
-            isPureArray = False
-            lua_settop L, testTop  ' 立即恢复栈
-            Exit Do
-        End If
-
-        Dim keyNum As Double
-        keyNum = lua_tonumberx(L, -2, 0)
-
-        ' 检查是否为整数且在范围内
-        If keyNum <> CLng(keyNum) Or keyNum < 1 Or keyNum > length Then
-            isPureArray = False
-            lua_settop L, testTop
-            Exit Do
-        End If
-
-        lua_settop L, -2  ' 只弹出value，保留key
-    Loop
-
-    lua_settop L, testTop  ' 确保栈恢复
-
-    ' 如果不是纯数组，按字典处理
-    If Not isPureArray Then
-        TableToVariant = TableToDictArray(L, idx)
-        Exit Function
-    End If
-
-    ' 纯数组处理
-    ' 检查第一个元素
-    lua_rawgeti L, idx, 1
-    Dim firstIsTable As Boolean
-    firstIsTable = (lua_type(L, -1) = LUA_TTABLE)
-    lua_settop L, -2
-
-    If firstIsTable Then
-        ' 二维数组
-        lua_rawgeti L, idx, 1
-        Dim cols As LongPtr
-        cols = lua_rawlen(L, -1)
-        lua_settop L, -2
-
-        If cols = 0 Then cols = 1  ' 防止空子表
-
-        Dim arr2D() As Variant
-        ReDim arr2D(1 To CLng(length), 1 To CLng(cols))
-
-        Dim i As Long, j As Long
-        For i = 1 To CLng(length)
-            lua_rawgeti L, idx, CLng(i)
-
-            If lua_type(L, -1) = LUA_TTABLE Then
-                Dim subLen As LongPtr
-                subLen = lua_rawlen(L, -1)
-
-                For j = 1 To CLng(cols)
-                    If j <= subLen Then
-                        lua_rawgeti L, -1, CLng(j)
-                        arr2D(i, j) = GetValue(L, -1)
-                        lua_settop L, -2
-                    Else
-                        arr2D(i, j) = Empty
-                    End If
-                Next j
-            Else
-                arr2D(i, 1) = GetValue(L, -1)
-            End If
-
-            lua_settop L, -2
-        Next i
-
-        TableToVariant = arr2D
-    Else
-        ' 一维数组（转为单行二维）
-        Dim arr1D() As Variant
-        ReDim arr1D(1 To 1, 1 To CLng(length))
-
-        For i = 1 To CLng(length)
-            lua_rawgeti L, idx, CLng(i)
-            arr1D(1, i) = GetValue(L, -1)
-            lua_settop L, -2
-        Next i
-
-        TableToVariant = arr1D
-    End If
-
-    Exit Function
-
-ErrorHandler:
-    TableToVariant = "#TABLE_ERROR: " & Err.Description
-End Function
-
-' 辅助函数：将表转换为字典数组
-Private Function TableToDictArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
-    On Error GoTo ErrorHandler
-
-    ' 标准化索引
-    If idx < 0 Then
-        idx = lua_gettop(L) + idx + 1
-    End If
-
-    ' 第一遍：计数
-    Dim count As Long
-    count = 0
-
-    Dim topBefore As Long
-    topBefore = lua_gettop(L)
-
-    lua_pushnil L
-    Do While lua_next(L, idx) <> 0
-        count = count + 1
-        lua_settop L, -2  ' 弹出value，保留key
-    Loop
-
-    lua_settop L, topBefore
-
-    If count = 0 Then
-        TableToDictArray = Empty
-        Exit Function
-    End If
-
-    ' 第二遍：提取数据
-    Dim result() As Variant
-    ReDim result(1 To count, 1 To 2)
-
-    Dim i As Long
-    i = 1
-
-    lua_pushnil L
-    Do While lua_next(L, idx) <> 0
-        ' 获取键（在栈顶-1）
-        Dim keyType As Long
-        keyType = lua_type(L, -2)
-
-        Select Case keyType
-            Case LUA_TSTRING
-                result(i, 1) = GetStringFromState(L, -2)
-            Case LUA_TNUMBER
-                result(i, 1) = lua_tonumberx(L, -2, 0)
-            Case LUA_TBOOLEAN
-                result(i, 1) = (lua_toboolean(L, -2) <> 0)
-            Case Else
-                result(i, 1) = "#KEY_TYPE_" & keyType
-        End Select
-
-        ' 获取值（在栈顶）
-        result(i, 2) = GetValue(L, -1)
-
-        i = i + 1
-        lua_settop L, -2  ' 弹出value，保留key用于下次迭代
-    Loop
-
-    lua_settop L, topBefore
-
-    TableToDictArray = result
-    Exit Function
-
-ErrorHandler:
-    TableToDictArray = "#DICT_ERROR: " & Err.Description
-End Function
 
 ' 解析 yield/return 字典
 Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boolean)
@@ -1776,6 +1389,396 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
     End If
 End Sub
 
+' 统一压栈函数 - 迭代版本（避免递归）
+Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
+    ' 处理 Range 对象：获取其值
+    Do While TypeName(value) = "Range"
+        value = value.value
+    Loop
+
+    Select Case VarType(value)
+        Case vbEmpty, vbNull
+            lua_pushnil L
+        Case vbBoolean
+            lua_pushboolean L, IIf(value, 1, 0)
+        Case vbByte, vbInteger, vbLong, vbSingle, vbDouble, vbCurrency, vbDecimal, vbLongLong
+            lua_pushnumber L, CDbl(value)
+        Case vbString
+            PushUTF8ToState L, CStr(value)
+        Case vbArray To vbArray + vbVariant
+            PushArray L, value
+        Case Else
+            If IsArray(value) Then
+                PushArray L, value
+            ElseIf IsNumeric(value) Then
+                lua_pushnumber L, CDbl(value)
+            Else
+                PushUTF8ToState L, CStr(value)
+            End If
+    End Select
+End Sub
+
+' 统一数组压栈函数 - 支持主状态机和协程线程
+Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
+    Dim i As Long, j As Long
+    Dim rows As Long, cols As Long
+
+    ' 处理一维数组
+    On Error Resume Next
+    rows = UBound(arr, 1) - LBound(arr, 1) + 1
+    cols = UBound(arr, 2) - LBound(arr, 2) + 1
+
+    If Err.Number <> 0 Then
+        ' 一维数组
+        Err.Clear
+        On Error GoTo 0
+        rows = UBound(arr) - LBound(arr) + 1
+
+        lua_createtable L, rows, 0
+        For i = LBound(arr) To UBound(arr)
+            PushValue L, arr(i)  ' 递归调用 PushValue
+            lua_rawseti L, -2, i - LBound(arr) + 1
+        Next i
+        Exit Sub
+    End If
+    On Error GoTo 0
+
+    ' 二维数组
+    lua_createtable L, rows, 0
+    For i = LBound(arr, 1) To UBound(arr, 1)
+        lua_createtable L, cols, 0
+        For j = LBound(arr, 2) To UBound(arr, 2)
+            PushValue L, arr(i, j)  ' 递归调用 PushValue
+            lua_rawseti L, -2, j - LBound(arr, 2) + 1
+        Next j
+        lua_rawseti L, -2, i - LBound(arr, 1) + 1
+    Next i
+End Sub
+
+' 从 Lua 栈获取值
+Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
+    Select Case lua_type(L, idx)
+        Case LUA_TNIL
+            GetValue = Empty
+        Case LUA_TBOOLEAN
+            GetValue = (lua_toboolean(L, idx) <> 0)
+        Case LUA_TNUMBER
+            GetValue = lua_tonumberx(L, idx, 0)
+        Case LUA_TSTRING
+            ' 使用 UTF-8 安全的字符串获取
+            GetValue = GetStringFromState(L, idx)
+        Case LUA_TTABLE
+            GetValue = LuaTableToVariant(L, idx)
+        Case Else
+            GetValue = "#LUA_TYPE_" & lua_type(L, idx)
+    End Select
+End Function
+
+' VBA 字符串 (Unicode) -> UTF-8 字节数组
+Private Function StringToUTF8(ByVal str As String) As Byte()
+    Dim utf8Bytes() As Byte
+    Dim utf8Len As Long
+    If Len(str) = 0 Then
+        ReDim utf8Bytes(0 To 0)
+        utf8Bytes(0) = 0
+        StringToUTF8 = utf8Bytes
+        Exit Function
+    End If
+    ' 获取所需缓冲区大小
+    utf8Len = WideCharToMultiByte(CP_UTF8, 0, StrPtr(str), Len(str), 0, 0, 0, 0)
+    If utf8Len = 0 Then
+        ReDim utf8Bytes(0 To 0)
+        StringToUTF8 = utf8Bytes
+        Exit Function
+    End If
+    ' 分配缓冲区（lua_pushlstring 使用显式长度，不需要 null 终止符）
+    ReDim utf8Bytes(0 To utf8Len - 1)
+    ' 第二次调用：执行转换
+    WideCharToMultiByte CP_UTF8, 0, StrPtr(str), Len(str), VarPtr(utf8Bytes(0)), utf8Len, 0, 0
+    StringToUTF8 = utf8Bytes
+End Function
+' UTF-8 字节指针 -> VBA 字符串 (已有，优化版本)
+Private Function UTF8ToString(ByRef utf8Data As Variant, Optional ByVal byteLen As Long = -1) As String
+    Dim utf8Bytes() As Byte
+    Dim actualLen As Long
+    Dim nChars As Long
+
+    ' 根据输入类型处理
+    If VarType(utf8Data) = vbLongPtr Or VarType(utf8Data) = vbLong Then
+        ' 指针模式：需要 byteLen 参数
+        Dim ptr As LongPtr
+        ptr = CLngPtr(utf8Data)
+
+        If ptr = 0 Or byteLen <= 0 Then
+            UTF8ToString = vbNullString
+            Exit Function
+        End If
+
+        ReDim utf8Bytes(0 To byteLen - 1)
+        CopyMemory utf8Bytes(0), ByVal ptr, byteLen
+        actualLen = byteLen
+    Else
+        ' 字节数组模式
+        utf8Bytes = utf8Data
+        actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
+    End If
+
+    If actualLen = 0 Then
+        UTF8ToString = vbNullString
+        Exit Function
+    End If
+
+    ' 计算 Unicode 字符数
+    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, 0, 0)
+    If nChars = 0 Then
+        ' 转换失败，尝试 ASCII 回退
+        UTF8ToString = StrConv(utf8Bytes, vbUnicode)
+        Exit Function
+    End If
+
+    ' 执行转换
+    UTF8ToString = String$(nChars, vbNullChar)
+    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, StrPtr(UTF8ToString), nChars
+End Function
+' 安全的字符串压栈（自动处理 UTF-8 转换）
+Private Sub PushUTF8ToState(ByVal L As LongPtr, ByVal str As String)
+    If Len(str) = 0 Then
+        ' 空字符串：压入空的 Lua 字符串
+        lua_pushlstring L, 0, 0
+        Exit Sub
+    End If
+
+    Dim utf8Bytes() As Byte
+    utf8Bytes = StringToUTF8(str)
+
+    ' 正确计算实际的 UTF-8 字节长度
+    Dim actualLen As LongPtr
+    actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
+
+    lua_pushlstring L, VarPtr(utf8Bytes(0)), actualLen
+End Sub
+' 从 Lua 栈获取字符串
+Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
+    Dim ptr As LongPtr
+    Dim strLen As LongPtr  ' 使用 LongPtr 接收长度
+
+    strLen = 0
+    ptr = lua_tolstring(L, idx, VarPtr(strLen))
+
+    If ptr = 0 Or strLen = 0 Then
+        GetStringFromState = vbNullString
+        Exit Function
+    End If
+
+    ' 直接调用统一转换函数
+    GetStringFromState = UTF8ToString(ptr, CLng(strLen))
+End Function
+
+' 将 Lua table 转换为 VBA Variant (字典或数组)
+Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Variant
+    On Error GoTo ErrorHandler
+
+    ' 标准化索引为正数
+    If idx < 0 Then
+        idx = lua_gettop(L) + idx + 1
+    End If
+
+    ' 检查数组长度
+    Dim length As LongPtr
+    length = lua_rawlen(L, idx)
+
+    ' 如果长度为0，尝试判断是否为字典
+    If length = 0 Then
+        ' 尝试获取第一个键值对
+        Dim topBefore As Long
+        topBefore = lua_gettop(L)
+
+        lua_pushnil L
+        If lua_next(L, idx) <> 0 Then
+            ' 有内容，是字典
+            lua_settop L, topBefore  ' 恢复栈
+            LuaTableToVariant = LuaTableToDictArray(L, idx)
+        Else
+            ' 空表
+            LuaTableToVariant = Empty
+        End If
+        Exit Function
+    End If
+
+    ' 检查是否为纯数组（所有键都是1到length的连续整数）
+    Dim isPureArray As Boolean
+    isPureArray = True
+
+    Dim testTop As Long
+    testTop = lua_gettop(L)
+
+    lua_pushnil L
+    Do While lua_next(L, idx) <> 0
+        Dim keyType As Long
+        keyType = lua_type(L, -2)
+
+        If keyType <> LUA_TNUMBER Then
+            isPureArray = False
+            lua_settop L, testTop  ' 立即恢复栈
+            Exit Do
+        End If
+
+        Dim keyNum As Double
+        keyNum = lua_tonumberx(L, -2, 0)
+
+        ' 检查是否为整数且在范围内
+        If keyNum <> CLng(keyNum) Or keyNum < 1 Or keyNum > length Then
+            isPureArray = False
+            lua_settop L, testTop
+            Exit Do
+        End If
+
+        lua_settop L, -2  ' 只弹出value，保留key
+    Loop
+
+    lua_settop L, testTop  ' 确保栈恢复
+
+    ' 如果不是纯数组，按字典处理
+    If Not isPureArray Then
+        LuaTableToVariant = LuaTableToDictArray(L, idx)
+        Exit Function
+    End If
+
+    ' 纯数组处理
+    ' 检查第一个元素
+    lua_rawgeti L, idx, 1
+    Dim firstIsTable As Boolean
+    firstIsTable = (lua_type(L, -1) = LUA_TTABLE)
+    lua_settop L, -2
+
+    If firstIsTable Then
+        ' 二维数组
+        lua_rawgeti L, idx, 1
+        Dim cols As LongPtr
+        cols = lua_rawlen(L, -1)
+        lua_settop L, -2
+
+        If cols = 0 Then cols = 1  ' 防止空子表
+
+        Dim arr2D() As Variant
+        ReDim arr2D(1 To CLng(length), 1 To CLng(cols))
+
+        Dim i As Long, j As Long
+        For i = 1 To CLng(length)
+            lua_rawgeti L, idx, CLng(i)
+
+            If lua_type(L, -1) = LUA_TTABLE Then
+                Dim subLen As LongPtr
+                subLen = lua_rawlen(L, -1)
+
+                For j = 1 To CLng(cols)
+                    If j <= subLen Then
+                        lua_rawgeti L, -1, CLng(j)
+                        arr2D(i, j) = GetValue(L, -1)
+                        lua_settop L, -2
+                    Else
+                        arr2D(i, j) = Empty
+                    End If
+                Next j
+            Else
+                arr2D(i, 1) = GetValue(L, -1)
+            End If
+
+            lua_settop L, -2
+        Next i
+
+        LuaTableToVariant = arr2D
+    Else
+        ' 一维数组（转为单行二维）
+        Dim arr1D() As Variant
+        ReDim arr1D(1 To 1, 1 To CLng(length))
+
+        For i = 1 To CLng(length)
+            lua_rawgeti L, idx, CLng(i)
+            arr1D(1, i) = GetValue(L, -1)
+            lua_settop L, -2
+        Next i
+
+        LuaTableToVariant = arr1D
+    End If
+
+    Exit Function
+
+ErrorHandler:
+    LuaTableToVariant = "#TABLE_ERROR: " & Err.Description
+End Function
+
+' 将 Lua table 转换为字典数组
+Private Function LuaTableToDictArray(ByVal L As LongPtr, ByVal idx As Long) As Variant
+    On Error GoTo ErrorHandler
+
+    ' 标准化索引
+    If idx < 0 Then
+        idx = lua_gettop(L) + idx + 1
+    End If
+
+    ' 第一遍：计数
+    Dim count As Long
+    count = 0
+
+    Dim topBefore As Long
+    topBefore = lua_gettop(L)
+
+    lua_pushnil L
+    Do While lua_next(L, idx) <> 0
+        count = count + 1
+        lua_settop L, -2  ' 弹出value，保留key
+    Loop
+
+    lua_settop L, topBefore
+
+    If count = 0 Then
+        LuaTableToDictArray = Empty
+        Exit Function
+    End If
+
+    ' 第二遍：提取数据
+    Dim result() As Variant
+    ReDim result(1 To count, 1 To 2)
+
+    Dim i As Long
+    i = 1
+
+    lua_pushnil L
+    Do While lua_next(L, idx) <> 0
+        ' 获取键（在栈顶-1）
+        Dim keyType As Long
+        keyType = lua_type(L, -2)
+
+        Select Case keyType
+            Case LUA_TSTRING
+                result(i, 1) = GetStringFromState(L, -2)
+            Case LUA_TNUMBER
+                result(i, 1) = lua_tonumberx(L, -2, 0)
+            Case LUA_TBOOLEAN
+                result(i, 1) = (lua_toboolean(L, -2) <> 0)
+            Case Else
+                result(i, 1) = "#KEY_TYPE_" & keyType
+        End Select
+
+        ' 获取值（在栈顶）
+        result(i, 2) = GetValue(L, -1)
+
+        i = i + 1
+        lua_settop L, -2  ' 弹出value，保留key用于下次迭代
+    Loop
+
+    lua_settop L, topBefore
+
+    LuaTableToDictArray = result
+    Exit Function
+
+ErrorHandler:
+    LuaTableToDictArray = "#DICT_ERROR: " & Err.Description
+End Function
+' ============================================
+' 第七部分：辅助函数
+' ============================================
 ' 根据调用单元格地址查找已存在的任务
 Private Function FindTaskByCell(taskCell As String) As String
     Dim taskId As Variant
@@ -1995,39 +1998,4 @@ Private Function StatusToString(status As CoStatus) As String
         Case CO_TERMINATED: StatusToString = "terminated"
         Case Else: StatusToString = "UNKNOWN(" & status & ")"
     End Select
-End Function
-' 辅助函数：从外部地址解析工作表
-Private Function GetWorksheetFromAddress(addr As String, wb As Workbook) As Worksheet
-    On Error Resume Next
-
-    ' addr 格式示例: "[Book1.xlsx]Sheet1!$A$1" 或 "'Sheet Name'!$A$1"
-    Dim sheetName As String
-    Dim exclamPos As Long
-    Dim bracketEnd As Long
-
-    Set GetWorksheetFromAddress = Nothing
-
-    ' 处理外部引用格式 [Book1.xlsx]Sheet1!$A$1
-    If Left(addr, 1) = "[" Then
-        bracketEnd = InStr(addr, "]")
-        exclamPos = InStr(addr, "!")
-        If exclamPos > bracketEnd Then
-            sheetName = Mid(addr, bracketEnd + 1, exclamPos - bracketEnd - 1)
-        End If
-    ElseIf InStr(addr, "!") > 0 Then
-        exclamPos = InStr(addr, "!")
-        sheetName = Left(addr, exclamPos - 1)
-    End If
-
-    ' 移除引号
-    sheetName = Replace(sheetName, "'", "")
-
-    If Len(sheetName) > 0 Then
-        Set GetWorksheetFromAddress = wb.Sheets(sheetName)
-    End If
-
-    ' 如果解析失败，使用活动工作表
-    If GetWorksheetFromAddress Is Nothing Then
-        Set GetWorksheetFromAddress = wb.ActiveSheet
-    End If
 End Function

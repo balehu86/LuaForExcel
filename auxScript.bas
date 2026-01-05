@@ -19,30 +19,25 @@ Private Sub AddLuaMenuItem(parent As CommandBarControl, caption As String, onAct
 End Sub
 
 ' 辅助函数：根据单元格地址获取任务ID
-Private Function GetTaskIdFromSelection() As String
+Private Function GetTaskFromSelection(ByRef task As TaskUnit, ByRef taskId As String) As Boolean
     Dim cellAddr As String
     cellAddr = Selection.Address(External:=True)
-    GetTaskIdFromSelection = FindTaskByCell(cellAddr)
-End Function
-
-' 新增通用错误处理辅助函数
-Private Function SafeGetTaskFromSelection(ByRef task As TaskUnit, ByRef taskId As String) As Boolean
-    taskId = GetTaskIdFromSelection()
+    taskId = FindTaskByCell(cellAddr)
     If taskId = vbNullString Then
         MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        SafeGetTaskFromSelection = False
+        GetTaskFromSelection = False
         Exit Function
     End If
     If Not g_Tasks.Exists(taskId) Then
         MsgBox "任务不存在或已删除", vbExclamation
-        SafeGetTaskFromSelection = False
+        GetTaskFromSelection = False
         Exit Function
     End If
     Set task = g_Tasks(taskId)
-    SafeGetTaskFromSelection = True
+    GetTaskFromSelection = True
 End Function
 
-' 清理孤儿 Watch（任务已删除但 Watch 仍存在）
+' 辅助函数：清理孤儿
 Public Sub CleanupOrphanWatches()
     On Error Resume Next
 
@@ -205,7 +200,7 @@ Private Function WeightToNice(weight As Double) As Integer
     WeightToNice = bestIndex - 20
 End Function
 
-' 格式化 Resume 参数规格（辅助函数）
+' 辅助函数：格式化 Resume 参数规格
 Private Function FormatResumeSpecs(task As TaskUnit) As String
     On Error GoTo ErrorHandler
 
@@ -271,6 +266,31 @@ Private Function FormatResumeSpecs(task As TaskUnit) As String
 
 ErrorHandler:
     FormatResumeSpecs = "   (解析错误: " & Err.Description & ")" & vbCrLf
+End Function
+
+' 辅助函数：获取数组维度信息
+Private Function GetArrayDimensions(arr As Variant) As String
+    On Error Resume Next
+
+    Dim dims As String
+    dims = ""
+
+    Dim d As Integer
+    For d = 1 To 10
+        Dim lb As Long, ub As Long
+        lb = LBound(arr, d)
+        If Err.Number <> 0 Then
+            Err.Clear
+            Exit For
+        End If
+        ub = UBound(arr, d)
+
+        If dims <> "" Then dims = dims & " x "
+        dims = dims & (ub - lb + 1)
+    Next d
+
+    If dims = "" Then dims = "未知"
+    GetArrayDimensions = dims
 End Function
 ' ============================================
 ' 第七部分：可视化操作函数
@@ -379,7 +399,7 @@ End Sub
 ' 启动任务
 Private Sub LuaTaskMenu_StartTask()
     Dim task As TaskUnit, taskId As String
-    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
 
     If task.taskStatus <> CO_DEFINED Then
         MsgBox "任务状态为 " & StatusToString(task.taskStatus) & "，无法启动。", vbExclamation
@@ -392,7 +412,7 @@ End Sub
 ' 暂停任务
 Private Sub LuaTaskMenu_PauseTask()
     Dim task As TaskUnit, taskId As String
-    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
     If task.taskStatus <> CO_YIELD Then
         MsgBox "只能暂停正在运行的任务。当前状态: " & StatusToString(task.taskStatus), vbExclamation
         Exit Sub
@@ -405,7 +425,7 @@ End Sub
 ' 恢复任务
 Private Sub LuaTaskMenu_ResumeTask()
     Dim task As TaskUnit, taskId As String
-    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
     If task.taskStatus <> CO_PAUSED Then
         MsgBox "只能恢复已暂停的任务。当前状态: " & StatusToString(task.taskStatus), vbExclamation
         Exit Sub
@@ -418,7 +438,7 @@ End Sub
 ' 终止任务
 Private Sub LuaTaskMenu_TerminateTask()
     Dim task As TaskUnit, taskId As String
-    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
     If MsgBox("确定要终止并删除任务 " & taskId & " 吗？", vbQuestion + vbYesNo, "确认终止") = vbNo Then Exit Sub
     SetTaskStatus task, CO_TERMINATED
     MsgBox "任务已终止并删除: " & taskId, vbInformation
@@ -427,7 +447,7 @@ End Sub
 ' 重置任务
 Private Sub LuaTaskMenu_ResetTask()
     Dim task As TaskUnit, taskId As String
-    If Not SafeGetTaskFromSelection(task, taskId) Then Exit Sub
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
     ' 如果任务正在运行，需要先确认
     If task.taskStatus = CO_YIELD Then
         Dim result As VbMsgBoxResult
@@ -544,31 +564,6 @@ Private Sub LuaTaskMenu_ShowDetail()
 ErrorHandler:
     MsgBox "显示任务详情时出错: " & Err.Description, vbCritical, "错误"
 End Sub
-
-' 获取数组维度信息（辅助函数）
-Private Function GetArrayDimensions(arr As Variant) As String
-    On Error Resume Next
-
-    Dim dims As String
-    dims = ""
-
-    Dim d As Integer
-    For d = 1 To 10
-        Dim lb As Long, ub As Long
-        lb = LBound(arr, d)
-        If Err.Number <> 0 Then
-            Err.Clear
-            Exit For
-        End If
-        ub = UBound(arr, d)
-
-        If dims <> "" Then dims = dims & " x "
-        dims = dims & (ub - lb + 1)
-    Next d
-
-    If dims = "" Then dims = "未知"
-    GetArrayDimensions = dims
-End Function
 
 ' 设置任务权重
 Private Sub LuaConfigMenu_SetTaskWeight()
