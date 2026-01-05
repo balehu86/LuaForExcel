@@ -61,9 +61,8 @@ Private Const LUA_YIELD = 1
 Private Const LUA_ERRRUN = 2
 ' ===== 参数规格类型常量（供 TaskUnit 使用）=====
 Public Const PARAM_LITERAL As Long = 0          ' 字面量（数值、布尔、普通字符串）
-Public Const PARAM_CELL_REF As Long = 1         ' 单元格引用（Range 对象传入）
-Public Const PARAM_RANGE_REF As Long = 2        ' 区域引用（Range 对象传入，多单元格）
-Public Const PARAM_DYNAMIC_STRING As Long = 3   ' 动态字符串（"$B1" 格式）
+Public Const PARAM_RANGE_REF As Long = 1        ' 单元格区域引用（Range 对象传入）
+Public Const PARAM_DYNAMIC_STRING As Long = 2   ' 动态字符串（"$B1" 格式）
 ' ===== 全局变量 =====
 Private g_LuaState As LongPtr         ' lua 栈
 Private g_Initialized As Boolean      ' 是否初始化
@@ -451,6 +450,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     taskCell = Application.Caller.Address(External:=True)
     Set callerWb = Application.Caller.Worksheet.Parent
     Set callerWs = Application.Caller.Worksheet
+    On Error GoTo ErrorHandler
 
     ' 检查调用者工作簿是否存在
     If callerWb Is Nothing Then
@@ -465,7 +465,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     End If
 
     wbName = callerWb.Name
-    On Error GoTo ErrorHandler
 
     ' 检查是否已存在任务
     Dim existingTaskId As String
@@ -476,56 +475,64 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         Exit Function
     End If
 
-    ' 解析参数
+    ' ========== 解析参数 ==========
     Dim funcName As String
     funcName = CStr(params(0))
 
-    Dim phase As Long
-    phase = 0
-
-    Dim startList As Object, resumeList As Object
+    Dim startList As Object
+    Dim resumeList As Object
     Set startList = CreateObject("System.Collections.ArrayList")
     Set resumeList = CreateObject("System.Collections.ArrayList")
 
+    ' 遍历参数，用布尔标记区分阶段
+    Dim isResumePhase As Boolean
+    isResumePhase = False
+
     Dim i As Long
     For i = 1 To UBound(params)
-        ' 检查是否是分隔符
-        If VarType(params(i)) = vbString Then
-            If CStr(params(i)) = "|" Then
-                phase = 1
-                GoTo NextParam
+        Dim currentParam As Variant
+        currentParam = params(i)
+
+        ' 检查是否是分隔符 "|"
+        Dim isSeparator As Boolean
+        isSeparator = False
+        If VarType(currentParam) = vbString Then
+            If CStr(currentParam) = "|" Then
+                isSeparator = True
             End If
         End If
-        ' 根据阶段添加到对应列表
-        ' 注意：Range 对象需要用 Object 方式添加以保留引用
-        Select Case phase
-            Case 0
-                If TypeName(params(i)) = "Range" Then
-                    ' 对于启动参数，Range 直接取值
-                    startList.Add params(i).Value
-                Else
-                    startList.Add params(i)
-                End If
-            Case 1
-                ' 对于 Resume 参数，保留 Range 对象引用
-                If TypeName(params(i)) = "Range" Then
-                    ' 创建一个包含 Range 信息的 Dictionary
-                    Dim rangeInfo As Object
-                    Set rangeInfo = CreateObject("Scripting.Dictionary")
-                    rangeInfo("isRange") = True
-                    rangeInfo("address") = params(i).Address(False, False)
-                    rangeInfo("workbook") = params(i).Worksheet.Parent.Name
-                    rangeInfo("worksheet") = params(i).Worksheet.Name
-                    rangeInfo("cellCount") = params(i).Cells.Count
-                    resumeList.Add rangeInfo
-                Else
-                    resumeList.Add params(i)
-                End If
-        End Select
-NextParam:
+
+        If isSeparator Then
+            ' 遇到分隔符，切换到 Resume 阶段
+            isResumePhase = True
+        ElseIf Not isResumePhase Then
+            ' 启动参数阶段：Range 直接取值
+            If TypeName(currentParam) = "Range" Then
+                startList.Add currentParam.Value
+            Else
+                startList.Add currentParam
+            End If
+        Else
+            ' Resume 参数阶段：保留 Range 对象引用
+            If TypeName(currentParam) = "Range" Then
+                Dim rangeInfo As Object
+                Set rangeInfo = CreateObject("Scripting.Dictionary")
+                rangeInfo("isRange") = True
+                rangeInfo("address") = currentParam.Address(False, False)
+                rangeInfo("workbook") = currentParam.Worksheet.Parent.Name
+                rangeInfo("worksheet") = currentParam.Worksheet.Name
+                rangeInfo("cellCount") = currentParam.Cells.Count
+                resumeList.Add rangeInfo
+            Else
+                resumeList.Add currentParam
+            End If
+        End If
     Next i
 
-    Dim startArgs As Variant, resumeSpec As Variant
+    ' 转换为数组
+    Dim startArgs As Variant
+    Dim resumeSpec As Variant
+
     If startList.Count > 0 Then
         startArgs = startList.ToArray()
     Else
@@ -538,10 +545,10 @@ NextParam:
         resumeSpec = Array()
     End If
 
+    ' ========== 创建任务 ==========
     Dim taskIdStr As String
     taskIdStr = "Task_" & CStr(g_NextTaskId)
 
-    ' 创建任务字段
     Dim task As New TaskUnit
     With task
         .taskId = g_NextTaskId
@@ -571,6 +578,7 @@ NextParam:
     LuaTask = taskIdStr
     g_NextTaskId = g_NextTaskId + 1
     Exit Function
+
 ErrorHandler:
     Debug.Print "LuaTask Error: " & Err.Number & " - " & Err.Description
     LuaTask = "#ERROR: " & Err.Description
@@ -1214,7 +1222,6 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     ' 使用新的参数解析机制获取动态参数
     Dim resumeArgs As Variant
     resumeArgs = task.GetResumeArgs()
-    
     Dim nargs As Long
     nargs = 0
 

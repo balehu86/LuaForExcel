@@ -246,8 +246,8 @@ Private Function FormatResumeSpecs(task As TaskUnit) As String
         Dim typeStr As String
         Select Case specType
             Case PARAM_LITERAL: typeStr = "字面量"
-            Case PARAM_CELL_REF: typeStr = "单元格引用"
-            Case PARAM_RANGE_REF: typeStr = "区域引用"
+
+            Case PARAM_RANGE_REF: typeStr = "单元格/区域引用"
             Case PARAM_DYNAMIC_STRING: typeStr = "动态字符串"
             Case Else: typeStr = "未知(" & specType & ")"
         End Select
@@ -257,7 +257,7 @@ Private Function FormatResumeSpecs(task As TaskUnit) As String
         Select Case specType
             Case PARAM_LITERAL
                 result = result & " = " & CStr(spec("value"))
-            Case PARAM_CELL_REF, PARAM_RANGE_REF
+            Case PARAM_RANGE_REF
                 result = result & " -> [" & spec("workbook") & "]" & spec("worksheet") & "!" & spec("address")
             Case PARAM_DYNAMIC_STRING
                 result = result & " -> $" & spec("refString")
