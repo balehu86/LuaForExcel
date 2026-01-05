@@ -496,7 +496,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
                 GoTo NextParam
             End If
         End If
-        
         ' 根据阶段添加到对应列表
         ' 注意：Range 对象需要用 Object 方式添加以保留引用
         Select Case phase
@@ -532,7 +531,7 @@ NextParam:
     Else
         startArgs = Array()
     End If
-    
+
     If resumeList.Count > 0 Then
         resumeSpec = resumeList.ToArray()
     Else
@@ -542,7 +541,7 @@ NextParam:
     Dim taskIdStr As String
     taskIdStr = "Task_" & CStr(g_NextTaskId)
 
-    ' 创建任务
+    ' 创建任务字段
     Dim task As New TaskUnit
     With task
         .taskId = g_NextTaskId
@@ -563,16 +562,15 @@ NextParam:
         .CFS_weight = 1024
         .CFS_vruntime = g_CFS_minVruntime
     End With
-    
+
     ' 解析 Resume 参数规格
     task.ParseResumeSpecs resumeSpec, callerWb, callerWs
-    
+
     g_Tasks.Add taskIdStr, task
 
     LuaTask = taskIdStr
     g_NextTaskId = g_NextTaskId + 1
     Exit Function
-    
 ErrorHandler:
     Debug.Print "LuaTask Error: " & Err.Number & " - " & Err.Description
     LuaTask = "#ERROR: " & Err.Description

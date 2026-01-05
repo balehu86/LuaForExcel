@@ -150,14 +150,19 @@ Public Sub ParseResumeSpecs(specs As Variant, wb As Workbook, ws As Worksheet)
 
             If Len(paramStr) > 0 And Left(paramStr, 1) = "$" Then
                 spec("type") = PARAM_DYNAMIC_STRING
-                spec("refString") = Mid(paramStr, 2)
-                spec("workbook") = wb.Name
-                spec("worksheet") = ws.Name
+                Dim refStr As String
+                refStr = Mid(paramStr, 2)
+                spec("refString") = refStr
+                ' 解析引用字符串中的工作簿和工作表信息
+                Dim parsedWb As String, parsedWs As String, parsedAddr As String
+                ParseReferenceString refStr, parsedWb, parsedWs, parsedAddr, wb.Name, ws.Name
+                spec("workbook") = parsedWb
+                spec("worksheet") = parsedWs
+                spec("address") = parsedAddr  ' 可选：存储解析后的地址
             Else
                 spec("type") = PARAM_LITERAL
                 spec("value") = paramStr
             End If
-
         Else
             spec("type") = PARAM_LITERAL
             spec("value") = specs(i)
