@@ -65,14 +65,14 @@ Public Const PARAM_CELL_REF As Long = 1         ' 单元格引用（Range 对象
 Public Const PARAM_RANGE_REF As Long = 2        ' 区域引用（Range 对象传入，多单元格）
 Public Const PARAM_DYNAMIC_STRING As Long = 3   ' 动态字符串（"$B1" 格式）
 ' ===== 全局变量 =====
-Private g_LuaState As LongPtr
-Private g_Initialized As Boolean
+Private g_LuaState As LongPtr         ' lua 栈
+Private g_Initialized As Boolean      ' 是否初始化
 Private g_HotReloadEnabled As Boolean ' 是否启用 hot-reload，默认开启
-Private g_FunctionsPath As String  ' 固定为加载项目录
-Private g_LastModified As Date
-Private g_CFS_autoWeight As Boolean  ' 自动调整权重开关
+Private g_FunctionsPath As String     ' 固定为加载项目录
+Private g_LastModified As Date        ' functions.lua 上次修改，用于热重载
+Private g_CFS_autoWeight As Boolean   ' 自动调整权重开关
 ' ===== 协程全局变量 =====
-Public Enum CoStatus
+Public Enum CoStatus ' task 的状态枚举
     CO_DEFINED
     CO_YIELD
     CO_PAUSED
@@ -80,21 +80,21 @@ Public Enum CoStatus
     CO_ERROR
     CO_TERMINATED
 End Enum
-Public g_Tasks As Object       ' task Id -> task Instance
-Public g_Workbooks As Object    ' Dictionary: wbName -> WorkbookInfo
-Public g_TaskQueue As Collection     ' taskId 列表，按调度顺序排列
-Public g_Watches As Object          ' Dictionary: watchCell -> WatchInfo
+Public g_Tasks As Object         ' task Id -> task Instance
+Public g_Workbooks As Object     ' Dictionary: wbName -> WorkbookInfo
+Public g_TaskQueue As Collection ' taskId 列表，按调度顺序排列
+Public g_Watches As Object       ' Dictionary: watchCell -> WatchInfo
 ' ===== 调度全局变量 =====
 Private g_SchedulerRunning As Boolean   ' 调度器是否运行中
 Private g_StateDirty As Boolean         ' 本 tick 是否有状态变化，用来检测是否需要刷新单元格
-Public g_NextTaskId As Integer         ' 新建下一个任务ID计数器
+Public g_NextTaskId As Integer          ' 新建下一个任务ID计数器
 Private g_SchedulerIntervalMilliSec As Long ' 调度间隔(ms)，默认1000ms
 Private g_NextScheduleTime As Date     '标记记下一次调度时间
 Private g_CFS_minVruntime As Double       ' 队列中最小的 vruntime（用于新任务初始化）
 Private g_CFS_targetLatency As Double     ' 目标延迟周期（ms），默认为调度间隔的十分之一
 Private g_CFS_minGranularity As Double    ' 最小执行粒度（ms），默认 5ms
 Private g_CFS_niceToWeight(0 To 39) As Double  ' nice 值到权重的映射表
-Private g_ActiveTaskCount As Long ' 当前队列中活跃任务数
+Private g_ActiveTaskCount As Long  ' 当前队列中活跃任务数
 ' ===== 配置常量 =====
 Private Const CP_UTF8 As Long = 65001
 Private Const LOG_LEVEL As Byte = 1  ' 默认日志等级：0=错误，1=信息，2=调试
