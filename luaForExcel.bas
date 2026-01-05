@@ -1498,38 +1498,21 @@ Private Function StringToUTF8(ByVal str As String) As Byte()
     StringToUTF8 = utf8Bytes
 End Function
 ' UTF-8 字节指针 -> VBA 字符串 (已有，优化版本)
-Private Function UTF8ToString(ByRef utf8Data As Variant, Optional ByVal byteLen As Long = -1) As String
-    Dim utf8Bytes() As Byte
-    Dim actualLen As Long
-    Dim nChars As Long
-
-    ' 根据输入类型处理
-    If VarType(utf8Data) = vbLongPtr Or VarType(utf8Data) = vbLong Then
-        ' 指针模式：需要 byteLen 参数
-        Dim ptr As LongPtr
-        ptr = CLngPtr(utf8Data)
-
-        If ptr = 0 Or byteLen <= 0 Then
-            UTF8ToString = vbNullString
-            Exit Function
-        End If
-
-        ReDim utf8Bytes(0 To byteLen - 1)
-        CopyMemory utf8Bytes(0), ByVal ptr, byteLen
-        actualLen = byteLen
-    Else
-        ' 字节数组模式
-        utf8Bytes = utf8Data
-        actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
-    End If
-
-    If actualLen = 0 Then
+Private Function UTF8ToString(ByVal ptr As LongPtr, ByVal byteLen As Long) As String
+    If ptr = 0 Or byteLen <= 0 Then
         UTF8ToString = vbNullString
         Exit Function
     End If
 
+    ' 复制 UTF-8 字节到 VBA 数组
+    Dim utf8Bytes() As Byte
+    ReDim utf8Bytes(0 To byteLen - 1)
+    CopyMemory utf8Bytes(0), ByVal ptr, byteLen
+
     ' 计算 Unicode 字符数
-    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, 0, 0)
+    Dim nChars As Long
+    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), byteLen, 0, 0)
+
     If nChars = 0 Then
         ' 转换失败，尝试 ASCII 回退
         UTF8ToString = StrConv(utf8Bytes, vbUnicode)
@@ -1538,7 +1521,7 @@ Private Function UTF8ToString(ByRef utf8Data As Variant, Optional ByVal byteLen 
 
     ' 执行转换
     UTF8ToString = String$(nChars, vbNullChar)
-    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, StrPtr(UTF8ToString), nChars
+    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), byteLen, StrPtr(UTF8ToString), nChars
 End Function
 ' 安全的字符串压栈（自动处理 UTF-8 转换）
 Private Sub PushUTF8ToState(ByVal L As LongPtr, ByVal str As String)

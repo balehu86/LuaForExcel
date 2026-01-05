@@ -293,7 +293,7 @@ Private Function GetArrayDimensions(arr As Variant) As String
     GetArrayDimensions = dims
 End Function
 ' ============================================
-' 第七部分：可视化操作函数
+' 第八部分：可视化操作函数
 ' ============================================
 ' 打开并创建右键菜单功能
 Public Sub EnableLuaTaskMenu()
@@ -318,6 +318,7 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaTaskMenu, "终止任务", "LuaTaskMenu_TerminateTask"
     AddLuaMenuItem luaTaskMenu, "重置任务", "LuaTaskMenu_ResetTask"
     AddLuaMenuItem luaTaskMenu, "查看任务详情", "LuaTaskMenu_ShowDetail"
+    AddLuaMenuItem luaTaskMenu, "按Nice值设置权重", "LuaTaskMenu_SetTaskNice"
     AddLuaMenuItem luaTaskMenu, "设置任务权重", "LuaConfigMenu_SetTaskWeight"
 
     ' 添加调度的主菜单
@@ -350,7 +351,6 @@ Public Sub EnableLuaTaskMenu()
     AddLuaMenuItem luaConfigMenu, "设置最小粒度（毫秒）", "LuaConfigMenu_SetMinGranularity"
     AddLuaMenuItem luaConfigMenu, "启用自动权重调整", "LuaConfigMenu_EnableAutoWeight"
     AddLuaMenuItem luaConfigMenu, "禁用自动权重调整", "LuaConfigMenu_DisableAutoWeight"
-    AddLuaMenuItem luaConfigMenu, "按Nice值设置权重", "LuaConfigMenu_SetTaskNice"
 
     ' 添加调试的主菜单
     Dim luaDebugMenu As CommandBarControl
@@ -466,24 +466,9 @@ End Sub
 Private Sub LuaTaskMenu_ShowDetail()
     On Error GoTo ErrorHandler
 
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
+    Dim task As TaskUnit, taskId As String
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
 
-    If g_Tasks Is Nothing Then
-        InitCoroutineSystem
-    End If
-    If Not g_Tasks.Exists(taskId) Then
-        MsgBox "任务 " & taskId & " 不存在！", vbCritical, "错误"
-        Exit Sub
-    End If
-    
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
-    
     Dim msg As String
     msg = "========================================" & vbCrLf
     msg = msg & "  任务详细信息" & vbCrLf
@@ -527,12 +512,12 @@ Private Sub LuaTaskMenu_ShowDetail()
     ' Resume 参数规格
     msg = msg & vbCrLf & "Resume 参数规格:" & vbCrLf
     msg = msg & FormatResumeSpecs(task)
-    
+
     ' 当前值
     msg = msg & vbCrLf & "当前值:" & vbCrLf
     Dim value As Variant
     value = task.taskValue
-    
+
     If IsArray(value) Then
         ' 获取数组维度信息
         Dim dims As String
@@ -565,18 +550,48 @@ ErrorHandler:
     MsgBox "显示任务详情时出错: " & Err.Description, vbCritical, "错误"
 End Sub
 
-' 设置任务权重
-Private Sub LuaConfigMenu_SetTaskWeight()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
+' 按Nice值设置任务权重
+Private Sub LuaTaskMenu_SetTaskNice()
+    Dim task As TaskUnit, taskId As String
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
 
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
+    ' 计算当前权重对应的近似 nice 值
+    Dim currentNice As Integer
+    currentNice = WeightToNice(task.CFS_weight)
+
+    Dim newNice As Variant
+    newNice = Application.InputBox( _
+        "设置任务优先级（Nice值，范围 -20 到 +19）" & vbCrLf & vbCrLf & _
+        "   -20 = 最高优先级（权重最大）" & vbCrLf & _
+        "     0 = 普通优先级（默认）" & vbCrLf & _
+        "   +19 = 最低优先级（权重最小）" & vbCrLf & vbCrLf & _
+        "当前权重: " & Format(task.CFS_weight, "0.0") & vbCrLf & _
+        "对应Nice值: " & currentNice, _
+        "Nice 值设置", _
+        currentNice, _
+        Type:=1)
+
+    If newNice = False Then Exit Sub
+    If newNice < -20 Or newNice > 19 Then
+        MsgBox "Nice值必须在 -20 到 +19 范围内。", vbExclamation, "无效值"
         Exit Sub
     End If
 
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
+    ' 转换 nice 值到数组索引（-20 对应 0，+19 对应 39）
+    Dim niceIndex As Byte
+    niceIndex = CInt(newNice) + 20
+
+    task.CFS_weight = g_CFS_niceToWeight(niceIndex)
+
+    MsgBox "任务 " & taskId & " 优先级已设置:" & vbCrLf & _
+           "  Nice值: " & newNice & vbCrLf & _
+           "  权重: " & Format(task.CFS_weight, "0.0"), vbInformation
+End Sub
+
+' 设置任务权重
+Private Sub LuaConfigMenu_SetTaskWeight()
+    Dim task As TaskUnit, taskId As String
+    If Not GetTaskFromSelection(task, taskId) Then Exit Sub
 
     Dim newWeight As Variant
     newWeight = Application.InputBox( _
@@ -1028,52 +1043,6 @@ Private Sub LuaConfigMenu_DisableAutoWeight()
     MsgBox "自动权重调整已禁用。" & vbCrLf & _
            "任务权重将保持手动设置的值。", _
            vbInformation, "自动权重"
-End Sub
-
-' 按Nice值设置任务权重
-Private Sub LuaConfigMenu_SetTaskNice()
-    Dim taskId As String
-    taskId = GetTaskIdFromSelection()
-
-    If taskId = vbNullString Then
-        MsgBox "当前单元格没有 Lua 任务。", vbExclamation
-        Exit Sub
-    End If
-
-    Dim task As TaskUnit
-    Set task = g_Tasks(taskId)
-
-    ' 计算当前权重对应的近似 nice 值
-    Dim currentNice As Integer
-    currentNice = WeightToNice(task.CFS_weight)
-
-    Dim newNice As Variant
-    newNice = Application.InputBox( _
-        "设置任务优先级（Nice值，范围 -20 到 +19）" & vbCrLf & vbCrLf & _
-        "   -20 = 最高优先级（权重最大）" & vbCrLf & _
-        "     0 = 普通优先级（默认）" & vbCrLf & _
-        "   +19 = 最低优先级（权重最小）" & vbCrLf & vbCrLf & _
-        "当前权重: " & Format(task.CFS_weight, "0.0") & vbCrLf & _
-        "对应Nice值: " & currentNice, _
-        "Nice 值设置", _
-        currentNice, _
-        Type:=1)
-
-    If newNice = False Then Exit Sub
-    If newNice < -20 Or newNice > 19 Then
-        MsgBox "Nice值必须在 -20 到 +19 范围内。", vbExclamation, "无效值"
-        Exit Sub
-    End If
-
-    ' 转换 nice 值到数组索引（-20 对应 0，+19 对应 39）
-    Dim niceIndex As Byte
-    niceIndex = CInt(newNice) + 20
-
-    task.CFS_weight = g_CFS_niceToWeight(niceIndex)
-
-    MsgBox "任务 " & taskId & " 优先级已设置:" & vbCrLf & _
-           "  Nice值: " & newNice & vbCrLf & _
-           "  权重: " & Format(task.CFS_weight, "0.0"), vbInformation
 End Sub
 ' ====调试和诊断功能====
 ' 显示加载宏状态
