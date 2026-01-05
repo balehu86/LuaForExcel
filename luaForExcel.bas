@@ -947,7 +947,7 @@ Public Sub StartLuaCoroutine(taskId As String)
     End If
 
     lua_xmove g_LuaState, coThread, 1
-    lua_pushstring coThread, task.taskCell
+    LuaPushStringUTF8 coThread, task.taskCell
 
     Dim nargs As Long
     nargs = 1
@@ -968,12 +968,12 @@ Public Sub StartLuaCoroutine(taskId As String)
 
     ' 处理结果（HandleCoroutineResult 内部会调用 SetTaskStatus）
     HandleCoroutineResult task, result, CLng(nres)
-    
+
     ' 如果是 yield 状态，启动调度器
     If task.taskStatus = CO_YIELD Then
         StartSchedulerIfNeeded
     End If
-    
+
     Exit Sub
     
 ErrorHandler:
