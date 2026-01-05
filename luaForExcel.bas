@@ -1394,11 +1394,10 @@ Private Function StringToUTF8(ByVal str As String) As Byte()
         StringToUTF8 = utf8Bytes
         Exit Function
     End If
-    ' 第一次调用：获取所需缓冲区大小
+    ' 获取所需缓冲区大小
     utf8Len = WideCharToMultiByte(CP_UTF8, 0, StrPtr(str), Len(str), 0, 0, 0, 0)
     If utf8Len = 0 Then
         ReDim utf8Bytes(0 To 0)
-        utf8Bytes(0) = 0
         StringToUTF8 = utf8Bytes
         Exit Function
     End If
@@ -1409,30 +1408,47 @@ Private Function StringToUTF8(ByVal str As String) As Byte()
     StringToUTF8 = utf8Bytes
 End Function
 ' UTF-8 字节指针 -> VBA 字符串 (已有，优化版本)
-Private Function UTF8PtrToString(ByVal ptr As LongPtr, ByVal byteLen As Long) As String
-    If ptr = 0 Or byteLen <= 0 Then
-        UTF8PtrToString = vbNullString
-        Exit Function
-    End If
-
-    ' 先复制 UTF-8 字节到 VBA 数组
+Private Function UTF8ToString(ByRef utf8Data As Variant, Optional ByVal byteLen As Long = -1) As String
     Dim utf8Bytes() As Byte
-    ReDim utf8Bytes(0 To byteLen - 1)
-    CopyMemory utf8Bytes(0), ByVal ptr, byteLen
-
-    ' 计算需要的 Unicode 字符数
+    Dim actualLen As Long
     Dim nChars As Long
-    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), byteLen, 0, 0)
 
-    If nChars = 0 Then
-        ' 如果转换失败，尝试直接返回 ASCII
-        UTF8PtrToString = StrConv(utf8Bytes, vbUnicode)
+    ' 根据输入类型处理
+    If VarType(utf8Data) = vbLongPtr Or VarType(utf8Data) = vbLong Then
+        ' 指针模式：需要 byteLen 参数
+        Dim ptr As LongPtr
+        ptr = CLngPtr(utf8Data)
+
+        If ptr = 0 Or byteLen <= 0 Then
+            UTF8ToString = vbNullString
+            Exit Function
+        End If
+
+        ReDim utf8Bytes(0 To byteLen - 1)
+        CopyMemory utf8Bytes(0), ByVal ptr, byteLen
+        actualLen = byteLen
+    Else
+        ' 字节数组模式
+        utf8Bytes = utf8Data
+        actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
+    End If
+
+    If actualLen = 0 Then
+        UTF8ToString = vbNullString
         Exit Function
     End If
 
-    ' 分配字符串缓冲区并转换
-    UTF8PtrToString = String$(nChars, vbNullChar)
-    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), byteLen, StrPtr(UTF8PtrToString), nChars
+    ' 计算 Unicode 字符数
+    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, 0, 0)
+    If nChars = 0 Then
+        ' 转换失败，尝试 ASCII 回退
+        UTF8ToString = StrConv(utf8Bytes, vbUnicode)
+        Exit Function
+    End If
+
+    ' 执行转换
+    UTF8ToString = String$(nChars, vbNullChar)
+    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), actualLen, StrPtr(UTF8ToString), nChars
 End Function
 ' 安全的字符串压栈（自动处理 UTF-8 转换）
 Private Sub LuaPushStringUTF8(ByVal L As LongPtr, ByVal str As String)
@@ -1459,35 +1475,13 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
     strLen = 0
     ptr = lua_tolstring(L, idx, VarPtr(strLen))
 
-    If ptr = 0 Then
+    If ptr = 0 Or strLen = 0 Then
         GetStringFromState = vbNullString
         Exit Function
     End If
 
-    ' length 为 0 表示空字符串
-    If strLen = 0 Then
-        GetStringFromState = vbNullString
-        Exit Function
-    End If
-
-    ' 先复制 UTF-8 字节到 VBA 数组，再转换
-    Dim utf8Bytes() As Byte
-    ReDim utf8Bytes(0 To CLng(strLen) - 1)
-    CopyMemory utf8Bytes(0), ByVal ptr, strLen
-
-    ' 计算需要的 Unicode 字符数
-    Dim nChars As Long
-    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), CLng(strLen), 0, 0)
-
-    If nChars = 0 Then
-        ' 转换失败，尝试直接当作 ASCII
-        GetStringFromState = StrConv(utf8Bytes, vbUnicode)
-        Exit Function
-    End If
-
-    ' 分配字符串缓冲区并转换
-    GetStringFromState = String$(nChars, vbNullChar)
-    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), CLng(strLen), StrPtr(GetStringFromState), nChars
+    ' 直接调用统一转换函数
+    GetStringFromState = UTF8ToString(ptr, CLng(strLen))
 End Function
 
 ' 从 Lua 栈获取值
