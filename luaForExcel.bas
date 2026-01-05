@@ -469,15 +469,6 @@ Public Function LuaTask(ParamArray params() As Variant) As String
 
     wbName = callerWb.Name
 
-    ' 检查是否已存在任务
-    Dim existingTaskId As String
-    existingTaskId = FindTaskByCell(taskCell)
-
-    If existingTaskId <> vbNullString Then
-        LuaTask = existingTaskId
-        Exit Function
-    End If
-
     ' ========== 解析参数 ==========
     Dim funcName As String
     funcName = CStr(params(0))
@@ -548,7 +539,40 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         resumeSpec = Array()
     End If
 
-    ' ========== 创建任务 ==========
+    ' ========== 检查是否已存在任务 ==========
+    Dim existingTaskId As String
+    existingTaskId = FindTaskByCell(taskCell)
+
+    If existingTaskId <> vbNullString Then
+        ' 已存在任务，校验参数是否变化
+        Dim existingTask As TaskUnit
+        Set existingTask = g_Tasks(existingTaskId)
+
+        Dim paramsChanged As Boolean
+        paramsChanged = False
+        ' 校验函数名
+        If existingTask.taskFunc <> funcName Then
+            paramsChanged = True
+        End If
+        ' 校验启动参数
+        If Not paramsChanged Then
+            paramsChanged = Not CompareVariantArrays(existingTask.taskStartArgs, startArgs)
+        End If
+        ' 校验 Resume 参数规格
+        If Not paramsChanged Then
+            paramsChanged = Not CompareResumeSpecs(existingTask.taskResumeSpec, resumeSpec)
+        End If
+        ' 如果参数未变化，直接返回现有任务ID
+        If Not paramsChanged Then
+            LuaTask = existingTaskId
+            Exit Function
+        End If
+        ' 参数变化，删除旧任务
+        LogDebug "LuaTask: 参数变化，删除旧任务 " & existingTaskId
+        SetTaskStatus existingTask, CO_TERMINATED
+    End If
+
+    ' ========== 创建新任务 ==========
     Dim taskIdStr As String
     taskIdStr = "Task_" & CStr(g_NextTaskId)
 
@@ -2123,3 +2147,196 @@ Private Function StatusToString(status As CoStatus) As String
         Case Else: StatusToString = "UNKNOWN(" & status & ")"
     End Select
 End Function
+
+' 辅助函数：比较两个 Variant 数组是否相等
+Private Function CompareVariantArrays(arr1 As Variant, arr2 As Variant) As Boolean
+    On Error GoTo NotEqual
+    ' 处理非数组情况
+    If Not IsArray(arr1) And Not IsArray(arr2) Then
+        ' 两者都不是数组，直接比较
+        If IsObject(arr1) Or IsObject(arr2) Then
+            CompareVariantArrays = False
+        Else
+            CompareVariantArrays = (arr1 = arr2)
+        End If
+        Exit Function
+    End If
+    ' 一个是数组一个不是
+    If IsArray(arr1) Xor IsArray(arr2) Then
+        CompareVariantArrays = False
+        Exit Function
+    End If
+    ' 两者都是数组
+    Dim lb1 As Long, ub1 As Long
+    Dim lb2 As Long, ub2 As Long
+    On Error Resume Next
+    lb1 = LBound(arr1)
+    ub1 = UBound(arr1)
+    lb2 = LBound(arr2)
+    ub2 = UBound(arr2)
+    If Err.Number <> 0 Then
+        Err.Clear
+        ' 空数组处理
+        On Error GoTo NotEqual
+        Dim test1 As Long, test2 As Long
+        On Error Resume Next
+        test1 = UBound(arr1)
+        Dim isEmpty1 As Boolean: isEmpty1 = (Err.Number <> 0)
+        Err.Clear
+        test2 = UBound(arr2)
+        Dim isEmpty2 As Boolean: isEmpty2 = (Err.Number <> 0)
+        Err.Clear
+        On Error GoTo NotEqual
+        ' 两个都是空数组则相等
+        CompareVariantArrays = (isEmpty1 And isEmpty2)
+        Exit Function
+    End If
+    On Error GoTo NotEqual
+    ' 长度不同
+    If (ub1 - lb1) <> (ub2 - lb2) Then
+        CompareVariantArrays = False
+        Exit Function
+    End If
+    ' 逐元素比较
+    Dim i As Long
+    For i = 0 To (ub1 - lb1)
+        Dim v1 As Variant, v2 As Variant
+        v1 = arr1(lb1 + i)
+        v2 = arr2(lb2 + i)
+        ' 递归比较（处理嵌套数组）
+        If IsArray(v1) Or IsArray(v2) Then
+            If Not CompareVariantArrays(v1, v2) Then
+                CompareVariantArrays = False
+                Exit Function
+            End If
+        ElseIf IsObject(v1) Or IsObject(v2) Then
+            ' 对象比较：简单判断是否同一引用
+            If Not (v1 Is v2) Then
+                CompareVariantArrays = False
+                Exit Function
+            End If
+        Else
+            ' 值比较
+            If VarType(v1) <> VarType(v2) Then
+                CompareVariantArrays = False
+                Exit Function
+            End If
+            If v1 <> v2 Then
+                CompareVariantArrays = False
+                Exit Function
+            End If
+        End If
+    Next i
+
+    CompareVariantArrays = True
+    Exit Function
+NotEqual:
+    CompareVariantArrays = False
+End Function
+
+' 辅助函数：比较两个 Resume 参数规格是否相等
+Private Function CompareResumeSpecs(spec1 As Variant, spec2 As Variant) As Boolean
+    On Error GoTo NotEqual
+
+    ' 处理非数组情况
+    If Not IsArray(spec1) And Not IsArray(spec2) Then
+        CompareResumeSpecs = True  ' 两者都为空
+        Exit Function
+    End If
+
+    If IsArray(spec1) Xor IsArray(spec2) Then
+        CompareResumeSpecs = False
+        Exit Function
+    End If
+
+    ' 获取边界
+    Dim lb1 As Long, ub1 As Long
+    Dim lb2 As Long, ub2 As Long
+
+    On Error Resume Next
+    lb1 = LBound(spec1)
+    ub1 = UBound(spec1)
+    lb2 = LBound(spec2)
+    ub2 = UBound(spec2)
+
+    If Err.Number <> 0 Then
+        Err.Clear
+        ' 检查是否都是空数组
+        Dim test1 As Long, test2 As Long
+        On Error Resume Next
+        test1 = UBound(spec1)
+        Dim isEmpty1 As Boolean: isEmpty1 = (Err.Number <> 0)
+        Err.Clear
+        test2 = UBound(spec2)
+        Dim isEmpty2 As Boolean: isEmpty2 = (Err.Number <> 0)
+        Err.Clear
+        On Error GoTo NotEqual
+
+        CompareResumeSpecs = (isEmpty1 And isEmpty2)
+        Exit Function
+    End If
+    On Error GoTo NotEqual
+
+    ' 长度不同
+    If (ub1 - lb1) <> (ub2 - lb2) Then
+        CompareResumeSpecs = False
+        Exit Function
+    End If
+
+    ' 逐元素比较
+    Dim i As Long
+    For i = 0 To (ub1 - lb1)
+        Dim item1 As Variant, item2 As Variant
+        item1 = spec1(lb1 + i)
+        item2 = spec2(lb2 + i)
+
+        ' 检查是否都是 Dictionary
+        If TypeName(item1) = "Dictionary" And TypeName(item2) = "Dictionary" Then
+            Dim dict1 As Object, dict2 As Object
+            Set dict1 = item1
+            Set dict2 = item2
+
+            ' 比较 Dictionary 的关键字段
+            If dict1.Exists("isRange") And dict2.Exists("isRange") Then
+                ' 都是 Range 引用
+                If dict1("address") <> dict2("address") Then
+                    CompareResumeSpecs = False
+                    Exit Function
+                End If
+                If dict1("workbook") <> dict2("workbook") Then
+                    CompareResumeSpecs = False
+                    Exit Function
+                End If
+                If dict1("worksheet") <> dict2("worksheet") Then
+                    CompareResumeSpecs = False
+                    Exit Function
+                End If
+            Else
+                ' 其他 Dictionary，简单比较键数量
+                If dict1.Count <> dict2.Count Then
+                    CompareResumeSpecs = False
+                    Exit Function
+                End If
+            End If
+        ElseIf TypeName(item1) <> TypeName(item2) Then
+            ' 类型不同
+            CompareResumeSpecs = False
+            Exit Function
+        Else
+            ' 普通值比较
+            If Not IsObject(item1) And Not IsObject(item2) Then
+                If item1 <> item2 Then
+                    CompareResumeSpecs = False
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+
+    CompareResumeSpecs = True
+    Exit Function
+
+NotEqual:
+    CompareResumeSpecs = False
+End Function
+
