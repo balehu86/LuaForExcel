@@ -1285,21 +1285,25 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
         value = value.value
     Loop
 
-    Select Case True
-        Case IsArray(value)
-            PushArray L, value
-        Case IsEmpty(value), IsNull(value)
+    Select Case VarType(value)
+        Case vbEmpty, vbNull
             lua_pushnil L
-        Case VarType(value) = vbBoolean
+        Case vbBoolean
             lua_pushboolean L, IIf(value, 1, 0)
-        Case IsNumeric(value)
+        Case vbByte, vbInteger, vbLong, vbSingle, vbDouble, vbCurrency, vbDecimal, vbLongLong
             lua_pushnumber L, CDbl(value)
-        Case VarType(value) = vbString
-            ' 字符串必须使用 UTF-8 转换
+        Case vbString
             LuaPushStringUTF8 L, CStr(value)
+        Case vbArray To vbArray + vbVariant
+            PushArray L, value
         Case Else
-            ' 其他类型转为字符串
-            LuaPushStringUTF8 L, CStr(value)
+            If IsArray(value) Then
+                PushArray L, value
+            ElseIf IsNumeric(value) Then
+                lua_pushnumber L, CDbl(value)
+            Else
+                LuaPushStringUTF8 L, CStr(value)
+            End If
     End Select
 End Sub
 
@@ -1398,7 +1402,7 @@ Private Function StringToUTF8(ByVal str As String) As Byte()
         StringToUTF8 = utf8Bytes
         Exit Function
     End If
-    ' 分配缓冲区（不需要额外的 null 终止符，lua_pushlstring 使用显式长度）
+    ' 分配缓冲区（lua_pushlstring 使用显式长度，不需要 null 终止符）
     ReDim utf8Bytes(0 To utf8Len - 1)
     ' 第二次调用：执行转换
     WideCharToMultiByte CP_UTF8, 0, StrPtr(str), Len(str), VarPtr(utf8Bytes(0)), utf8Len, 0, 0
@@ -1441,19 +1445,19 @@ Private Sub LuaPushStringUTF8(ByVal L As LongPtr, ByVal str As String)
     Dim utf8Bytes() As Byte
     utf8Bytes = StringToUTF8(str)
 
-    ' 获取实际的 UTF-8 字节长度
-    Dim actualLen As Long
+    ' 正确计算实际的 UTF-8 字节长度
+    Dim actualLen As LongPtr
     actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
 
-    ' 使用 lua_pushlstring 压入带长度的字符串
     lua_pushlstring L, VarPtr(utf8Bytes(0)), actualLen
 End Sub
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
     Dim ptr As LongPtr
-    Dim length As LongPtr  ' 改为 LongPtr 以匹配 64 位
+    Dim strLen As LongPtr  ' 使用 LongPtr 接收长度
 
-    ptr = lua_tolstring(L, idx, VarPtr(length))
+    strLen = 0
+    ptr = lua_tolstring(L, idx, VarPtr(strLen))
 
     If ptr = 0 Then
         GetStringFromState = vbNullString
@@ -1461,13 +1465,29 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
     End If
 
     ' length 为 0 表示空字符串
-    If length = 0 Then
+    If strLen = 0 Then
         GetStringFromState = vbNullString
         Exit Function
     End If
 
-    ' 使用 UTF-8 转换
-    GetStringFromState = UTF8PtrToString(ptr, CLng(length))
+    ' 先复制 UTF-8 字节到 VBA 数组，再转换
+    Dim utf8Bytes() As Byte
+    ReDim utf8Bytes(0 To CLng(strLen) - 1)
+    CopyMemory utf8Bytes(0), ByVal ptr, strLen
+
+    ' 计算需要的 Unicode 字符数
+    Dim nChars As Long
+    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), CLng(strLen), 0, 0)
+
+    If nChars = 0 Then
+        ' 转换失败，尝试直接当作 ASCII
+        GetStringFromState = StrConv(utf8Bytes, vbUnicode)
+        Exit Function
+    End If
+
+    ' 分配字符串缓冲区并转换
+    GetStringFromState = String$(nChars, vbNullChar)
+    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), CLng(strLen), StrPtr(GetStringFromState), nChars
 End Function
 
 ' 从 Lua 栈获取值
