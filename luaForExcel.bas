@@ -20,7 +20,7 @@ Option Explicit
     Private Declare PtrSafe Sub lua_pushnil Lib "lua54.dll" (ByVal L As LongPtr)
     Private Declare PtrSafe Sub lua_pushnumber Lib "lua54.dll" (ByVal L As LongPtr, ByVal n As Double)
     Private Declare PtrSafe Sub lua_pushstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As String)
-    Private Declare PtrSafe Sub lua_pushlstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As LongPtr, ByVal len As LongPtr)
+    Private Declare PtrSafe Sub lua_pushlstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As LongPtr, ByVal strLen As LongPtr)
     Private Declare PtrSafe Sub lua_pushboolean Lib "lua54.dll" (ByVal L As LongPtr, ByVal b As Long)
     Private Declare PtrSafe Function lua_gettop Lib "lua54.dll" (ByVal L As LongPtr) As Long
     Private Declare PtrSafe Sub lua_settop Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
@@ -34,6 +34,7 @@ Option Explicit
     Private Declare PtrSafe Function lua_next Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long) As Long
     Private Declare PtrSafe Sub lua_pushvalue Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
     Private Declare PtrSafe Function lua_getfield Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long, ByVal k As String) As Long
+    Private Declare PtrSafe Function luaL_loadbufferx Lib "lua54.dll" (ByVal L As LongPtr, ByVal buff As LongPtr, ByVal sz As LongPtr, ByVal name As LongPtr, ByVal mode As LongPtr) As Long
     ' 协程 API
     Private Declare PtrSafe Function lua_newthread Lib "lua54.dll" (ByVal L As LongPtr) As LongPtr
     Private Declare PtrSafe Function lua_resume Lib "lua54.dll" (ByVal L As LongPtr, ByVal from As LongPtr, ByVal narg As Long, ByVal nres As LongPtr) As Long
@@ -46,7 +47,7 @@ Option Explicit
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
     Private Declare PtrSafe Function GetTickCount Lib "kernel32" () As Long
     Private Declare PtrSafe Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long) As Long
-    Private Declare PtrSafe Function WideCharToMultiByte Lib "kernel32" ( ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpDefaultChar As LongPtr, ByVal lpUsedDefaultChar As LongPtr) As Long
+    Private Declare PtrSafe Function WideCharToMultiByte Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpDefaultChar As LongPtr, ByVal lpUsedDefaultChar As LongPtr) As Long
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -1430,8 +1431,11 @@ Private Sub LuaPushStringUTF8(ByVal L As LongPtr, ByVal str As String)
     Dim utf8Bytes() As Byte
     utf8Bytes = StringToUTF8(str)
 
-    ' 使用 lua_pushlstring 更安全（指定长度）
-    lua_pushlstring L, VarPtr(utf8Bytes(0)), UBound(utf8Bytes)
+    ' 注意：UBound 返回的是最后一个索引，实际长度不含 null 终止符
+    Dim actualLen As Long
+    actualLen = UBound(utf8Bytes)  ' 不含末尾的 null
+
+    lua_pushlstring L, VarPtr(utf8Bytes(0)), actualLen
 End Sub
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
