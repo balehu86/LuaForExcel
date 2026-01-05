@@ -20,6 +20,7 @@ Option Explicit
     Private Declare PtrSafe Sub lua_pushnil Lib "lua54.dll" (ByVal L As LongPtr)
     Private Declare PtrSafe Sub lua_pushnumber Lib "lua54.dll" (ByVal L As LongPtr, ByVal n As Double)
     Private Declare PtrSafe Sub lua_pushstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As String)
+    Private Declare PtrSafe Sub lua_pushlstring Lib "lua54.dll" (ByVal L As LongPtr, ByVal s As LongPtr, ByVal len As LongPtr)
     Private Declare PtrSafe Sub lua_pushboolean Lib "lua54.dll" (ByVal L As LongPtr, ByVal b As Long)
     Private Declare PtrSafe Function lua_gettop Lib "lua54.dll" (ByVal L As LongPtr) As Long
     Private Declare PtrSafe Sub lua_settop Lib "lua54.dll" (ByVal L As LongPtr, ByVal idx As Long)
@@ -45,6 +46,7 @@ Option Explicit
     Private Declare PtrSafe Function lstrlenA Lib "kernel32" (ByVal ptr As LongPtr) As Long
     Private Declare PtrSafe Function GetTickCount Lib "kernel32" () As Long
     Private Declare PtrSafe Function MultiByteToWideChar Lib "kernel32" (ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long) As Long
+    Private Declare PtrSafe Function WideCharToMultiByte Lib "kernel32" ( ByVal CodePage As Long, ByVal dwFlags As Long, ByVal lpWideCharStr As LongPtr, ByVal cchWideChar As Long, ByVal lpMultiByteStr As LongPtr, ByVal cbMultiByte As Long, ByVal lpDefaultChar As LongPtr, ByVal lpUsedDefaultChar As LongPtr) As Long
 #Else
     ' 32位版本声明（暂不提供）
 #End If
@@ -1277,11 +1279,10 @@ End Sub
 ' ============================================
 ' 统一压栈函数 - 迭代版本（避免递归）
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
-    ' 先解包 Range（迭代展开，避免递归）
     Do While TypeName(value) = "Range"
         value = value.value
     Loop
-    ' 处理实际值
+    
     Select Case True
         Case IsArray(value)
             PushArray L, value
@@ -1292,7 +1293,8 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
         Case IsNumeric(value)
             lua_pushnumber L, CDbl(value)
         Case Else
-            lua_pushstring L, CStr(value)
+            ' 使用 UTF-8 转换
+            LuaPushStringUTF8 L, CStr(value)
     End Select
 End Sub
 
@@ -1373,34 +1375,77 @@ ErrorHandler:
     SetTaskStatus task, CO_ERROR
     If coThread <> 0 Then lua_settop coThread, 0
 End Sub
+' VBA 字符串 (Unicode) -> UTF-8 字节数组
+Private Function StringToUTF8(ByVal str As String) As Byte()
+    Dim utf8Bytes() As Byte
+    Dim utf8Len As Long
+    If Len(str) = 0 Then
+        ReDim utf8Bytes(0 To 0)
+        utf8Bytes(0) = 0
+        StringToUTF8 = utf8Bytes
+        Exit Function
+    End If
+    ' 第一次调用：获取所需缓冲区大小
+    utf8Len = WideCharToMultiByte(CP_UTF8, 0, StrPtr(str), Len(str), 0, 0, 0, 0)
+    If utf8Len = 0 Then
+        ReDim utf8Bytes(0 To 0)
+        utf8Bytes(0) = 0
+        StringToUTF8 = utf8Bytes
+        Exit Function
+    End If
+    ' 分配缓冲区（+1 用于 null 终止符）
+    ReDim utf8Bytes(0 To utf8Len)
+    ' 第二次调用：执行转换
+    WideCharToMultiByte CP_UTF8, 0, StrPtr(str), Len(str), VarPtr(utf8Bytes(0)), utf8Len, 0, 0
+    ' 添加 null 终止符
+    utf8Bytes(utf8Len) = 0
+    StringToUTF8 = utf8Bytes
+End Function
+' UTF-8 字节指针 -> VBA 字符串 (已有，优化版本)
+Private Function UTF8PtrToString(ByVal ptr As LongPtr, ByVal byteLen As Long) As String
+    If ptr = 0 Or byteLen = 0 Then
+        UTF8PtrToString = vbNullString
+        Exit Function
+    End If
+    ' 计算需要的 Unicode 字符数
+    Dim nChars As Long
+    nChars = MultiByteToWideChar(CP_UTF8, 0, ptr, byteLen, 0, 0)
 
+    If nChars = 0 Then
+        UTF8PtrToString = vbNullString
+        Exit Function
+    End If
+
+    ' 分配字符串缓冲区并转换
+    UTF8PtrToString = String$(nChars, 0)
+    MultiByteToWideChar CP_UTF8, 0, ptr, byteLen, StrPtr(UTF8PtrToString), nChars
+End Function
+' 安全的字符串压栈（自动处理 UTF-8 转换）
+Private Sub LuaPushStringUTF8(ByVal L As LongPtr, ByVal str As String)
+    If Len(str) = 0 Then
+        lua_pushstring L, vbNullString
+        Exit Sub
+    End If
+
+    Dim utf8Bytes() As Byte
+    utf8Bytes = StringToUTF8(str)
+
+    ' 使用 lua_pushlstring 更安全（指定长度）
+    lua_pushlstring L, VarPtr(utf8Bytes(0)), UBound(utf8Bytes)
+End Sub
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
     Dim ptr As LongPtr
     Dim length As Long
 
     ptr = lua_tolstring(L, idx, VarPtr(length))
-    If ptr = 0 Then
+
+    If ptr = 0 Or length = 0 Then
         GetStringFromState = vbNullString
         Exit Function
     End If
-
-    If length = 0 Then
-        GetStringFromState = vbNullString
-        Exit Function
-    End If
-
-    ' 使用Windows API转换UTF-8
-    ' 计算需要的缓冲区大小
-    Dim nChars As Long
-    nChars = MultiByteToWideChar(CP_UTF8, 0, ptr, length, 0, 0)
-
-    If nChars > 0 Then
-        ' 分配字符串缓冲区
-        GetStringFromState = String$(nChars, 0)
-        ' 执行转换
-        MultiByteToWideChar CP_UTF8, 0, ptr, length, StrPtr(GetStringFromState), nChars
-    End If
+    ' 使用优化后的 UTF-8 转换
+    GetStringFromState = UTF8PtrToString(ptr, length)
 End Function
 
 ' 从 Lua 栈获取值
