@@ -1122,7 +1122,7 @@ Private Sub LuaDebugMenu_ShowWatchStatus()
     Next
 
     If orphanCount > 0 Then
-        msg = msg & vbCrLf & "⚠️ 发现 " & orphanCount & " 个孤儿监控！" & vbCrLf
+        msg = msg & vbCrLf & "警告： 发现 " & orphanCount & " 个孤儿监控！" & vbCrLf
         msg = msg & "建议使用【清理孤儿监控】功能清理。" & vbCrLf
     End If
 

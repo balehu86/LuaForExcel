@@ -1410,7 +1410,6 @@ ErrorHandler:
     If coThread <> 0 Then lua_settop coThread, 0
 End Sub
 
-
 ' 解析 yield/return 字典
 Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boolean) As Boolean
     On Error Resume Next
@@ -1447,24 +1446,44 @@ Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As 
 
             Select Case key
                 Case "status"
-                    ' 记录 Lua 显式设置了状态
+                    ' Lua 显式设置状态
                     Dim statusVal As String
                     statusVal = LCase(Trim(CStr(value)))
-                    If Not isFinal Then
-                        Select Case statusVal
-                            Case "yield"
+                    ' 根据 isFinal 和 statusVal 决定状态
+                    Select Case statusVal
+                        Case "yield"
+                            ' yield 返回 status="yield" -> CO_YIELD（继续调度）
+                            If Not isFinal Then
                                 SetTaskStatus task, CO_YIELD
-                                ParseYieldReturn = True  ' 标记已设置
-                            Case "done"
-                                SetTaskStatus task, CO_DONE
                                 ParseYieldReturn = True
-                            Case "error"
-                                SetTaskStatus task, CO_ERROR
-                                ParseYieldReturn = True
-                            Case Else
-                                SetTaskStatus task, CO_YIELD ' 默认为yielded
-                        End Select
-                    End If
+                            End If
+                        Case "paused"
+                            ' yield 返回 status="paused" -> CO_PAUSED（暂停，不调度）
+                            SetTaskStatus task, CO_PAUSED
+                            ParseYieldReturn = True
+                        Case "defined"
+                            ' return 返回 status="defined" -> CO_DEFINED（重置为初始状态）
+                            ' 注意：这会释放协程，需要重新启动
+                            SetTaskStatus task, CO_DEFINED
+                            ParseYieldReturn = True
+                        Case "done"
+                            ' 显式完成
+                            SetTaskStatus task, CO_DONE
+                            ParseYieldReturn = True
+                        Case "error"
+                            ' 显式错误
+                            SetTaskStatus task, CO_ERROR
+                            ParseYieldReturn = True
+                        Case "terminated"
+                            ' 显式终止（完全删除任务）
+                            SetTaskStatus task, CO_TERMINATED
+                            ParseYieldReturn = True
+                        Case Else
+                            ' 未知状态值，yield 时默认继续
+                            If Not isFinal Then
+                                SetTaskStatus task, CO_YIELD
+                            End If
+                    End Select
                 Case "progress"
                     On Error Resume Next
                     task.taskProgress = CDbl(value)
@@ -1473,6 +1492,9 @@ Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As 
                     task.taskMessage = CStr(value)
                 Case "value"
                     task.taskValue = value
+                Case "error"
+                    ' 允许 Lua 设置错误消息
+                    task.taskError = CStr(value)
                 Case "write"
                     ' 动态写入处理（保留）
             End Select
