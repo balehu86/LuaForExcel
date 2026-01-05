@@ -1280,10 +1280,11 @@ End Sub
 ' ============================================
 ' 统一压栈函数 - 迭代版本（避免递归）
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
+    ' 处理 Range 对象：获取其值
     Do While TypeName(value) = "Range"
         value = value.value
     Loop
-    
+
     Select Case True
         Case IsArray(value)
             PushArray L, value
@@ -1293,8 +1294,11 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
             lua_pushboolean L, IIf(value, 1, 0)
         Case IsNumeric(value)
             lua_pushnumber L, CDbl(value)
+        Case VarType(value) = vbString
+            ' 字符串必须使用 UTF-8 转换
+            LuaPushStringUTF8 L, CStr(value)
         Case Else
-            ' 使用 UTF-8 转换
+            ' 其他类型转为字符串
             LuaPushStringUTF8 L, CStr(value)
     End Select
 End Sub
@@ -1394,73 +1398,94 @@ Private Function StringToUTF8(ByVal str As String) As Byte()
         StringToUTF8 = utf8Bytes
         Exit Function
     End If
-    ' 分配缓冲区（+1 用于 null 终止符）
-    ReDim utf8Bytes(0 To utf8Len)
+    ' 分配缓冲区（不需要额外的 null 终止符，lua_pushlstring 使用显式长度）
+    ReDim utf8Bytes(0 To utf8Len - 1)
     ' 第二次调用：执行转换
     WideCharToMultiByte CP_UTF8, 0, StrPtr(str), Len(str), VarPtr(utf8Bytes(0)), utf8Len, 0, 0
-    ' 添加 null 终止符
-    utf8Bytes(utf8Len) = 0
     StringToUTF8 = utf8Bytes
 End Function
 ' UTF-8 字节指针 -> VBA 字符串 (已有，优化版本)
 Private Function UTF8PtrToString(ByVal ptr As LongPtr, ByVal byteLen As Long) As String
-    If ptr = 0 Or byteLen = 0 Then
+    If ptr = 0 Or byteLen <= 0 Then
         UTF8PtrToString = vbNullString
         Exit Function
     End If
+
+    ' 先复制 UTF-8 字节到 VBA 数组
+    Dim utf8Bytes() As Byte
+    ReDim utf8Bytes(0 To byteLen - 1)
+    CopyMemory utf8Bytes(0), ByVal ptr, byteLen
+
     ' 计算需要的 Unicode 字符数
     Dim nChars As Long
-    nChars = MultiByteToWideChar(CP_UTF8, 0, ptr, byteLen, 0, 0)
+    nChars = MultiByteToWideChar(CP_UTF8, 0, VarPtr(utf8Bytes(0)), byteLen, 0, 0)
 
     If nChars = 0 Then
-        UTF8PtrToString = vbNullString
+        ' 如果转换失败，尝试直接返回 ASCII
+        UTF8PtrToString = StrConv(utf8Bytes, vbUnicode)
         Exit Function
     End If
 
     ' 分配字符串缓冲区并转换
-    UTF8PtrToString = String$(nChars, 0)
-    MultiByteToWideChar CP_UTF8, 0, ptr, byteLen, StrPtr(UTF8PtrToString), nChars
+    UTF8PtrToString = String$(nChars, vbNullChar)
+    MultiByteToWideChar CP_UTF8, 0, VarPtr(utf8Bytes(0)), byteLen, StrPtr(UTF8PtrToString), nChars
 End Function
 ' 安全的字符串压栈（自动处理 UTF-8 转换）
 Private Sub LuaPushStringUTF8(ByVal L As LongPtr, ByVal str As String)
     If Len(str) = 0 Then
-        lua_pushstring L, vbNullString
+        ' 空字符串：压入空的 Lua 字符串
+        lua_pushlstring L, 0, 0
         Exit Sub
     End If
 
     Dim utf8Bytes() As Byte
     utf8Bytes = StringToUTF8(str)
 
-    ' 注意：UBound 返回的是最后一个索引，实际长度不含 null 终止符
+    ' 获取实际的 UTF-8 字节长度
     Dim actualLen As Long
-    actualLen = UBound(utf8Bytes)  ' 不含末尾的 null
+    actualLen = UBound(utf8Bytes) - LBound(utf8Bytes) + 1
 
+    ' 使用 lua_pushlstring 压入带长度的字符串
     lua_pushlstring L, VarPtr(utf8Bytes(0)), actualLen
 End Sub
 ' 从 Lua 栈获取字符串
 Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As String
     Dim ptr As LongPtr
-    Dim length As Long
+    Dim length As LongPtr  ' 改为 LongPtr 以匹配 64 位
 
     ptr = lua_tolstring(L, idx, VarPtr(length))
 
-    If ptr = 0 Or length = 0 Then
+    If ptr = 0 Then
         GetStringFromState = vbNullString
         Exit Function
     End If
-    ' 使用优化后的 UTF-8 转换
-    GetStringFromState = UTF8PtrToString(ptr, length)
+
+    ' length 为 0 表示空字符串
+    If length = 0 Then
+        GetStringFromState = vbNullString
+        Exit Function
+    End If
+
+    ' 使用 UTF-8 转换
+    GetStringFromState = UTF8PtrToString(ptr, CLng(length))
 End Function
 
 ' 从 Lua 栈获取值
 Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
     Select Case lua_type(L, idx)
-        Case LUA_TNIL: GetValue = Empty
-        Case LUA_TBOOLEAN: GetValue = (lua_toboolean(L, idx) <> 0)
-        Case LUA_TNUMBER: GetValue = lua_tonumberx(L, idx, 0)
-        Case LUA_TSTRING: GetValue = GetStringFromState(L, idx)
-        Case LUA_TTABLE: GetValue = TableToVariant(L, idx)
-        Case Else: GetValue = "#LUA_TYPE_" & lua_type(L, idx)
+        Case LUA_TNIL
+            GetValue = Empty
+        Case LUA_TBOOLEAN
+            GetValue = (lua_toboolean(L, idx) <> 0)
+        Case LUA_TNUMBER
+            GetValue = lua_tonumberx(L, idx, 0)
+        Case LUA_TSTRING
+            ' 使用 UTF-8 安全的字符串获取
+            GetValue = GetStringFromState(L, idx)
+        Case LUA_TTABLE
+            GetValue = TableToVariant(L, idx)
+        Case Else
+            GetValue = "#LUA_TYPE_" & lua_type(L, idx)
     End Select
 End Function
 
@@ -1670,13 +1695,14 @@ End Function
 ' 解析 yield/return 字典
 Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boolean)
     On Error Resume Next
-    ' 如果不是数组,直接作为value处理
+
+    ' 如果不是数组，直接作为 value 处理
     If Not IsArray(data) Then
         task.taskValue = data
         Exit Sub
     End If
 
-    ' 检查是否为字典格式(二维数组,第二维为2列)
+    ' 检查是否为字典格式（二维数组，第二维为2列）
     Dim isDictionary As Boolean
     isDictionary = False
 
@@ -1688,13 +1714,14 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
     End If
     On Error GoTo 0
 
-    ' 如果是字典格式,解析键值对
+    ' 如果是字典格式，解析键值对
     If isDictionary Then
         Dim i As Long
         For i = LBound(data, 1) To UBound(data, 1)
             Dim key As String
             Dim value As Variant
 
+            ' 键已经是正确的 Unicode 字符串（来自 GetStringFromState）
             key = LCase(Trim(CStr(data(i, 1))))
             value = data(i, 2)
 
@@ -1721,15 +1748,16 @@ Private Sub ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boole
                     task.taskProgress = CDbl(value)
                     On Error GoTo 0
                 Case "message"
-                    task.taskMessage = value
+                    ' value 已经是正确的 Unicode 字符串
+                    task.taskMessage = CStr(value)
                 Case "value"
                     task.taskValue = value
                 Case "write"
-                    ' 动态写入目标会在写入函数中处理
+                    ' 动态写入处理
             End Select
         Next
     Else
-        ' 如果不是字典格式,整个数组作为value
+        ' 不是字典格式，整个数组作为 value
         task.taskValue = data
     End If
 End Sub
