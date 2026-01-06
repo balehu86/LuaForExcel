@@ -439,143 +439,110 @@ End Function
 ' 任务定义函数
 Public Function LuaTask(ParamArray params() As Variant) As String
     On Error GoTo ErrorHandler
-
     If Not InitLuaState() Then
         LuaTask = "#ERROR: Lua未初始化"
         Exit Function
     End If
-
     If UBound(params) < 0 Then
         LuaTask = "#ERROR: 需要函数名"
         Exit Function
     End If
-
     ' 获取调用单元格地址和工作簿/工作表
     Dim taskCell As String
     Dim wbName As String
     Dim callerWb As Workbook
     Dim callerWs As Worksheet
-
     On Error Resume Next
     taskCell = Application.Caller.Address(External:=True)
     Set callerWb = Application.Caller.Worksheet.Parent
     Set callerWs = Application.Caller.Worksheet
     On Error GoTo ErrorHandler
-
     ' 检查调用者工作簿是否存在
     If callerWb Is Nothing Then
         LuaTask = "#ERROR: 无法获取调用工作簿"
         Exit Function
     End If
-
     ' 防止在xlam文件中创建任务
     If callerWb.FileFormat = xlAddIn Then
         LuaTask = "#ERROR: 不能在宏文件中创建任务"
         Exit Function
     End If
-
     wbName = callerWb.Name
-
     ' ========== 解析参数 ==========
     Dim funcName As String
     funcName = CStr(params(0))
-
     Dim startList As Object
     Dim resumeList As Object
     Set startList = CreateObject("System.Collections.ArrayList")
     Set resumeList = CreateObject("System.Collections.ArrayList")
-
     ' 遍历参数，用布尔标记区分阶段
     Dim isResumePhase As Boolean
     isResumePhase = False
-
     Dim i As Long
-    Dim currentParam As Variant
     Dim isSeparator As Boolean
     Dim rangeInfo As Object
-    Dim paramHandled As Boolean
-
     For i = 1 To UBound(params)
-        paramHandled = False
-
-        ' 正确处理 Missing 值
-        ' 检查参数是否缺失（空位置）
         If IsMissing(params(i)) Then
             ' 空参数位置，作为 nil 处理
             If Not isResumePhase Then
                 startList.Add Empty  ' 启动参数阶段：添加 Empty（会被转换为 nil）
             Else
-                ' Resume 参数阶段：也添加 Empty
                 resumeList.Add Empty
             End If
-            paramHandled = True
-        End If
-
-        If Not paramHandled Then
-            currentParam = params(i)
-
-            ' 检查是否是分隔符 "|"
+        Else
+            ' 先检查是否是分隔符（必须在检查 Range 之前）
             isSeparator = False
-            If Not IsEmpty(currentParam) Then
-                If VarType(currentParam) = vbString Then
-                    If CStr(currentParam) = "|" Then
+            If Not IsObject(params(i)) Then
+                If VarType(params(i)) = vbString Then
+                    If CStr(params(i)) = "|" Then
                         isSeparator = True
                     End If
                 End If
             End If
-
             If isSeparator Then
-                ' 遇到分隔符，切换到 Resume 阶段
                 isResumePhase = True
             ElseIf Not isResumePhase Then
-                ' 启动参数阶段：Range 直接取值
-                If TypeName(currentParam) = "Range" Then
-                    startList.Add currentParam.Value
+                ' 启动参数：Range 取值，其他直接存储
+                If TypeName(params(i)) = "Range" Then
+                    startList.Add params(i).Value
                 Else
-                    startList.Add currentParam
+                    startList.Add params(i)
                 End If
             Else
-                ' Resume 参数阶段：保留 Range 对象引用
-                If TypeName(currentParam) = "Range" Then
+                ' Resume 参数：Range 存储地址信息，其他直接存储
+                If TypeName(params(i)) = "Range" Then
                     Set rangeInfo = CreateObject("Scripting.Dictionary")
                     rangeInfo("isRange") = True
-                    rangeInfo("address") = currentParam.Address(False, False)
-                    rangeInfo("workbook") = currentParam.Worksheet.Parent.Name
-                    rangeInfo("worksheet") = currentParam.Worksheet.Name
-                    rangeInfo("cellCount") = currentParam.Cells.Count
+                    rangeInfo("address") = params(i).Address(False, False)
+                    rangeInfo("workbook") = params(i).Worksheet.Parent.Name
+                    rangeInfo("worksheet") = params(i).Worksheet.Name
+                    rangeInfo("cellCount") = params(i).Cells.Count
                     resumeList.Add rangeInfo
                 Else
-                    resumeList.Add currentParam
+                    resumeList.Add params(i)
                 End If
             End If
         End If
     Next i
-
     ' 转换为数组
     Dim startArgs As Variant
     Dim resumeSpec As Variant
-
     If startList.Count > 0 Then
         startArgs = startList.ToArray()
     Else
         startArgs = Array()
     End If
-
     If resumeList.Count > 0 Then
         resumeSpec = resumeList.ToArray()
     Else
         resumeSpec = Array()
     End If
-
     ' ========== 检查是否已存在任务 ==========
     Dim existingTaskId As String
     existingTaskId = FindTaskByCell(taskCell)
-
     If existingTaskId <> vbNullString Then
-        ' 已存在任务，校验参数是否变化
         Dim existingTask As TaskUnit
         Set existingTask = g_Tasks(existingTaskId)
-
         Dim paramsChanged As Boolean
         paramsChanged = False
         ' 校验函数名
@@ -586,7 +553,7 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         If Not paramsChanged Then
             paramsChanged = Not CompareVariantArrays(existingTask.taskStartArgs, startArgs)
         End If
-        ' 校验 Resume 参数规格
+        ' 校验 Resume 参数规格（比较地址，不比较值）
         If Not paramsChanged Then
             paramsChanged = Not CompareResumeSpecs(existingTask.taskResumeSpec, resumeSpec)
         End If
@@ -599,11 +566,9 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         LogDebug "LuaTask: 参数变化，删除旧任务 " & existingTaskId
         SetTaskStatus existingTask, CO_TERMINATED
     End If
-
     ' ========== 创建新任务 ==========
     Dim taskIdStr As String
     taskIdStr = "Task_" & CStr(g_NextTaskId)
-
     Dim task As New TaskUnit
     With task
         .taskId = g_NextTaskId
@@ -624,16 +589,11 @@ Public Function LuaTask(ParamArray params() As Variant) As String
         .CFS_weight = 1024
         .CFS_vruntime = g_CFS_minVruntime
     End With
-
-    ' 解析 Resume 参数规格
     task.ParseResumeSpecs resumeSpec, callerWb, callerWs
-
     g_Tasks.Add taskIdStr, task
-
     LuaTask = taskIdStr
     g_NextTaskId = g_NextTaskId + 1
     Exit Function
-
 ErrorHandler:
     Debug.Print "LuaTask Error: " & Err.Number & " - " & Err.Description
     LuaTask = "#ERROR: " & Err.Description
@@ -2309,10 +2269,13 @@ End Function
 ' 辅助函数：比较两个 Resume 参数规格是否相等
 Private Function CompareResumeSpecs(spec1 As Variant, spec2 As Variant) As Boolean
     On Error GoTo NotEqual
-
     ' 处理非数组情况
     If Not IsArray(spec1) And Not IsArray(spec2) Then
-        CompareResumeSpecs = True  ' 两者都为空
+        If IsObject(spec1) Or IsObject(spec2) Then
+            CompareResumeSpecs = False
+        Else
+            CompareResumeSpecs = (spec1 = spec2)
+        End If
         Exit Function
     End If
 
@@ -2324,16 +2287,11 @@ Private Function CompareResumeSpecs(spec1 As Variant, spec2 As Variant) As Boole
     ' 获取边界
     Dim lb1 As Long, ub1 As Long
     Dim lb2 As Long, ub2 As Long
-
     On Error Resume Next
-    lb1 = LBound(spec1)
-    ub1 = UBound(spec1)
-    lb2 = LBound(spec2)
-    ub2 = UBound(spec2)
-
+    lb1 = LBound(spec1): ub1 = UBound(spec1)
+    lb2 = LBound(spec2): ub2 = UBound(spec2)
     If Err.Number <> 0 Then
         Err.Clear
-        ' 检查是否都是空数组
         Dim test1 As Long, test2 As Long
         On Error Resume Next
         test1 = UBound(spec1)
@@ -2343,7 +2301,6 @@ Private Function CompareResumeSpecs(spec1 As Variant, spec2 As Variant) As Boole
         Dim isEmpty2 As Boolean: isEmpty2 = (Err.Number <> 0)
         Err.Clear
         On Error GoTo NotEqual
-
         CompareResumeSpecs = (isEmpty1 And isEmpty2)
         Exit Function
     End If
@@ -2358,19 +2315,23 @@ Private Function CompareResumeSpecs(spec1 As Variant, spec2 As Variant) As Boole
     ' 逐元素比较
     Dim i As Long
     For i = 0 To (ub1 - lb1)
-        Dim item1 As Variant, item2 As Variant
-        item1 = spec1(lb1 + i)
-        item2 = spec2(lb2 + i)
-
-        ' 检查是否都是 Dictionary
-        If TypeName(item1) = "Dictionary" And TypeName(item2) = "Dictionary" Then
+        Dim idx1 As Long, idx2 As Long
+        idx1 = lb1 + i
+        idx2 = lb2 + i
+        ' 检查两边是否都是 Dictionary
+        Dim isDict1 As Boolean, isDict2 As Boolean
+        isDict1 = (TypeName(spec1(idx1)) = "Dictionary")
+        isDict2 = (TypeName(spec2(idx2)) = "Dictionary")
+        If isDict1 And isDict2 Then
             Dim dict1 As Object, dict2 As Object
-            Set dict1 = item1
-            Set dict2 = item2
-
-            ' 比较 Dictionary 的关键字段
-            If dict1.Exists("isRange") And dict2.Exists("isRange") Then
-                ' 都是 Range 引用
+            Set dict1 = spec1(idx1)
+            Set dict2 = spec2(idx2)
+            ' 都是 Range 引用：只比较地址
+            Dim isRange1 As Boolean, isRange2 As Boolean
+            isRange1 = False: isRange2 = False
+            If dict1.Exists("isRange") Then isRange1 = (dict1("isRange") = True)
+            If dict2.Exists("isRange") Then isRange2 = (dict2("isRange") = True)
+            If isRange1 And isRange2 Then
                 If dict1("address") <> dict2("address") Then
                     CompareResumeSpecs = False
                     Exit Function
@@ -2383,31 +2344,35 @@ Private Function CompareResumeSpecs(spec1 As Variant, spec2 As Variant) As Boole
                     CompareResumeSpecs = False
                     Exit Function
                 End If
-            Else
-                ' 其他 Dictionary，简单比较键数量
-                If dict1.Count <> dict2.Count Then
-                    CompareResumeSpecs = False
-                    Exit Function
-                End If
+                GoTo NextParam
             End If
-        ElseIf TypeName(item1) <> TypeName(item2) Then
-            ' 类型不同
+            ' 其他 Dictionary
+            If dict1.Count <> dict2.Count Then
+                CompareResumeSpecs = False
+                Exit Function
+            End If
+            GoTo NextParam
+        ElseIf isDict1 Or isDict2 Then
+            ' 一个是 Dictionary 一个不是
             CompareResumeSpecs = False
             Exit Function
-        Else
-            ' 普通值比较
-            If Not IsObject(item1) And Not IsObject(item2) Then
-                If item1 <> item2 Then
-                    CompareResumeSpecs = False
-                    Exit Function
-                End If
+        End If
+        ' 非 Dictionary 比较
+        If TypeName(spec1(idx1)) <> TypeName(spec2(idx2)) Then
+            CompareResumeSpecs = False
+            Exit Function
+        End If
+        If Not IsObject(spec1(idx1)) And Not IsObject(spec2(idx2)) Then
+            If spec1(idx1) <> spec2(idx2) Then
+                CompareResumeSpecs = False
+                Exit Function
             End If
         End If
-    Next i
 
+NextParam:
+    Next i
     CompareResumeSpecs = True
     Exit Function
-
 NotEqual:
     CompareResumeSpecs = False
 End Function
