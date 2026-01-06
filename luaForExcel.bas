@@ -65,10 +65,8 @@ Private Const LUA_ERRRUN = 2
 Private Const LUA_REFNIL As Long = -1 ' luaL_ref 对 nil 值的返回
 Private Const LUA_NOREF As Long = -2 ' 无效引用
 ' ===== 参数规格类型常量（供 TaskUnit 使用）=====
-Public Const PARAM_LITERAL As Long = 0          ' 字面量（数值、布尔、普通字符串）
-Public Const PARAM_RANGE_REF As Long = 1        ' 单元格区域引用（Range 对象传入）
-Public Const PARAM_DYNAMIC_STRING As Long = 2   ' 动态字符串（"$B1" 格式）
-Public Const PARAM_INDIRECT_REF As Long = 3     ' 间接引用（"$$C1" 格式，指针的指针）
+Public Const PARAM_LITERAL As Long = 0    ' 字面量（数值、布尔、普通字符串）
+Public Const PARAM_REF As Long = 1        ' 单元格区域引用（Range 对象传入）,引用类型（level字段决定解引用层数）
 ' ===== 全局变量 =====
 Private g_LuaState As LongPtr         ' lua 栈
 Private g_Initialized As Boolean      ' 是否初始化

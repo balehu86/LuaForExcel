@@ -26,7 +26,7 @@ Public CFS_lastScheduled As Double ' 上次被调度的时间戳（GetTickCount�
 ' task 的监视器集合
 Public taskWatches As Collection ' 任务监视的Watchcell字符串的集合
 
-Private m_ResumeSpecParsed As Variant  ' 
+Private m_ResumeSpecParsed As Variant
 
 Private Sub Class_Initialize()
     taskCoRef = 0
@@ -45,35 +45,24 @@ End Sub
 
 ' 添加监控单元格
 Public Sub AddWatch(watchCell As String)
-    Dim alreadyExists As Boolean
-    alreadyExists = False
-
     Dim i As Long
     On Error Resume Next
     For i = 1 To Me.taskWatches.Count
-        If Me.taskWatches(i) = watchCell Then
-            alreadyExists = True
-            Exit For
-        End If
+        If Me.taskWatches(i) = watchCell Then Exit Sub
     Next i
     On Error GoTo 0
-
-    If Not alreadyExists Then
-        Me.taskWatches.Add watchCell
-    End If
+    Me.taskWatches.Add watchCell
 End Sub
 
-' 移除监控单元格
 Public Sub RemoveWatch(watchCell As String)
-    On Error Resume Next
     Dim i As Long
+    On Error Resume Next
     For i = Me.taskWatches.Count To 1 Step -1
         If Me.taskWatches(i) = watchCell Then
             Me.taskWatches.Remove i
-            Exit For
+            Exit Sub
         End If
     Next i
-    On Error GoTo 0
 End Sub
 
 ' 获取解析后的参数规格（只读属性）
@@ -81,333 +70,235 @@ Public Property Get ResumeSpecParsed() As Variant
     ResumeSpecParsed = m_ResumeSpecParsed
 End Property
 
-' 简化后的参数规格解析
+' 统一参数规格解析
 ' 参数类型：
-'   PARAM_LITERAL (0)        - 字面量（数值、布尔、普通字符串）
-'   PARAM_RANGE_REF (1)      - 单元格/区域引用
-'   PARAM_DYNAMIC_STRING (2) - 动态字符串（"$B1" 格式）
+'   PARAM_LITERAL (0)    - 字面量（数值、布尔、普通字符串）
+'   PARAM_REF (1)        - 单元格/区域引用（$数量=0，来自Range对象或Dictionary）,动态引用（$数量>=1，存储引用层数）
 Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As Worksheet)
     On Error GoTo ErrorHandler
 
     ' 安全获取数组边界
-    Dim lowerBound As Long, upperBound As Long
+    Dim lb As Long, ub As Long
     On Error Resume Next
-    lowerBound = LBound(specs)
-    upperBound = UBound(specs)
-    If Err.Number <> 0 Then
-        Err.Clear
-        On Error GoTo ErrorHandler
-        m_ResumeSpecParsed = Array()
-        Exit Sub
-    End If
+    lb = LBound(specs): ub = UBound(specs)
+    If Err.Number <> 0 Then m_ResumeSpecParsed = Array(): Exit Sub
     On Error GoTo ErrorHandler
 
-    If upperBound < lowerBound Then
-        m_ResumeSpecParsed = Array()
-        Exit Sub
-    End If
+    If ub < lb Then m_ResumeSpecParsed = Array(): Exit Sub
 
-    Dim parsedSpecs() As Variant
-    ReDim parsedSpecs(lowerBound To upperBound)
+    Dim parsed() As Variant
+    ReDim parsed(lb To ub)
 
-    Dim i As Long
-    Dim spec As Object
-    Dim specProcessed As Boolean
-    Dim dictParam As Object
-    Dim rangeParam As Range
-    Dim strParam As String
-    Dim refString As String
-    Dim wbName As String, wsName As String, addr As String
+    Dim i As Long, dollarCount As Long
+    Dim spec As Object, dictParam As Object
+    Dim strParam As String, refStr As String
+    Dim wbN As String, wsN As String, addr As String
+    Dim defWb As String, defWs As String
+    defWb = callerWb.Name: defWs = callerWs.Name
 
-    For i = lowerBound To upperBound
+    For i = lb To ub
         Set spec = CreateObject("Scripting.Dictionary")
-        specProcessed = False
 
-        ' 先检查是否为 Empty 或 Missing =====
-        If IsEmpty(specs(i)) Then
+        ' Empty/Missing -> 字面量nil
+        If IsEmpty(specs(i)) Or IsMissing(specs(i)) Then
             spec("type") = PARAM_LITERAL
-            spec("value") = Empty  ' 空值作为字面量 nil
-            specProcessed = True
+            spec("value") = Empty
+            GoTo NextSpec
         End If
 
-        If Not specProcessed Then
-            If IsMissing(specs(i)) Then
+        Select Case TypeName(specs(i))
+            Case "Dictionary"
+                Set dictParam = specs(i)
+                If dictParam.Exists("isRange") And dictParam("isRange") = True Then
+                    spec("type") = PARAM_REF
+                    spec("level") = 0  ' 直接引用
+                    spec("address") = dictParam("address")
+                    spec("workbook") = dictParam("workbook")
+                    spec("worksheet") = dictParam("worksheet")
+                Else
+                    spec("type") = PARAM_LITERAL
+                    Set spec("value") = dictParam
+                End If
+
+            Case "Range"
+                spec("type") = PARAM_REF
+                spec("level") = 0
+                spec("address") = specs(i).Address(False, False)
+                spec("workbook") = specs(i).Worksheet.Parent.Name
+                spec("worksheet") = specs(i).Worksheet.Name
+
+            Case "String"
+                strParam = CStr(specs(i))
+                dollarCount = CountDollars(strParam)
+                If dollarCount >= 1 Then
+                    ' 引用类型：level = dollarCount - 1
+                    ' $addr -> level=0 (直接读addr)
+                    ' $$addr -> level=1 (读addr得到ptr1,读ptr1)
+                    ' $$$addr -> level=2 (读addr得ptr1,读ptr1得ptr2,读ptr2)
+                    spec("type") = PARAM_REF
+                    spec("level") = dollarCount - 1
+                    refStr = Mid(strParam, dollarCount + 1)
+                    spec("refString") = refStr
+                    ParseRefString refStr, wbN, wsN, addr, defWb, defWs
+                    spec("workbook") = wbN
+                    spec("worksheet") = wsN
+                    spec("address") = addr
+                Else
+                    spec("type") = PARAM_LITERAL
+                    spec("value") = strParam
+                End If
+
+            Case "Empty", "Nothing"
                 spec("type") = PARAM_LITERAL
-                spec("value") = Empty  ' Missing 也作为 nil
-                specProcessed = True
-            End If
-        End If
+                spec("value") = Empty
 
-        If Not specProcessed Then
-            Select Case TypeName(specs(i))
-                Case "Dictionary"
-                    ' Dictionary 类型：检查是否是 Range 信息
-                    Set dictParam = specs(i)
-
-                    If dictParam.Exists("isRange") And dictParam("isRange") = True Then
-                        ' Range 引用信息
-                        spec("type") = PARAM_RANGE_REF
-                        spec("address") = dictParam("address")
-                        spec("workbook") = dictParam("workbook")
-                        spec("worksheet") = dictParam("worksheet")
-                    Else
-                        ' 普通 Dictionary，作为字面量
-                        spec("type") = PARAM_LITERAL
-                        Set spec("value") = dictParam
-                    End If
-
-                Case "Range"
-                    ' Range 对象（理论上不会出现，因为 LuaTask 已转换为 Dictionary）
-                    Set rangeParam = specs(i)
-                    spec("type") = PARAM_RANGE_REF
-                    spec("address") = rangeParam.Address(False, False)
-                    spec("workbook") = rangeParam.Worksheet.Parent.Name
-                    spec("worksheet") = rangeParam.Worksheet.Name
-
-                Case "String"
-                    ' 字符串：检查是否是动态引用
-                    strParam = CStr(specs(i))
-
-                    If Len(strParam) > 1 And Left(strParam, 2) = "$$" Then
-                        ' 间接引用格式 "$$C1"（指针的指针）
-                        spec("type") = PARAM_INDIRECT_REF
-                        refString = Mid(strParam, 3)  ' 去掉 $$
-                        spec("refString") = refString
-
-                        ' 解析并存储完整引用信息（这是指针单元格的地址）
-                        ParseReferenceString refString, wbName, wsName, addr, _
-                                            callerWb.Name, callerWs.Name
-                        spec("workbook") = wbName
-                        spec("worksheet") = wsName
-                        spec("address") = addr
-
-                    ElseIf Len(strParam) > 0 And Left(strParam, 1) = "$" Then
-                        ' 动态引用格式 "$B1"
-                        spec("type") = PARAM_DYNAMIC_STRING
-                        refString = Mid(strParam, 2)
-                        spec("refString") = refString
-
-                        ' 解析并存储完整引用信息
-                        ParseReferenceString refString, wbName, wsName, addr, _
-                                            callerWb.Name, callerWs.Name
-                        spec("workbook") = wbName
-                        spec("worksheet") = wsName
-                        spec("address") = addr
-                    Else
-                        ' 普通字符串
-                        spec("type") = PARAM_LITERAL
-                        spec("value") = strParam
-                    End If
-
-                Case "Empty", "Nothing"
-                    ' 显式处理 Empty 类型名
-                    spec("type") = PARAM_LITERAL
-                    spec("value") = Empty
-
-                Case Else
-                    ' 其他类型（数值、布尔等）作为字面量
-                    spec("type") = PARAM_LITERAL
-                    spec("value") = specs(i)
-            End Select
-        End If
-
-        Set parsedSpecs(i) = spec
+            Case Else
+                spec("type") = PARAM_LITERAL
+                spec("value") = specs(i)
+        End Select
+NextSpec:
+        Set parsed(i) = spec
     Next i
 
-    m_ResumeSpecParsed = parsedSpecs
+    m_ResumeSpecParsed = parsed
     Exit Sub
-
 ErrorHandler:
-    Debug.Print "TaskUnit.ParseResumeSpecs Error: " & Err.Description
     m_ResumeSpecParsed = Array()
 End Sub
 
 ' 获取 Resume 时的实际参数值
 Public Function GetResumeArgs() As Variant
-    On Error GoTo ErrorHandler
+    On Error GoTo ErrHandler
 
-    If Not IsArray(m_ResumeSpecParsed) Then
-        GetResumeArgs = Array()
-        Exit Function
-    End If
+    If Not IsArray(m_ResumeSpecParsed) Then GetResumeArgs = Array(): Exit Function
 
-    Dim lowerBound As Long, upperBound As Long
+    Dim lb As Long, ub As Long
     On Error Resume Next
-    lowerBound = LBound(m_ResumeSpecParsed)
-    upperBound = UBound(m_ResumeSpecParsed)
-    If Err.Number <> 0 Then
-        Err.Clear
-        On Error GoTo ErrorHandler
-        GetResumeArgs = Array()
-        Exit Function
-    End If
-    On Error GoTo ErrorHandler
+    lb = LBound(m_ResumeSpecParsed): ub = UBound(m_ResumeSpecParsed)
+    If Err.Number <> 0 Then GetResumeArgs = Array(): Exit Function
+    On Error GoTo ErrHandler
 
-    If upperBound < lowerBound Then
-        GetResumeArgs = Array()
-        Exit Function
-    End If
+    If ub < lb Then GetResumeArgs = Array(): Exit Function
 
-    Dim resultArgs() As Variant
-    ReDim resultArgs(lowerBound To upperBound)
+    Dim result() As Variant
+    ReDim result(lb To ub)
 
-    Dim i As Long
-    For i = lowerBound To upperBound
-        Dim spec As Object
+    Dim i As Long, specType As Long, level As Long
+    Dim spec As Object
+
+    For i = lb To ub
         Set spec = m_ResumeSpecParsed(i)
-
-        Dim specType As Long
         specType = CLng(spec("type"))
 
         Select Case specType
             Case PARAM_LITERAL
                 If IsObject(spec("value")) Then
-                    Set resultArgs(i) = spec("value")
+                    Set result(i) = spec("value")
                 Else
-                    resultArgs(i) = spec("value")
+                    result(i) = spec("value")
                 End If
-            Case PARAM_RANGE_REF, PARAM_DYNAMIC_STRING
-                ' 直接引用：读取指定单元格的值
-                resultArgs(i) = ReadRangeValue( _
-                    CStr(spec("workbook")), _
-                    CStr(spec("worksheet")), _
-                    CStr(spec("address")) _
-                )
-            Case PARAM_INDIRECT_REF
-                ' 间接引用：先读取指针单元格的内容，再读取目标单元格的值
-                resultArgs(i) = ReadIndirectValue( _
-                    CStr(spec("workbook")), _
-                    CStr(spec("worksheet")), _
-                    CStr(spec("address")), _
-                    CStr(spec("workbook")), _
-                    CStr(spec("worksheet")) _
-                )
+
+            Case PARAM_REF
+                level = CLng(spec("level"))
+                result(i) = ResolveRef(spec("workbook"), spec("worksheet"), spec("address"), level)
+
             Case Else
-                resultArgs(i) = Empty
+                result(i) = Empty
         End Select
     Next i
 
-    GetResumeArgs = resultArgs
+    GetResumeArgs = result
     Exit Function
-
-ErrorHandler:
-    Debug.Print "TaskUnit.GetResumeArgs Error: " & Err.Description
+ErrHandler:
     GetResumeArgs = Array()
 End Function
 
-' ===== 私有辅助函数 =====
+' ===== 内联辅助函数 =====
 
-Private Function ReadRangeValue(wbName As String, wsName As String, cellAddress As String) As Variant
-    On Error GoTo ErrorHandler
-
-    Dim targetWb As Workbook
-    On Error Resume Next
-    Set targetWb = Application.Workbooks(wbName)
-    On Error GoTo ErrorHandler
-
-    If targetWb Is Nothing Then
-        ReadRangeValue = CVErr(xlErrRef)
-        Exit Function
-    End If
-
-    Dim targetWs As Worksheet
-    On Error Resume Next
-    Set targetWs = targetWb.Sheets(wsName)
-    On Error GoTo ErrorHandler
-
-    If targetWs Is Nothing Then
-        ReadRangeValue = CVErr(xlErrRef)
-        Exit Function
-    End If
-
-    Dim targetRange As Range
-    On Error Resume Next
-    Set targetRange = targetWs.Range(cellAddress)
-    On Error GoTo ErrorHandler
-
-    If targetRange Is Nothing Then
-        ReadRangeValue = CVErr(xlErrRef)
-        Exit Function
-    End If
-
-    ReadRangeValue = targetRange.Value
-    Exit Function
-
-ErrorHandler:
-    ReadRangeValue = CVErr(xlErrRef)
+Private Function CountDollars(s As String) As Long
+    Dim c As Long, i As Long
+    For i = 1 To Len(s)
+        If Mid$(s, i, 1) = "$" Then c = c + 1 Else Exit For
+    Next
+    CountDollars = c
 End Function
 
-Private Sub ParseReferenceString(refString As String, _
-                                  ByRef outWbName As String, _
-                                  ByRef outWsName As String, _
-                                  ByRef outCellAddress As String, _
-                                  defaultWbName As String, _
-                                  defaultWsName As String)
-    outWbName = defaultWbName
-    outWsName = defaultWsName
-    outCellAddress = refString
+' 解析引用字符串 [Book]Sheet!Addr
+Private Sub ParseRefString(ref As String, ByRef wb As String, ByRef ws As String, _
+                           ByRef addr As String, defWb As String, defWs As String)
+    wb = defWb: ws = defWs: addr = ref
+    Dim r As String, p As Long
+    r = ref
 
-    Dim remaining As String
-    remaining = refString
-
-    ' 解析工作簿 [BookName]
-    If Len(remaining) > 0 And Left(remaining, 1) = "[" Then
-        Dim bracketEnd As Long
-        bracketEnd = InStr(remaining, "]")
-        If bracketEnd > 1 Then
-            outWbName = Mid(remaining, 2, bracketEnd - 2)
-            remaining = Mid(remaining, bracketEnd + 1)
-        End If
+    ' [BookName]
+    If Len(r) > 0 And Left$(r, 1) = "[" Then
+        p = InStr(r, "]")
+        If p > 1 Then wb = Mid$(r, 2, p - 2): r = Mid$(r, p + 1)
     End If
 
-    ' 解析工作表 SheetName!
-    Dim exclamPos As Long
-    exclamPos = InStr(remaining, "!")
-    If exclamPos > 0 Then
-        outWsName = Replace(Left(remaining, exclamPos - 1), "'", "")
-        outCellAddress = Mid(remaining, exclamPos + 1)
+    ' SheetName!
+    p = InStr(r, "!")
+    If p > 0 Then
+        ws = Replace$(Left$(r, p - 1), "'", "")
+        addr = Mid$(r, p + 1)
     Else
-        outCellAddress = remaining
+        addr = r
     End If
 End Sub
 
-' 辅助函数：读取间接引用的值（指针的指针）
-' pointerWb/pointerWs/pointerAddr: 指针单元格的位置
-' defaultWb/defaultWs: 如果指针内容不包含完整路径时的默认值
-Private Function ReadIndirectValue(pointerWb As String, pointerWs As String, pointerAddr As String, _
-                                    defaultWb As String, defaultWs As String) As Variant
-    On Error GoTo ErrorHandler
+' 统一的引用解析（支持多层）
+' level=0: 直接读取addr的值
+' level>0: 循环解引用level次
+Private Function ResolveRef(wb As String, ws As String, addr As String, level As Long) As Variant
+    Const MAX_DEPTH As Long = 10
 
-    ' 第一步：读取指针单元格的内容
-    Dim pointerContent As Variant
-    pointerContent = ReadRangeValue(pointerWb, pointerWs, pointerAddr)
+    On Error GoTo ErrH
 
-    If IsError(pointerContent) Then
-        ReadIndirectValue = pointerContent
-        Exit Function
-    End If
+    If level > MAX_DEPTH Then ResolveRef = CVErr(xlErrRef): Exit Function
 
-    If IsEmpty(pointerContent) Or Len(Trim(CStr(pointerContent))) = 0 Then
-        ReadIndirectValue = CVErr(xlErrRef)
-        Exit Function
-    End If
+    Dim curWb As String, curWs As String, curAddr As String
+    Dim content As Variant, ptr As String
+    Dim lv As Long
 
-    ' 第二步：解析指针内容为地址
-    Dim targetWb As String, targetWs As String, targetAddr As String
-    Dim pointerStr As String
-    pointerStr = Trim(CStr(pointerContent))
+    curWb = wb: curWs = ws: curAddr = addr
 
-    ' 处理指针内容中的 $ 前缀（如果有）
-    If Left(pointerStr, 1) = "$" Then
-        pointerStr = Mid(pointerStr, 2)
-    End If
+    ' 循环解引用 level 次
+    For lv = 1 To level
+        content = ReadCell(curWb, curWs, curAddr)
+        If IsError(content) Then ResolveRef = content: Exit Function
+        If IsEmpty(content) Or Len(Trim$(CStr(content))) = 0 Then
+            ResolveRef = CVErr(xlErrRef): Exit Function
+        End If
 
-    ParseReferenceString pointerStr, targetWb, targetWs, targetAddr, defaultWb, defaultWs
+        ' 解析指针内容
+        ptr = Trim$(CStr(content))
+        ' 去掉内容中的前导$
+        Do While Len(ptr) > 0 And Left$(ptr, 1) = "$"
+            ptr = Mid$(ptr, 2)
+        Loop
+        If Len(ptr) = 0 Then ResolveRef = CVErr(xlErrRef): Exit Function
 
-    ' 第三步：读取目标单元格的值
-    ReadIndirectValue = ReadRangeValue(targetWb, targetWs, targetAddr)
+        ' 解析为下一地址
+        ParseRefString ptr, curWb, curWs, curAddr, curWb, curWs
+    Next lv
+
+    ' 读取最终值
+    ResolveRef = ReadCell(curWb, curWs, curAddr)
     Exit Function
+ErrH:
+    ResolveRef = CVErr(xlErrRef)
+End Function
 
-ErrorHandler:
-    ReadIndirectValue = CVErr(xlErrRef)
+' 读取单元格值（内联优化版）
+Private Function ReadCell(wbName As String, wsName As String, cellAddr As String) As Variant
+    Dim w As Workbook, s As Worksheet, r As Range
+    On Error Resume Next
+    Set w = Application.Workbooks(wbName)
+    If w Is Nothing Then ReadCell = CVErr(xlErrRef): Exit Function
+    Set s = w.Sheets(wsName)
+    If s Is Nothing Then ReadCell = CVErr(xlErrRef): Exit Function
+    Set r = s.Range(cellAddr)
+    If r Is Nothing Then ReadCell = CVErr(xlErrRef): Exit Function
+    On Error GoTo 0
+    ReadCell = r.Value
 End Function
