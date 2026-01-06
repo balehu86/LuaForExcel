@@ -367,3 +367,57 @@ end
    - g_MaxIterationsPerTick: 每次调度执行的任务数
    - g_SchedulerIntervalSec: 调度间隔（秒）
 ]]
+
+
+-- 去重累加函数：只有当值变化时才累加
+-- 参数：
+--   taskCell: 任务单元格地址（自动传入）
+--   initialValue（可选）: 累加的起始值，默认为0
+-- Resume参数：
+--   要读取的数值（来自单元格引用）
+function accumulate(taskCell, initialValue)
+    local sum = initialValue or 0
+    local count = 0
+    local lastValue = nil  -- 记录上一次的值
+
+    -- 首次 yield，等待第一个值
+    local input = coroutine.yield({
+        status = "yield",
+        progress = count,
+        message = "等待输入...",
+        value = sum
+    })
+
+    while true do
+        local num = tonumber(input)
+
+        -- 只有当值存在且与上次不同时才累加
+        if num ~= nil and num ~= lastValue then
+            sum = sum + num
+            count = count + 1
+            lastValue = num
+
+            input = coroutine.yield({
+                status = "yield",
+                progress = count,
+                message = string.format("新增: %s, 已累加 %d 次", num, count),
+                value = sum
+            })
+        else
+            -- 值未变化，不累加
+            local msg
+            if num == nil then
+                msg = "无效输入，跳过"
+            else
+                msg = string.format("值未变化(%s)，跳过", num)
+            end
+
+            input = coroutine.yield({
+                status = "yield",
+                progress = count,
+                message = msg,
+                value = sum
+            })
+        end
+    end
+end
