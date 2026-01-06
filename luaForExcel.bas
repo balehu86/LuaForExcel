@@ -1147,41 +1147,27 @@ End Sub
 
 ' CFS 调度核心算法 - 支持两种模式
 Private Sub ScheduleByCFS()
-    If g_TaskQueue.Count = 0 Then Exit Sub
-    Dim tickBudget As Double ' 本次调度时间预算
-    Dim taskStart As Double, taskElapsed As Double
-    Dim selectedTask As TaskUnit
-    Dim taskCount As Long
-    Dim totalElapsed As Double
-    Dim idealSlice As Double
-    Dim continueLoop As Boolean
-    ' 统计活跃任务数
-    taskCount = g_ActiveTaskCount
-    If taskCount = 0 Then Exit Sub
-    ' 计算本次 tick 的时间预算和理想时间片
-    tickBudget = g_CFS_targetLatency
-    idealSlice = tickBudget / taskCount
-    If idealSlice < g_CFS_minGranularity Then idealSlice = g_CFS_minGranularity
-    totalElapsed = 0
+    If g_TaskQueue.Count = 0 Or g_ActiveTaskCount = 0 Then Exit Sub
+
+    Dim tickBudget As Double: tickBudget = g_CFS_targetLatency
+    Dim idealSlice As Double: idealSlice = IIf(tickBudget / g_ActiveTaskCount < g_CFS_minGranularity, _
+                                                g_CFS_minGranularity, tickBudget / g_ActiveTaskCount)
+    Dim totalElapsed As Double: totalElapsed = 0
+
     Do
-        ' 1. 选择 vruntime 最小的任务
-        Set selectedTask = CFS_PickNextTask()
+        Dim selectedTask As TaskUnit: Set selectedTask = CFS_PickNextTask()
         If selectedTask Is Nothing Then Exit Do
-        ' 2. 执行任务
-        taskStart = GetTickCount()
+
+        Dim taskStart As Double: taskStart = GetTickCount()
         ResumeCoroutine selectedTask
-        taskElapsed = GetTickCount() - taskStart
+        Dim taskElapsed As Double: taskElapsed = GetTickCount() - taskStart
         If taskElapsed < g_CFS_minGranularity Then taskElapsed = g_CFS_minGranularity
         totalElapsed = totalElapsed + taskElapsed
-        ' 3. 更新 vruntime 并重新排序（只有任务仍在队列中才更新）
-        If selectedTask.taskStatus = CO_YIELD Then
-            CFS_UpdateVruntime selectedTask, taskElapsed
-        End If
-        ' 4. 自动权重调整
-        If g_CFS_autoWeight Then
-            CFS_AutoAdjustWeight selectedTask, taskElapsed, idealSlice
-        End If
-        ' 5. 更新工作簿统计
+
+        If selectedTask.taskStatus = CO_YIELD Then CFS_UpdateVruntime selectedTask, taskElapsed
+        If g_CFS_autoWeight Then CFS_AutoAdjustWeight selectedTask, taskElapsed, idealSlice
+
+        ' 更新工作簿统计
         If g_Workbooks.Exists(selectedTask.taskWorkbook) Then
             With g_Workbooks(selectedTask.taskWorkbook)
                 .wbLastTime = taskElapsed
@@ -1189,19 +1175,7 @@ Private Sub ScheduleByCFS()
                 .wbTickCount = .wbTickCount + 1
             End With
         End If
-        ' 6. 根据调度模式决定是否继续循环
-        Select Case g_ScheduleMode
-            Case SCHEDULE_MODE_SINGLE
-                ' 单轮模式：执行一个任务后立即退出
-                continueLoop = False
-            Case SCHEDULE_MODE_TIMESLICE
-                ' 时间片模式：继续执行直到用完时间预算或队列为空
-                continueLoop = (totalElapsed < tickBudget) And (g_TaskQueue.Count > 0)
-            Case Else
-                ' 默认单轮模式
-                continueLoop = False
-        End Select
-    Loop While continueLoop
+    Loop While (g_ScheduleMode = SCHEDULE_MODE_TIMESLICE) And (totalElapsed < tickBudget) And (g_TaskQueue.Count > 0)
 End Sub
 ' 自动调整任务权重
 Private Sub CFS_AutoAdjustWeight(task As TaskUnit, actualTime As Double, idealSlice As Double)
@@ -1406,49 +1380,22 @@ End Sub
 ' 处理协程返回结果
 Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long)
     On Error GoTo ErrorHandler
-    Dim coThread As LongPtr
-    coThread = task.taskCoThread
-    Dim stackTopBefore As Long
-    stackTopBefore = lua_gettop(coThread)
-    Select Case result
-        Case LUA_OK
-            If nres > 0 And stackTopBefore > 0 Then
-                Dim retData As Variant
-                retData = GetValue(coThread, -1)
-                ParseYieldReturn task, retData, True
-            End If
-            ' 只有 ParseYieldReturn 没有设置状态时才设置 DONE
-            If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
-                SetTaskStatus task, CO_DONE
-            End If
+    Dim coThread As LongPtr: coThread = task.taskCoThread
+    Dim hasResult As Boolean: hasResult = (nres > 0 And lua_gettop(coThread) > 0)
 
-        Case LUA_YIELD
-            ' 先解析返回值，让 ParseYieldReturn 决定状态
-            Dim statusSetByLua As Boolean
-            statusSetByLua = False
+    If result = LUA_OK Or result = LUA_YIELD Then
+        If hasResult Then
+            Dim statusSet As Boolean
+            statusSet = ParseYieldReturn(task, GetValue(coThread, -1), (result = LUA_OK))
+        End If
+        If Not statusSet Then
+            SetTaskStatus task, IIf(result = LUA_OK, CO_DONE, CO_YIELD)
+        End If
+    Else
+        task.taskError = IIf(hasResult, GetStringFromState(coThread, -1), "协程错误: 代码 " & result)
+        SetTaskStatus task, CO_ERROR
+    End If
 
-            If nres > 0 And stackTopBefore > 0 Then
-                Dim yieldData As Variant
-                yieldData = GetValue(coThread, -1)
-                ' 传入标记，让 ParseYieldReturn 记录是否设置了状态
-                statusSetByLua = ParseYieldReturn(task, yieldData, False)
-            End If
-
-            ' 只有 Lua 没有显式设置状态时，才默认设置为 YIELD
-            If Not statusSetByLua Then
-                If task.taskStatus <> CO_DONE And task.taskStatus <> CO_ERROR Then
-                    SetTaskStatus task, CO_YIELD
-                End If
-            End If
-
-        Case Else
-            If nres > 0 And stackTopBefore > 0 Then
-                task.taskError = GetStringFromState(coThread, -1)
-            Else
-                task.taskError = "协程错误: 代码 " & result
-            End If
-            SetTaskStatus task, CO_ERROR
-    End Select
     lua_settop coThread, 0
     Exit Sub
 ErrorHandler:
@@ -1460,96 +1407,60 @@ End Sub
 ' 解析 yield/return 字典
 Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As Boolean) As Boolean
     On Error Resume Next
+    ParseYieldReturn = False
 
-    ParseYieldReturn = False  ' 默认没有设置状态
-
-    ' 如果不是数组，直接作为 value 处理
+    ' 非数组直接作为 value
     If Not IsArray(data) Then
         task.taskValue = data
         Exit Function
     End If
 
     ' 检查是否为字典格式（二维数组，第二维为2列）
-    Dim isDictionary As Boolean
-    isDictionary = False
-
-    On Error Resume Next
     Dim cols As Long
     cols = UBound(data, 2) - LBound(data, 2) + 1
-    If Err.Number = 0 And cols = 2 Then
-        isDictionary = True
-    End If
-    On Error GoTo 0
-
-    ' 如果是字典格式，解析键值对
-    If isDictionary Then
-        Dim i As Long
-        For i = LBound(data, 1) To UBound(data, 1)
-            Dim key As String
-            Dim value As Variant
-
-            key = LCase(Trim(CStr(data(i, 1))))
-            value = data(i, 2)
-
-            Select Case key
-                Case "status"
-                    ' Lua 显式设置状态
-                    Dim statusVal As String
-                    statusVal = LCase(Trim(CStr(value)))
-                    ' 根据 isFinal 和 statusVal 决定状态
-                    Select Case statusVal
-                        Case "yield"
-                            ' yield 返回 status="yield" -> CO_YIELD（继续调度）
-                            If Not isFinal Then
-                                SetTaskStatus task, CO_YIELD
-                                ParseYieldReturn = True
-                            End If
-                        Case "paused"
-                            ' yield 返回 status="paused" -> CO_PAUSED（暂停，不调度）
-                            SetTaskStatus task, CO_PAUSED
-                            ParseYieldReturn = True
-                        Case "defined"
-                            ' return 返回 status="defined" -> CO_DEFINED（重置为初始状态）
-                            ' 注意：这会释放协程，需要重新启动
-                            SetTaskStatus task, CO_DEFINED
-                            ParseYieldReturn = True
-                        Case "done"
-                            ' 显式完成
-                            SetTaskStatus task, CO_DONE
-                            ParseYieldReturn = True
-                        Case "error"
-                            ' 显式错误
-                            SetTaskStatus task, CO_ERROR
-                            ParseYieldReturn = True
-                        Case "terminated"
-                            ' 显式终止（完全删除任务）
-                            SetTaskStatus task, CO_TERMINATED
-                            ParseYieldReturn = True
-                        Case Else
-                            ' 未知状态值，yield 时默认继续
-                            If Not isFinal Then
-                                SetTaskStatus task, CO_YIELD
-                            End If
-                    End Select
-                Case "progress"
-                    On Error Resume Next
-                    task.taskProgress = CDbl(value)
-                    On Error GoTo 0
-                Case "message"
-                    task.taskMessage = CStr(value)
-                Case "value"
-                    task.taskValue = value
-                Case "error"
-                    ' 允许 Lua 设置错误消息
-                    task.taskError = CStr(value)
-                Case "write"
-                    ' 动态写入处理（保留）
-            End Select
-        Next
-    Else
-        ' 不是字典格式，整个数组作为 value
+    If Err.Number <> 0 Or cols <> 2 Then
+        Err.Clear
         task.taskValue = data
+        Exit Function
     End If
+
+    ' 解析字典键值对
+    Dim i As Long, key As String, value As Variant
+    For i = LBound(data, 1) To UBound(data, 1)
+        key = LCase(Trim(CStr(data(i, 1))))
+        value = data(i, 2)
+
+        Select Case key
+            Case "progress"
+                task.taskProgress = CDbl(value)
+            Case "message"
+                task.taskMessage = CStr(value)
+            Case "value"
+                task.taskValue = value
+            Case "error"
+                task.taskError = CStr(value)
+            Case "status"
+                ParseYieldReturn = True  ' 标记 Lua 显式设置了状态
+                Select Case LCase(Trim(CStr(value)))
+                    Case "yield"
+                        If Not isFinal Then SetTaskStatus task, CO_YIELD
+                    Case "paused"
+                        SetTaskStatus task, CO_PAUSED
+                    Case "defined"
+                        SetTaskStatus task, CO_DEFINED
+                    Case "done"
+                        SetTaskStatus task, CO_DONE
+                    Case "error"
+                        SetTaskStatus task, CO_ERROR
+                    Case "terminated"
+                        SetTaskStatus task, CO_TERMINATED
+                    Case Else
+                        ' 未知状态值，yield 时默认继续
+                        If Not isFinal Then SetTaskStatus task, CO_YIELD
+                        ParseYieldReturn = False
+                End Select
+        End Select
+    Next
 End Function
 
 ' 统一压栈函数 - 迭代版本（避免递归）

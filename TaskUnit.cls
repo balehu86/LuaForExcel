@@ -338,62 +338,34 @@ End Sub
 ' 解析引用（支持多层间接引用）
 ' level=0: 直接读取 addr 的值（$A1）
 ' level=1: 读取 addr 得到新地址，再读取新地址的值（$$A1）
-' level=2: 读取 addr 得到地址1，读取地址1得到地址2，读取地址2的值（$$$A1）
 Private Function ResolveRef(wb As String, ws As String, addr As String, level As Long) As Variant
     Const MAX_DEPTH As Long = 10
-    On Error GoTo ErrH
-
-    If level < 0 Or level > MAX_DEPTH Then
+    If level < 0 Or level > MAX_DEPTH Or Len(wb) = 0 Or Len(ws) = 0 Or Len(addr) = 0 Then
         ResolveRef = CVErr(xlErrRef)
         Exit Function
     End If
 
-    If Len(wb) = 0 Or Len(ws) = 0 Or Len(addr) = 0 Then
-        ResolveRef = CVErr(xlErrRef)
-        Exit Function
-    End If
-
-    Dim curWb As String, curWs As String, curAddr As String
-    Dim content As Variant, ptr As String
-
-    curWb = wb: curWs = ws: curAddr = addr
+    Dim curWb As String: curWb = wb
+    Dim curWs As String: curWs = ws  
+    Dim curAddr As String: curAddr = addr
+    Dim content As Variant
 
     Dim lv As Long
     For lv = 1 To level
         ' 读取当前单元格，获取下一层地址
         content = ReadCellValue(curWb, curWs, curAddr)
-
-        If IsError(content) Then
-            ResolveRef = content  ' 传递错误
-            Exit Function
+        If IsError(content) Or IsEmpty(content) Or IsNull(content) Then
+            ResolveRef = CVErr(xlErrRef): Exit Function
         End If
-
-        If IsEmpty(content) Or IsNull(content) Then
-            ResolveRef = CVErr(xlErrRef)
-            Exit Function
-        End If
-
-        ptr = Trim$(CStr(content))
-
         ' 去掉前导$符号（内容可能是 "$K1" 或 "$$K1" 等）
-        Do While Len(ptr) > 0 And Left$(ptr, 1) = "$"
-            ptr = Mid$(ptr, 2)
-        Loop
+        Dim ptr As String: ptr = Trim$(CStr(content))
+        Do While Len(ptr) > 0 And Left$(ptr, 1) = "$": ptr = Mid$(ptr, 2): Loop
+        If Len(ptr) = 0 Then ResolveRef = CVErr(xlErrRef): Exit Function
 
-        If Len(ptr) = 0 Then
-            ResolveRef = CVErr(xlErrRef)
-            Exit Function
-        End If
-
-        ' 解析得到的地址
         ParseRefString ptr, curWb, curWs, curAddr, curWb, curWs
     Next lv
 
-    ' 最后读取最终值
     ResolveRef = ReadCellValue(curWb, curWs, curAddr)
-    Exit Function
-ErrH:
-    ResolveRef = CVErr(xlErrRef)
 End Function
 
 ' 读取单元格值
