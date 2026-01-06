@@ -62,6 +62,8 @@ Private Const LUA_TFUNCTION = 6
 Private Const LUA_OK = 0
 Private Const LUA_YIELD = 1
 Private Const LUA_ERRRUN = 2
+Private Const LUA_REFNIL As Long = -1 ' luaL_ref 对 nil 值的返回
+Private Const LUA_NOREF As Long = -2 ' 无效引用
 ' ===== 参数规格类型常量（供 TaskUnit 使用）=====
 Public Const PARAM_LITERAL As Long = 0          ' 字面量（数值、布尔、普通字符串）
 Public Const PARAM_RANGE_REF As Long = 1        ' 单元格区域引用（Range 对象传入）
@@ -985,39 +987,48 @@ Public Sub StartLuaCoroutine(taskId As String)
         MsgBox "错误：任务已启动或已完成，当前状态: " & StatusToString(task.taskStatus), vbExclamation
         Exit Sub
     End If
-    
-    ' ★ 修复1：保存主状态机栈顶
+
+    ' 保存主状态机栈顶
     Dim mainStackTop As Long
     mainStackTop = lua_gettop(g_LuaState)
-    
-    ' 创建协程并锚定到注册表
+
+    ' 创建协程线程（压入主栈）
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
     If coThread = 0 Then
         task.taskError = "无法创建协程线程"
         SetTaskStatus task, CO_ERROR
-        lua_settop g_LuaState, mainStackTop  ' ★ 恢复主栈
+        lua_settop g_LuaState, mainStackTop
         Exit Sub
     End If
 
-    ' ★ 修复2：luaL_ref 会弹出栈顶的 thread，这是正确的
-    task.taskCoRef = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
+    ' luaL_ref 会弹出栈顶的 thread 并返回引用号
+    Dim refResult As Long
+    refResult = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
+
+    ' 检查引用是否成功
+    If refResult = LUA_REFNIL Or refResult = LUA_NOREF Then
+        task.taskError = "无法创建协程引用 (ref=" & refResult & ")"
+        SetTaskStatus task, CO_ERROR
+        lua_settop g_LuaState, mainStackTop
+        Exit Sub
+    End If
+
+    task.taskCoRef = refResult
     task.taskCoThread = coThread
 
-    ' 获取函数并移动到协程栈
+    ' 获取函数并检查
     lua_getglobal g_LuaState, task.taskFunc
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
         task.taskError = "函数 '" & task.taskFunc & "' 不存在"
         SetTaskStatus task, CO_ERROR
-        lua_settop g_LuaState, mainStackTop  ' ★ 恢复主栈
+        lua_settop g_LuaState, mainStackTop
         Exit Sub
     End If
 
+    ' 将函数移动到协程栈
     lua_xmove g_LuaState, coThread, 1
-    
-    ' ★ xmove 后恢复主栈（函数已移走）
-    lua_settop g_LuaState, mainStackTop
-    
+
     ' 压入第一个参数：任务单元格地址
     PushUTF8ToState coThread, task.taskCell
 
@@ -1029,8 +1040,8 @@ Public Sub StartLuaCoroutine(taskId As String)
     startArgs = task.taskStartArgs
     If IsArray(startArgs) Then
         Dim i As Long
-        On Error Resume Next
         Dim lb As Long, ub As Long
+        On Error Resume Next
         lb = LBound(startArgs)
         ub = UBound(startArgs)
         If Err.Number = 0 Then
@@ -1039,10 +1050,13 @@ Public Sub StartLuaCoroutine(taskId As String)
                 PushValue coThread, startArgs(i)
                 nargs = nargs + 1
             Next i
+        Else
+            Err.Clear
+            On Error GoTo ErrorHandler
         End If
-        On Error GoTo ErrorHandler
     End If
 
+    ' 执行协程
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
@@ -1056,12 +1070,24 @@ Public Sub StartLuaCoroutine(taskId As String)
     End If
 
     Exit Sub
-    
+
 ErrorHandler:
-    task.taskError = "VBA错误: " & Err.Description & " (行 " & Erl & ")"
-    SetTaskStatus task, CO_ERROR
-    ' 确保错误时也恢复主栈
-    If g_LuaState <> 0 Then lua_settop g_LuaState, mainStackTop
+    Dim errMsg As String
+    errMsg = "VBA错误: " & Err.Description
+
+    ' 安全地设置错误状态
+    If Not task Is Nothing Then
+        task.taskError = errMsg
+        SetTaskStatus task, CO_ERROR
+    End If
+
+    ' 安全地恢复主栈
+    If g_LuaState <> 0 And g_Initialized Then
+        On Error Resume Next
+        lua_settop g_LuaState, mainStackTop
+        On Error GoTo 0
+    End If
+
     MsgBox "启动协程失败: " & Err.Description, vbCritical
 End Sub
 

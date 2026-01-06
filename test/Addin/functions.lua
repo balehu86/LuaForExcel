@@ -369,10 +369,17 @@ function test_error_handling(taskCell, should_error)
     }
 end
 
--- 测试函数：返回值类型测试
+-- 测试函数：返回值类型测试 OK
 function test_return_types(taskCell)
     -- 测试不同返回类型
-    
+    -- 返回字符串
+    coroutine.yield({
+        status = "yield",
+        progress = 0,
+        message = "返回字符串",
+        value = "这是测试字符串，支持中文！"
+    })
+
     -- 返回数值
     coroutine.yield({
         status = "yield",
@@ -380,40 +387,39 @@ function test_return_types(taskCell)
         message = "返回数值",
         value = 12345.678
     })
-    
-    -- 返回字符串
-    coroutine.yield({
-        status = "yield",
-        progress = 40,
-        message = "返回字符串",
-        value = "这是测试字符串，支持中文！"
-    })
-    
+
     -- 返回布尔
     coroutine.yield({
         status = "yield",
-        progress = 60,
+        progress = 40,
         message = "返回布尔",
         value = true
     })
-    
+
+    -- 返回字符串
+    coroutine.yield({
+        status = "yield",
+        progress = 60,
+        message = "返回nil",
+        value = nil
+    })
+
     -- 返回一维数组
     coroutine.yield({
         status = "yield",
         progress = 80,
         message = "返回一维数组",
-        value = {1, 2, 3, 4, 5}
+        value = {1, 2}
     })
-    
     -- 返回二维数组（表格数据）
     return {
         status = "done",
         progress = 100,
         message = "返回二维数组",
         value = {
-            {"A", "B", "C"},
-            {1, 2, 3},
-            {4, 5, 6}
+            {"A", "B"},
+            {1, 2},
+            {4, 5}
         }
     }
 end
