@@ -220,6 +220,7 @@ Private Function FormatResumeSpecs(task As TaskUnit) As String
     lb = LBound(specs)
     ub = UBound(specs)
     If Err.Number <> 0 Then
+        Err.Clear
         FormatResumeSpecs = "   (无)" & vbCrLf
         Exit Function
     End If
@@ -239,25 +240,53 @@ Private Function FormatResumeSpecs(task As TaskUnit) As String
         specType = CLng(spec("type"))
 
         Dim typeStr As String
+        Dim levelInfo As String
+        levelInfo = ""
+
         Select Case specType
-            Case PARAM_LITERAL: typeStr = "字面量"
-            Case PARAM_RANGE_REF: typeStr = "单元格/区域引用"
-            Case PARAM_DYNAMIC_STRING: typeStr = "动态字符串"
-            Case PARAM_INDIRECT_REF: typeStr = "间接引用"
-            Case Else: typeStr = "未知(" & specType & ")"
+            Case PARAM_LITERAL
+                typeStr = "字面量"
+            Case PARAM_REF
+                Dim level As Long
+                level = CLng(spec("level"))
+                Select Case level
+                    Case 0
+                        typeStr = "单元格引用"
+                    Case 1
+                        typeStr = "间接引用(1层)"
+                    Case Else
+                        typeStr = "间接引用(" & level & "层)"
+                End Select
+            Case Else
+                typeStr = "未知(" & specType & ")"
         End Select
 
         result = result & "   [" & i & "] " & typeStr
 
         Select Case specType
             Case PARAM_LITERAL
-                result = result & " = " & CStr(spec("value"))
-            Case PARAM_RANGE_REF
+                Dim valStr As String
+                If spec.Exists("value") Then
+                    If IsObject(spec("value")) Then
+                        valStr = "(对象)"
+                    ElseIf IsEmpty(spec("value")) Then
+                        valStr = "(空)"
+                    ElseIf IsArray(spec("value")) Then
+                        valStr = "(数组)"
+                    Else
+                        valStr = CStr(spec("value"))
+                        If Len(valStr) > 50 Then valStr = Left$(valStr, 47) & "..."
+                    End If
+                Else
+                    valStr = "(未定义)"
+                End If
+                result = result & " = " & valStr
+                
+            Case PARAM_REF
                 result = result & " -> [" & spec("workbook") & "]" & spec("worksheet") & "!" & spec("address")
-            Case PARAM_DYNAMIC_STRING
-                result = result & " -> $" & spec("refString")
-            Case PARAM_INDIRECT_REF
-                result = result & " -> $$" & spec("refString") & " (间接)"
+                If spec.Exists("refString") Then
+                    result = result & " (原始: " & spec("refString") & ")"
+                End If
         End Select
 
         result = result & vbCrLf
@@ -910,7 +939,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         msg = msg & "  函数: " & task.taskFunc & vbCrLf
         msg = msg & "  工作簿: " & task.taskWorkbook & vbCrLf
         msg = msg & "  单元格: " & task.taskCell & vbCrLf
-        msg = msg & "  状态: " & StatusToString task.taskStatus & vbCrLf
+        msg = msg & "  状态: " & StatusToString(task.taskStatus) & vbCrLf
         msg = msg & "  进度: " & Format(task.taskProgress, "0.0") & "%" & vbCrLf
 
         ' 显示消息
@@ -1241,7 +1270,7 @@ Private Sub LuaPerfMenu_ShowTaskStats()
         msg = msg & "【任务 #" & taskNum & "】" & vbCrLf
         msg = msg & "  ID: " & "Task_" & CStr(task.taskId) & vbCrLf
         msg = msg & "  函数: " & task.taskFunc & vbCrLf
-        msg = msg & "  状态: " & StatusToString task.taskStatus & vbCrLf
+        msg = msg & "  状态: " & StatusToString(task.taskStatus) & vbCrLf
         If task.taskTickCount = 0 Then
             msg = msg & "  (尚未执行)" & vbCrLf
         Else
