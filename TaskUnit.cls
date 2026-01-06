@@ -81,6 +81,7 @@ End Property
 ' 其他            |  0   |   -   | 字面量，直接传递
 Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As Worksheet)
     On Error GoTo ErrorHandler
+    Dim lb As Long, ub As Long
 
     ' 快速检查空数组
     If Not TryGetArrayBounds(specs, lb, ub) Then
@@ -88,7 +89,6 @@ Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As 
         Exit Sub
     End If
 
-    Dim lb As Long, ub As Long
     Dim parsed() As Variant
     ReDim parsed(lb To ub)
 
@@ -120,14 +120,34 @@ Private Function ParseSingleSpec(spec As Variant, defWb As String, defWs As Stri
         Exit Function
     End If
 
-    Select Case TypeName(spec)
+    ' 获取类型名称
+    Dim specTypeName As String
+    specTypeName = TypeName(spec)
+
+    Select Case specTypeName
         Case "Dictionary"
-            ParseDictionarySpec spec, result
+            ' 需要显式转换为 Object
+            Dim dictSpec As Object
+            Set dictSpec = spec
+            ParseDictionarySpec dictSpec, result
 
         Case "String"
             ParseStringSpec CStr(spec), result, defWb, defWs
 
+        Case "Range"
+            ' 处理 Range 对象（如果直接传入）
+            Dim rngSpec As Object
+            Set rngSpec = spec
+            result("type") = PARAM_REF
+            result("level") = 0
+            result("address") = rngSpec.Address(False, False)
+            result("workbook") = rngSpec.Worksheet.Parent.Name
+            result("worksheet") = rngSpec.Worksheet.Name
+            result("refString") = "[" & rngSpec.Worksheet.Parent.Name & "]" & _
+                                  rngSpec.Worksheet.Name & "!" & rngSpec.Address(False, False)
+
         Case Else
+            ' 其他类型作为字面量
             result("type") = PARAM_LITERAL
             If IsObject(spec) Then
                 Set result("value") = spec
@@ -141,17 +161,22 @@ End Function
 
 ' 解析 Dictionary 类型参数
 Private Sub ParseDictionarySpec(dictParam As Object, result As Object)
-    If dictParam.Exists("isRange") And dictParam("isRange") = True Then
-        result("type") = PARAM_REF
-        result("level") = 0
-        result("address") = dictParam("address")
-        result("workbook") = dictParam("workbook")
-        result("worksheet") = dictParam("worksheet")
-        result("refString") = "[" & dictParam("workbook") & "]" & dictParam("worksheet") & "!" & dictParam("address")
-    Else
-        result("type") = PARAM_LITERAL
-        Set result("value") = dictParam
+    If dictParam.Exists("isRange") Then
+        If dictParam("isRange") = True Then
+            result("type") = PARAM_REF
+            result("level") = 0
+            result("address") = dictParam("address")
+            result("workbook") = dictParam("workbook")
+            result("worksheet") = dictParam("worksheet")
+            result("refString") = "[" & dictParam("workbook") & "]" & _
+                                  dictParam("worksheet") & "!" & dictParam("address")
+            Exit Sub
+        End If
     End If
+
+    ' 非 Range 的 Dictionary，作为字面量
+    result("type") = PARAM_LITERAL
+    Set result("value") = dictParam
 End Sub
 
 ' 解析字符串类型参数
@@ -205,10 +230,18 @@ Public Function GetResumeArgs() As Variant
     Dim spec As Object
 
     For i = lb To ub
-        Set spec = m_ResumeSpecParsed(i)
-        result(i) = ResolveSpecValue(spec)
-    Next i
+        ' 显式转换为 Object
+        If IsObject(m_ResumeSpecParsed(i)) Then
+            Set spec = m_ResumeSpecParsed(i)
+        Else
+            ' 如果不是对象，跳过或处理错误
+            result(i) = Empty
+            GoTo NextSpec
+        End If
 
+        result(i) = ResolveSpecValue(spec)
+NextSpec:
+    Next i
     GetResumeArgs = result
     Exit Function
 ErrHandler:
@@ -217,7 +250,12 @@ End Function
 
 ' 解析单个规格的值
 Private Function ResolveSpecValue(spec As Object) As Variant
-    Select Case CLng(spec("type"))
+    On Error GoTo ErrH
+
+    Dim specType As Long
+    specType = CLng(spec("type"))
+
+    Select Case specType
         Case PARAM_LITERAL
             If spec.Exists("value") Then
                 If IsObject(spec("value")) Then
@@ -230,11 +268,20 @@ Private Function ResolveSpecValue(spec As Object) As Variant
             End If
 
         Case PARAM_REF
-            ResolveSpecValue = ResolveRef(spec("workbook"), spec("worksheet"), spec("address"), CLng(spec("level")))
+            Dim wb As String, ws As String, addr As String, lvl As Long
+            wb = spec("workbook")
+            ws = spec("worksheet")
+            addr = spec("address")
+            lvl = CLng(spec("level"))
+            ResolveSpecValue = ResolveRef(wb, ws, addr, lvl)
 
         Case Else
             ResolveSpecValue = Empty
     End Select
+    Exit Function
+
+ErrH:
+    ResolveSpecValue = CVErr(xlErrValue)
 End Function
 
 ' ===== 辅助函数 =====
@@ -289,10 +336,19 @@ Private Sub ParseRefString(ref As String, ByRef wb As String, ByRef ws As String
 End Sub
 
 ' 解析引用（支持多层间接引用）
+' level=0: 直接读取 addr 的值（$A1）
+' level=1: 读取 addr 得到新地址，再读取新地址的值（$$A1）
+' level=2: 读取 addr 得到地址1，读取地址1得到地址2，读取地址2的值（$$$A1）
 Private Function ResolveRef(wb As String, ws As String, addr As String, level As Long) As Variant
     Const MAX_DEPTH As Long = 10
     On Error GoTo ErrH
-    If level > MAX_DEPTH Or Len(wb) = 0 Or Len(ws) = 0 Or Len(addr) = 0 Then
+
+    If level < 0 Or level > MAX_DEPTH Then
+        ResolveRef = CVErr(xlErrRef)
+        Exit Function
+    End If
+
+    If Len(wb) = 0 Or Len(ws) = 0 Or Len(addr) = 0 Then
         ResolveRef = CVErr(xlErrRef)
         Exit Function
     End If
@@ -302,18 +358,24 @@ Private Function ResolveRef(wb As String, ws As String, addr As String, level As
 
     curWb = wb: curWs = ws: curAddr = addr
 
-    ' 循环解引用
     Dim lv As Long
     For lv = 1 To level
+        ' 读取当前单元格，获取下一层地址
         content = ReadCellValue(curWb, curWs, curAddr)
-        If IsError(content) Or IsEmpty(content) Then
+
+        If IsError(content) Then
+            ResolveRef = content  ' 传递错误
+            Exit Function
+        End If
+
+        If IsEmpty(content) Or IsNull(content) Then
             ResolveRef = CVErr(xlErrRef)
             Exit Function
         End If
 
         ptr = Trim$(CStr(content))
 
-        ' 去掉前导$符号
+        ' 去掉前导$符号（内容可能是 "$K1" 或 "$$K1" 等）
         Do While Len(ptr) > 0 And Left$(ptr, 1) = "$"
             ptr = Mid$(ptr, 2)
         Loop
@@ -323,9 +385,11 @@ Private Function ResolveRef(wb As String, ws As String, addr As String, level As
             Exit Function
         End If
 
+        ' 解析得到的地址
         ParseRefString ptr, curWb, curWs, curAddr, curWb, curWs
     Next lv
 
+    ' 最后读取最终值
     ResolveRef = ReadCellValue(curWb, curWs, curAddr)
     Exit Function
 ErrH:
@@ -337,8 +401,22 @@ Private Function ReadCellValue(wbName As String, wsName As String, cellAddr As S
     On Error GoTo ErrH
     Dim w As Workbook, s As Worksheet, r As Range
     Set w = Application.Workbooks(wbName)
+    If w Is Nothing Then
+        ReadCellValue = CVErr(xlErrRef)
+        Exit Function
+    End If
+
     Set s = w.Sheets(wsName)
+    If s Is Nothing Then
+        ReadCellValue = CVErr(xlErrRef)
+        Exit Function
+    End If
+
     Set r = s.Range(cellAddr)
+    If r Is Nothing Then
+        ReadCellValue = CVErr(xlErrRef)
+        Exit Function
+    End If
 
     ReadCellValue = r.Value
     Exit Function
