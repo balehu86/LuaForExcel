@@ -29,6 +29,7 @@ Public CFS_lastScheduled As Double ' 上次被调度的时间戳（GetTickCount�
 ' task 的监视器集合
 Public taskWatches As Collection ' 任务监视的Watchcell字符串的集合
 
+' 解析后的参数规格
 Private m_ResumeSpecParsed As Variant
 
 Private Sub Class_Initialize()
@@ -73,9 +74,10 @@ Public Property Get ResumeSpecParsed() As Variant
     ResumeSpecParsed = m_ResumeSpecParsed
 End Property
 
-' 统一参数规格解析
-' ===== 参数类型说明 =====
-' 输入格式        | type | level | 含义
+' ============================================
+' 统一参数规格解析（优化版）
+' ============================================
+' 输入格式        | type | level | 说明
 ' ----------------|------|-------|---------------------------
 ' Range对象/Dict  |  1   |   0   | 直接读取指定单元格/区域的值
 ' "$B1"           |  1   |   0   | 直接读取B1的值
@@ -155,6 +157,16 @@ Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As 
                     ' $addr -> level=0 (直接读addr)
                     ' $$addr -> level=1 (读addr得到ptr1,读ptr1)
                     ' $$$addr -> level=2 (读addr得ptr1,读ptr1得ptr2,读ptr2)
+
+                    ' 检查空引用
+                    If Len(Trim$(refStr)) = 0 Then
+                        ' 当作字面量处理
+                        spec("type") = PARAM_LITERAL
+                        spec("value") = strParam
+                        Set parsed(i) = spec
+                        GoTo NextSpec
+                    End If
+
                     spec("type") = PARAM_REF
                     spec("level") = dollarCount - 1
                     refStr = Mid$(strParam, dollarCount + 1)
@@ -276,14 +288,14 @@ Private Sub ParseRefString(ref As String, ByRef wb As String, ByRef ws As String
                            ByRef addr As String, defWb As String, defWs As String)
     wb = defWb: ws = defWs: addr = ref
     If Len(ref) = 0 Then Exit Sub
-    Dim r As String, p As Long
+    Dim r As String, p As Long, bracketEnd As Long
     r = ref
     ' [BookName] 部分
     If Left$(r, 1) = "[" Then
-        p = InStr(r, "]")
-        If p > 1 Then
-            wb = Mid$(r, 2, p - 2)
-            r = Mid$(r, p + 1)
+        bracketEnd = InStr(r, "]")
+        If bracketEnd > 1 Then
+            wb = Mid$(r, 2, bracketEnd - 2)
+            r = Mid$(r, bracketEnd + 1)
         End If
     End If
 
