@@ -1064,6 +1064,16 @@ Public Sub StartLuaCoroutine(taskId As String)
     ' 处理结果
     HandleCoroutineResult task, result, CLng(nres)
 
+    ' 启动时也要刷新监控
+    MarkWatchesDirty task
+    g_StateDirty = True
+
+    ' 首次启动时立即刷新监控（确保第一个 yield/return 的值能被写入）
+    If task.taskStatus = CO_YIELD Or task.taskStatus = CO_DONE Or task.taskStatus = CO_ERROR Then
+        RefreshWatches
+        g_StateDirty = False
+    End If
+
     ' 如果是 yield 状态，启动调度器
     If task.taskStatus = CO_YIELD Then
         StartSchedulerIfNeeded
