@@ -252,7 +252,7 @@ Private Function ValidateFunctionsFile() As Boolean
         errMsg = GetStringFromState(tempL, -1)
         lua_settop tempL, stackTop
         lua_close tempL
-        
+
         MsgBox "functions.lua 存在语法错误:" & vbCrLf & vbCrLf & _
                errMsg, vbCritical, "文件验证失败"
         ValidateFunctionsFile = False
