@@ -140,18 +140,10 @@ Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As 
                     Set spec("value") = dictParam
                 End If
 
-            Case "Range"
-                spec("type") = PARAM_REF
-                spec("level") = 0
-                spec("address") = specs(i).Address(False, False)
-                spec("workbook") = specs(i).Worksheet.Parent.Name
-                spec("worksheet") = specs(i).Worksheet.Name
-                spec("refString") = "[" & spec("workbook") & "]" & spec("worksheet") & "!" & spec("address")
-
             Case "String"
                 strParam = CStr(specs(i))
                 dollarCount = CountLeadingDollars(strParam)
-                
+
                 If dollarCount >= 1 Then
                     ' 引用类型：level = dollarCount - 1
                     ' $addr -> level=0 (直接读addr)
@@ -188,14 +180,14 @@ Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As 
                 spec("type") = PARAM_LITERAL
                 spec("value") = specs(i)
         End Select
-        
+
         Set parsed(i) = spec
 NextSpec:
     Next i
 
     m_ResumeSpecParsed = parsed
     Exit Sub
-    
+
 ErrorHandler:
     m_ResumeSpecParsed = Array()
 End Sub
