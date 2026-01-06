@@ -168,7 +168,20 @@ Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As 
                     ' 字符串：检查是否是动态引用
                     strParam = CStr(specs(i))
 
-                    If Len(strParam) > 0 And Left(strParam, 1) = "$" Then
+                    If Len(strParam) > 1 And Left(strParam, 2) = "$$" Then
+                        ' 间接引用格式 "$$C1"（指针的指针）
+                        spec("type") = PARAM_INDIRECT_REF
+                        refString = Mid(strParam, 3)  ' 去掉 $$
+                        spec("refString") = refString
+
+                        ' 解析并存储完整引用信息（这是指针单元格的地址）
+                        ParseReferenceString refString, wbName, wsName, addr, _
+                                            callerWb.Name, callerWs.Name
+                        spec("workbook") = wbName
+                        spec("worksheet") = wsName
+                        spec("address") = addr
+
+                    ElseIf Len(strParam) > 0 And Left(strParam, 1) = "$" Then
                         ' 动态引用格式 "$B1"
                         spec("type") = PARAM_DYNAMIC_STRING
                         refString = Mid(strParam, 2)
@@ -176,7 +189,7 @@ Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As 
 
                         ' 解析并存储完整引用信息
                         ParseReferenceString refString, wbName, wsName, addr, _
-                                             callerWb.Name, callerWs.Name
+                                            callerWb.Name, callerWs.Name
                         spec("workbook") = wbName
                         spec("worksheet") = wsName
                         spec("address") = addr
@@ -253,15 +266,22 @@ Public Function GetResumeArgs() As Variant
                 Else
                     resultArgs(i) = spec("value")
                 End If
-
             Case PARAM_RANGE_REF, PARAM_DYNAMIC_STRING
-                ' 两种引用类型处理相同：读取当前值
+                ' 直接引用：读取指定单元格的值
                 resultArgs(i) = ReadRangeValue( _
                     CStr(spec("workbook")), _
                     CStr(spec("worksheet")), _
                     CStr(spec("address")) _
                 )
-
+            Case PARAM_INDIRECT_REF
+                ' 间接引用：先读取指针单元格的内容，再读取目标单元格的值
+                resultArgs(i) = ReadIndirectValue( _
+                    CStr(spec("workbook")), _
+                    CStr(spec("worksheet")), _
+                    CStr(spec("address")), _
+                    CStr(spec("workbook")), _
+                    CStr(spec("worksheet")) _
+                )
             Case Else
                 resultArgs(i) = Empty
         End Select

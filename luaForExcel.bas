@@ -68,6 +68,7 @@ Private Const LUA_NOREF As Long = -2 ' 无效引用
 Public Const PARAM_LITERAL As Long = 0          ' 字面量（数值、布尔、普通字符串）
 Public Const PARAM_RANGE_REF As Long = 1        ' 单元格区域引用（Range 对象传入）
 Public Const PARAM_DYNAMIC_STRING As Long = 2   ' 动态字符串（"$B1" 格式）
+Public Const PARAM_INDIRECT_REF As Long = 3     ' 间接引用（"$$C1" 格式，指针的指针）
 ' ===== 全局变量 =====
 Private g_LuaState As LongPtr         ' lua 栈
 Private g_Initialized As Boolean      ' 是否初始化
@@ -2412,4 +2413,37 @@ Private Function CompareResumeSpecs(spec1 As Variant, spec2 As Variant) As Boole
 NotEqual:
     CompareResumeSpecs = False
 End Function
+
+' 辅助函数：读取间接引用的值（指针的指针）
+' pointerWb/pointerWs/pointerAddr: 指针单元格的位置
+' defaultWb/defaultWs: 如果指针内容不包含完整路径时的默认值
+Private Function ReadIndirectValue(pointerWb As String, pointerWs As String, pointerAddr As String, _
+                                    defaultWb As String, defaultWs As String) As Variant
+    On Error GoTo ErrorHandler
+    ' 第一步：读取指针单元格的内容
+    Dim pointerContent As Variant
+    pointerContent = ReadRangeValue(pointerWb, pointerWs, pointerAddr)
+    ' 检查指针内容是否有效
+    If IsError(pointerContent) Then
+        ReadIndirectValue = pointerContent
+        Exit Function
+    End If
+    If IsEmpty(pointerContent) Or Len(Trim(CStr(pointerContent))) = 0 Then
+        ReadIndirectValue = CVErr(xlErrRef)
+        Exit Function
+    End If
+    ' 第二步：解析指针内容为地址
+    Dim targetWb As String, targetWs As String, targetAddr As String
+    Dim pointerStr As String
+    pointerStr = Trim(CStr(pointerContent))
+    ' 解析目标地址（支持 [Book]Sheet!A1 或 Sheet!A1 或 A1 格式）
+    ParseReferenceString pointerStr, targetWb, targetWs, targetAddr, defaultWb, defaultWs
+    ' 第三步：读取目标单元格的值
+    ReadIndirectValue = ReadRangeValue(targetWb, targetWs, targetAddr)
+    Exit Function
+
+ErrorHandler:
+    ReadIndirectValue = CVErr(xlErrRef)
+End Function
+
 

@@ -217,7 +217,7 @@ function test_all_types(taskCell, num_param, str_param, bool_param, arr_param)
     }
 end
 
--- 测试函数：边界情况测试 ok
+-- 测试函数：边界情况测试 OK
 function test_edge_cases(taskCell, empty_val, zero_val, negative_val, long_str)
     local results = {
         {"参数", "值", "类型", "判定"},
@@ -250,7 +250,7 @@ function test_edge_cases(taskCell, empty_val, zero_val, negative_val, long_str)
     }
 end
 
--- 测试函数：错误处理测试
+-- 测试函数：错误处理测试 OK
 function test_error_handling(taskCell, should_error)
     local report = {
         status = "yield",
@@ -326,27 +326,6 @@ function test_return_types(taskCell)
         }
     }
 end
-
--- 简单测试：快速验证协程工作
-function test_simple(taskCell)
-    coroutine.yield({
-        status = "yield",
-        progress = 50,
-        message = "协程运行中",
-        value = "Hello from Lua!"
-    })
-    
-    return {
-        status = "done",
-        progress = 100,
-        message = "协程完成",
-        value = {
-            {"任务单元格", taskCell},
-            {"状态", "成功"}
-        }
-    }
-end
-
 -- ============================================
 -- 重要说明
 -- ============================================
