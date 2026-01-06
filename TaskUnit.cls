@@ -370,3 +370,44 @@ Private Sub ParseReferenceString(refString As String, _
         outCellAddress = remaining
     End If
 End Sub
+
+' 辅助函数：读取间接引用的值（指针的指针）
+' pointerWb/pointerWs/pointerAddr: 指针单元格的位置
+' defaultWb/defaultWs: 如果指针内容不包含完整路径时的默认值
+Private Function ReadIndirectValue(pointerWb As String, pointerWs As String, pointerAddr As String, _
+                                    defaultWb As String, defaultWs As String) As Variant
+    On Error GoTo ErrorHandler
+
+    ' 第一步：读取指针单元格的内容
+    Dim pointerContent As Variant
+    pointerContent = ReadRangeValue(pointerWb, pointerWs, pointerAddr)
+
+    If IsError(pointerContent) Then
+        ReadIndirectValue = pointerContent
+        Exit Function
+    End If
+
+    If IsEmpty(pointerContent) Or Len(Trim(CStr(pointerContent))) = 0 Then
+        ReadIndirectValue = CVErr(xlErrRef)
+        Exit Function
+    End If
+
+    ' 第二步：解析指针内容为地址
+    Dim targetWb As String, targetWs As String, targetAddr As String
+    Dim pointerStr As String
+    pointerStr = Trim(CStr(pointerContent))
+
+    ' 处理指针内容中的 $ 前缀（如果有）
+    If Left(pointerStr, 1) = "$" Then
+        pointerStr = Mid(pointerStr, 2)
+    End If
+
+    ParseReferenceString pointerStr, targetWb, targetWs, targetAddr, defaultWb, defaultWs
+
+    ' 第三步：读取目标单元格的值
+    ReadIndirectValue = ReadRangeValue(targetWb, targetWs, targetAddr)
+    Exit Function
+
+ErrorHandler:
+    ReadIndirectValue = CVErr(xlErrRef)
+End Function
