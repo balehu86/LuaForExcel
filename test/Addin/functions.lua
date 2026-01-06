@@ -217,67 +217,7 @@ function test_all_types(taskCell, num_param, str_param, bool_param, arr_param)
     }
 end
 
--- 测试函数：数组参数深度测试
-function test_array_types(taskCell, arr1d, arr2d)
-    -- 分析一维数组
-    local arr1d_info = "nil"
-    if arr1d then
-        if type(arr1d) == "table" then
-            arr1d_info = "table, 长度=" .. #arr1d
-        else
-            arr1d_info = type(arr1d) .. ": " .. tostring(arr1d)
-        end
-    end
-    
-    -- 分析二维数组
-    local arr2d_info = "nil"
-    local arr2d_rows = 0
-    local arr2d_cols = 0
-    if arr2d and type(arr2d) == "table" then
-        arr2d_rows = #arr2d
-        if arr2d[1] and type(arr2d[1]) == "table" then
-            arr2d_cols = #arr2d[1]
-        end
-        arr2d_info = string.format("table, %dx%d", arr2d_rows, arr2d_cols)
-    end
-    
-    local report = {
-        status = "yield",
-        progress = 50,
-        message = "数组分析中",
-        value = {
-            {"数组类型", "信息"},
-            {"一维数组", arr1d_info},
-            {"二维数组", arr2d_info}
-        }
-    }
-    
-    -- 等待下一次调度
-    local resume_arr = coroutine.yield(report)
-    
-    local resume_info = "nil"
-    if resume_arr then
-        if type(resume_arr) == "table" then
-            resume_info = "table, 长度=" .. #resume_arr
-        else
-            resume_info = type(resume_arr) .. ": " .. tostring(resume_arr)
-        end
-    end
-    
-    return {
-        status = "done",
-        progress = 100,
-        message = "数组测试完成",
-        value = {
-            {"测试项", "结果"},
-            {"启动-一维数组", arr1d_info},
-            {"启动-二维数组", arr2d_info},
-            {"Resume-数组", resume_info}
-        }
-    }
-end
-
--- 测试函数：边界情况测试
+-- 测试函数：边界情况测试 ok
 function test_edge_cases(taskCell, empty_val, zero_val, negative_val, long_str)
     local results = {
         {"参数", "值", "类型", "判定"},
@@ -286,17 +226,17 @@ function test_edge_cases(taskCell, empty_val, zero_val, negative_val, long_str)
         {"负数", tostring(negative_val), type(negative_val), (negative_val or 0) < 0 and "正确:负数" or "非负"},
         {"长字符串", string.len(tostring(long_str or "")) .. "字符", type(long_str), "已接收"}
     }
-    
+
     local report = {
         status = "yield",
         progress = 50,
         message = "边界值分析",
         value = results
     }
-    
+
     -- Resume 测试空值和特殊值
     local resume_empty, resume_zero, resume_bool = coroutine.yield(report)
-    
+
     return {
         status = "done",
         progress = 100,
@@ -310,42 +250,6 @@ function test_edge_cases(taskCell, empty_val, zero_val, negative_val, long_str)
     }
 end
 
--- 测试函数：循环进度测试（带动态单元格读取）
-function test_progress_loop(taskCell, total_steps)
-    total_steps = total_steps or 10
-    
-    for i = 1, total_steps do
-        local progress = (i / total_steps) * 100
-        
-        -- 每次 yield 读取动态参数
-        local dynamic_value = coroutine.yield({
-            status = "yield",
-            progress = progress,
-            message = string.format("步骤 %d/%d", i, total_steps),
-            value = {
-                {"当前步骤", i},
-                {"总步骤", total_steps},
-                {"进度", string.format("%.1f%%", progress)}
-            }
-        })
-        
-        -- 处理动态值（如果有的话）
-        if dynamic_value then
-            -- 可以根据动态值调整行为
-        end
-    end
-    
-    return {
-        status = "done",
-        progress = 100,
-        message = "循环测试完成",
-        value = {
-            {"结果", "成功"},
-            {"总步骤", total_steps}
-        }
-    }
-end
-
 -- 测试函数：错误处理测试
 function test_error_handling(taskCell, should_error)
     local report = {
@@ -354,13 +258,13 @@ function test_error_handling(taskCell, should_error)
         message = "准备测试错误处理",
         value = {{"should_error", tostring(should_error)}}
     }
-    
+
     coroutine.yield(report)
-    
+
     if should_error then
         error("这是一个预期的测试错误")
     end
-    
+
     return {
         status = "done",
         progress = 100,
@@ -418,8 +322,7 @@ function test_return_types(taskCell)
         message = "返回二维数组",
         value = {
             {"A", "B"},
-            {1, 2},
-            {4, 5}
+            {1, nil},
         }
     }
 end

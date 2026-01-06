@@ -908,7 +908,7 @@ Private Sub LuaSchedulerMenu_ShowAllTasks()
         msg = msg & "  函数: " & task.taskFunc & vbCrLf
         msg = msg & "  工作簿: " & task.taskWorkbook & vbCrLf
         msg = msg & "  单元格: " & task.taskCell & vbCrLf
-        msg = msg & "  状态: " & task.taskStatus & vbCrLf
+        msg = msg & "  状态: " & StatusToString task.taskStatus & vbCrLf
         msg = msg & "  进度: " & Format(task.taskProgress, "0.0") & "%" & vbCrLf
 
         ' 显示消息
@@ -1239,7 +1239,7 @@ Private Sub LuaPerfMenu_ShowTaskStats()
         msg = msg & "【任务 #" & taskNum & "】" & vbCrLf
         msg = msg & "  ID: " & "Task_" & CStr(task.taskId) & vbCrLf
         msg = msg & "  函数: " & task.taskFunc & vbCrLf
-        msg = msg & "  状态: " & task.taskStatus & vbCrLf
+        msg = msg & "  状态: " & StatusToString task.taskStatus & vbCrLf
         If task.taskTickCount = 0 Then
             msg = msg & "  (尚未执行)" & vbCrLf
         Else

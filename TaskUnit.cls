@@ -111,67 +111,92 @@ Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As 
     ReDim parsedSpecs(lowerBound To upperBound)
 
     Dim i As Long
+    Dim spec As Object
+    Dim specProcessed As Boolean
+    Dim dictParam As Object
+    Dim rangeParam As Range
+    Dim strParam As String
+    Dim refString As String
+    Dim wbName As String, wsName As String, addr As String
+
     For i = lowerBound To upperBound
-        Dim spec As Object
         Set spec = CreateObject("Scripting.Dictionary")
+        specProcessed = False
 
-        Select Case TypeName(specs(i))
-            Case "Dictionary"
-                ' Dictionary 类型：检查是否是 Range 信息
-                Dim dictParam As Object
-                Set dictParam = specs(i)
+        ' 先检查是否为 Empty 或 Missing =====
+        If IsEmpty(specs(i)) Then
+            spec("type") = PARAM_LITERAL
+            spec("value") = Empty  ' 空值作为字面量 nil
+            specProcessed = True
+        End If
 
-                If dictParam.Exists("isRange") And dictParam("isRange") = True Then
-                    ' Range 引用信息
-                    spec("type") = PARAM_RANGE_REF
-                    spec("address") = dictParam("address")
-                    spec("workbook") = dictParam("workbook")
-                    spec("worksheet") = dictParam("worksheet")
-                Else
-                    ' 普通 Dictionary，作为字面量
-                    spec("type") = PARAM_LITERAL
-                    Set spec("value") = dictParam
-                End If
-
-            Case "Range"
-                ' Range 对象（理论上不会出现，因为 LuaTask 已转换为 Dictionary）
-                Dim rangeParam As Range
-                Set rangeParam = specs(i)
-                spec("type") = PARAM_RANGE_REF
-                spec("address") = rangeParam.Address(False, False)
-                spec("workbook") = rangeParam.Worksheet.Parent.Name
-                spec("worksheet") = rangeParam.Worksheet.Name
-
-            Case "String"
-                ' 字符串：检查是否是动态引用
-                Dim strParam As String
-                strParam = CStr(specs(i))
-
-                If Len(strParam) > 0 And Left(strParam, 1) = "$" Then
-                    ' 动态引用格式 "$B1"
-                    spec("type") = PARAM_DYNAMIC_STRING
-                    Dim refString As String
-                    refString = Mid(strParam, 2)
-                    spec("refString") = refString
-
-                    ' 解析并存储完整引用信息
-                    Dim wbName As String, wsName As String, addr As String
-                    ParseReferenceString refString, wbName, wsName, addr, _
-                                         callerWb.Name, callerWs.Name
-                    spec("workbook") = wbName
-                    spec("worksheet") = wsName
-                    spec("address") = addr
-                Else
-                    ' 普通字符串
-                    spec("type") = PARAM_LITERAL
-                    spec("value") = strParam
-                End If
-
-            Case Else
-                ' 其他类型（数值、布尔等）作为字面量
+        If Not specProcessed Then
+            If IsMissing(specs(i)) Then
                 spec("type") = PARAM_LITERAL
-                spec("value") = specs(i)
-        End Select
+                spec("value") = Empty  ' Missing 也作为 nil
+                specProcessed = True
+            End If
+        End If
+
+        If Not specProcessed Then
+            Select Case TypeName(specs(i))
+                Case "Dictionary"
+                    ' Dictionary 类型：检查是否是 Range 信息
+                    Set dictParam = specs(i)
+
+                    If dictParam.Exists("isRange") And dictParam("isRange") = True Then
+                        ' Range 引用信息
+                        spec("type") = PARAM_RANGE_REF
+                        spec("address") = dictParam("address")
+                        spec("workbook") = dictParam("workbook")
+                        spec("worksheet") = dictParam("worksheet")
+                    Else
+                        ' 普通 Dictionary，作为字面量
+                        spec("type") = PARAM_LITERAL
+                        Set spec("value") = dictParam
+                    End If
+
+                Case "Range"
+                    ' Range 对象（理论上不会出现，因为 LuaTask 已转换为 Dictionary）
+                    Set rangeParam = specs(i)
+                    spec("type") = PARAM_RANGE_REF
+                    spec("address") = rangeParam.Address(False, False)
+                    spec("workbook") = rangeParam.Worksheet.Parent.Name
+                    spec("worksheet") = rangeParam.Worksheet.Name
+
+                Case "String"
+                    ' 字符串：检查是否是动态引用
+                    strParam = CStr(specs(i))
+
+                    If Len(strParam) > 0 And Left(strParam, 1) = "$" Then
+                        ' 动态引用格式 "$B1"
+                        spec("type") = PARAM_DYNAMIC_STRING
+                        refString = Mid(strParam, 2)
+                        spec("refString") = refString
+
+                        ' 解析并存储完整引用信息
+                        ParseReferenceString refString, wbName, wsName, addr, _
+                                             callerWb.Name, callerWs.Name
+                        spec("workbook") = wbName
+                        spec("worksheet") = wsName
+                        spec("address") = addr
+                    Else
+                        ' 普通字符串
+                        spec("type") = PARAM_LITERAL
+                        spec("value") = strParam
+                    End If
+
+                Case "Empty", "Nothing"
+                    ' 显式处理 Empty 类型名
+                    spec("type") = PARAM_LITERAL
+                    spec("value") = Empty
+
+                Case Else
+                    ' 其他类型（数值、布尔等）作为字面量
+                    spec("type") = PARAM_LITERAL
+                    spec("value") = specs(i)
+            End Select
+        End If
 
         Set parsedSpecs(i) = spec
     Next i

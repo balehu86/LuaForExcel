@@ -491,42 +491,63 @@ Public Function LuaTask(ParamArray params() As Variant) As String
     isResumePhase = False
 
     Dim i As Long
-    For i = 1 To UBound(params)
-        Dim currentParam As Variant
-        currentParam = params(i)
+    Dim currentParam As Variant
+    Dim isSeparator As Boolean
+    Dim rangeInfo As Object
+    Dim paramHandled As Boolean
 
-        ' 检查是否是分隔符 "|"
-        Dim isSeparator As Boolean
-        isSeparator = False
-        If VarType(currentParam) = vbString Then
-            If CStr(currentParam) = "|" Then
-                isSeparator = True
+    For i = 1 To UBound(params)
+        paramHandled = False
+
+        ' 正确处理 Missing 值
+        ' 检查参数是否缺失（空位置）
+        If IsMissing(params(i)) Then
+            ' 空参数位置，作为 nil 处理
+            If Not isResumePhase Then
+                startList.Add Empty  ' 启动参数阶段：添加 Empty（会被转换为 nil）
+            Else
+                ' Resume 参数阶段：也添加 Empty
+                resumeList.Add Empty
             End If
+            paramHandled = True
         End If
 
-        If isSeparator Then
-            ' 遇到分隔符，切换到 Resume 阶段
-            isResumePhase = True
-        ElseIf Not isResumePhase Then
-            ' 启动参数阶段：Range 直接取值
-            If TypeName(currentParam) = "Range" Then
-                startList.Add currentParam.Value
-            Else
-                startList.Add currentParam
+        If Not paramHandled Then
+            currentParam = params(i)
+
+            ' 检查是否是分隔符 "|"
+            isSeparator = False
+            If Not IsEmpty(currentParam) Then
+                If VarType(currentParam) = vbString Then
+                    If CStr(currentParam) = "|" Then
+                        isSeparator = True
+                    End If
+                End If
             End If
-        Else
-            ' Resume 参数阶段：保留 Range 对象引用
-            If TypeName(currentParam) = "Range" Then
-                Dim rangeInfo As Object
-                Set rangeInfo = CreateObject("Scripting.Dictionary")
-                rangeInfo("isRange") = True
-                rangeInfo("address") = currentParam.Address(False, False)
-                rangeInfo("workbook") = currentParam.Worksheet.Parent.Name
-                rangeInfo("worksheet") = currentParam.Worksheet.Name
-                rangeInfo("cellCount") = currentParam.Cells.Count
-                resumeList.Add rangeInfo
+
+            If isSeparator Then
+                ' 遇到分隔符，切换到 Resume 阶段
+                isResumePhase = True
+            ElseIf Not isResumePhase Then
+                ' 启动参数阶段：Range 直接取值
+                If TypeName(currentParam) = "Range" Then
+                    startList.Add currentParam.Value
+                Else
+                    startList.Add currentParam
+                End If
             Else
-                resumeList.Add currentParam
+                ' Resume 参数阶段：保留 Range 对象引用
+                If TypeName(currentParam) = "Range" Then
+                    Set rangeInfo = CreateObject("Scripting.Dictionary")
+                    rangeInfo("isRange") = True
+                    rangeInfo("address") = currentParam.Address(False, False)
+                    rangeInfo("workbook") = currentParam.Worksheet.Parent.Name
+                    rangeInfo("worksheet") = currentParam.Worksheet.Name
+                    rangeInfo("cellCount") = currentParam.Cells.Count
+                    resumeList.Add rangeInfo
+                Else
+                    resumeList.Add currentParam
+                End If
             End If
         End If
     Next i
@@ -1574,9 +1595,15 @@ End Function
 
 ' 统一压栈函数 - 迭代版本（避免递归）
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
+    ' 先检查 Missing
+    If IsMissing(value) Then
+        lua_pushnil L
+        Exit Sub
+    End If
+
     ' 处理 Range 对象：获取其值
     Do While TypeName(value) = "Range"
-        value = value.value
+        value = value.Value
     Loop
 
     Select Case VarType(value)
@@ -1590,6 +1617,9 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
             PushUTF8ToState L, CStr(value)
         Case vbArray To vbArray + vbVariant
             PushArray L, value
+        Case vbError
+            ' 处理错误值
+            lua_pushnil L
         Case Else
             If IsArray(value) Then
                 PushArray L, value
