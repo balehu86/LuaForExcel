@@ -214,22 +214,32 @@ End Sub
 ' 获取 Resume 时的实际参数值
 Public Function GetResumeArgs() As Variant
     On Error GoTo ErrHandler
+
     Dim lb As Long, ub As Long
     If Not TryGetArrayBounds(m_ResumeSpecParsed, lb, ub) Then
         GetResumeArgs = Array()
         Exit Function
     End If
+
     Dim result() As Variant
     ReDim result(lb To ub)
-    Dim i As Long
-    For i = lb To ub
-        If IsObject(m_ResumeSpecParsed(i)) Then
-            result(i) = ResolveSpecValue(m_ResumeSpecParsed(i))
-        Else
-            result(i) = Empty
-        End If
-    Next i
 
+    Dim i As Long
+    Dim spec As Object
+
+    For i = lb To ub
+        ' 显式转换为 Object
+        If IsObject(m_ResumeSpecParsed(i)) Then
+            Set spec = m_ResumeSpecParsed(i)
+        Else
+            ' 如果不是对象，跳过或处理错误
+            result(i) = Empty
+            GoTo NextSpec
+        End If
+
+        result(i) = ResolveSpecValue(spec)
+NextSpec:
+    Next i
     GetResumeArgs = result
     Exit Function
 ErrHandler:
