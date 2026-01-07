@@ -2267,5 +2267,3 @@ NotEqual:
     CompareResumeSpecs = False
 End Function
 
-
-
