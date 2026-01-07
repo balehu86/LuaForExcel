@@ -1265,9 +1265,7 @@ End Function
 ' 更新任务的 vruntime 并重新排序
 Private Sub CFS_UpdateVruntime(task As TaskUnit, actualRuntime As Double)
     ' 确保最小执行粒度
-    If actualRuntime < g_CFS_minGranularity Then
-        actualRuntime = g_CFS_minGranularity
-    End If
+    If actualRuntime < g_CFS_minGranularity Then actualRuntime = g_CFS_minGranularity
 
     ' 计算加权虚拟运行时间
     Dim vruntimeDelta As Double
