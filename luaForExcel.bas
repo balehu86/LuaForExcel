@@ -1298,22 +1298,15 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     coThread = task.taskCoThread
 
     ' 检查工作簿是否仍然打开
-    Dim wbName As String
-    wbName = task.taskWorkbook
-    Dim wb As Workbook
-
-    If Len(wbName) > 0 Then
-        Dim wbExists As Boolean
-        wbExists = False
-
+    If Len(task.taskWorkbook) > 0 Then
+        Dim wb As Workbook
         On Error Resume Next
-        Set wb = Application.Workbooks(wbName)
-        wbExists = Not (wb Is Nothing)
+        Set wb = Application.Workbooks(task.taskWorkbook)
         On Error GoTo ErrorHandler
 
-        If Not wbExists Then
+        If wb Is Nothing Then
+            task.taskError = "工作簿已关闭: " & task.taskWorkbook
             SetTaskStatus task, CO_ERROR
-            task.taskError = "工作簿已关闭: " & wbName
             Exit Sub
         End If
     End If
@@ -1348,23 +1341,21 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-
     ' 处理结果
     HandleCoroutineResult task, result, CLng(nres)
-    
     ' 标记监控为脏
     MarkWatchesDirty task
     g_StateDirty = True
-
     ' 性能统计
     Dim taskElapsed As Double
     taskElapsed = GetTickCount() - taskStart
-    task.taskLastTime = taskElapsed
-    task.taskTotalTime = task.taskTotalTime + taskElapsed
-    task.taskTickCount = task.taskTickCount + 1
+    With task
+        .taskLastTime = taskElapsed
+        .taskTotalTime = .taskTotalTime + taskElapsed
+        .taskTickCount = .taskTickCount + 1
+    End With
 
     Exit Sub
-
 ErrorHandler:
     Dim errorDetails As String
     errorDetails = "Resume错误: " & Err.Description
@@ -1463,18 +1454,15 @@ Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As 
     Next
 End Function
 
-' 统一压栈函数 - 迭代版本（避免递归）
+' 统一压栈函数 - 简化版
 Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
-    ' 先检查 Missing
     If IsMissing(value) Then
         lua_pushnil L
         Exit Sub
     End If
 
-    ' 处理 Range 对象：获取其值
-    Do While TypeName(value) = "Range"
-        value = value.Value
-    Loop
+    ' Range 对象直接取值（单次）
+    If TypeName(value) = "Range" Then value = value.Value
 
     Select Case VarType(value)
         Case vbEmpty, vbNull
@@ -1485,10 +1473,7 @@ Private Sub PushValue(ByVal L As LongPtr, ByVal value As Variant)
             lua_pushnumber L, CDbl(value)
         Case vbString
             PushUTF8ToState L, CStr(value)
-        Case vbArray To vbArray + vbVariant
-            PushArray L, value
         Case vbError
-            ' 处理错误值
             lua_pushnil L
         Case Else
             If IsArray(value) Then
@@ -1962,18 +1947,12 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional opti
     shouldDelete = InStr(1, options, "DELETE", vbTextCompare) > 0
     keepCoroutine = InStr(1, options, "COROUTINE", vbTextCompare) > 0
 
-    ' ===== 更新活跃任务计数器（状态变更前） =====
-    If oldStatus = CO_YIELD Then
-        g_ActiveTaskCount = g_ActiveTaskCount - 1
-    End If
-
+    ' 更新活跃任务计数器（状态变更前）
+    g_ActiveTaskCount = g_ActiveTaskCount - IIf(oldStatus = CO_YIELD, 1, 0)
     ' 更新状态
     task.taskStatus = newStatus
-
-    ' ===== 更新活跃任务计数器（状态变更后） =====
-    If newStatus = CO_YIELD Then
-        g_ActiveTaskCount = g_ActiveTaskCount + 1
-    End If
+    ' 更新活跃任务计数器（状态变更后）
+    g_ActiveTaskCount = g_ActiveTaskCount + IIf(newStatus = CO_YIELD, 1, 0)
 
     ' 根据新状态处理副作用
     Select Case newStatus

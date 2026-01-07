@@ -47,21 +47,23 @@ Public Sub ClearCoroutineRef()
 End Sub
 
 Public Sub AddWatch(watchCell As String)
+    On Error Resume Next
+    ' 尝试直接添加，如果重复会静默失败
     Dim i As Long
-    For i = 1 To Me.taskWatches.Count
-        If Me.taskWatches(i) = watchCell Then Exit Sub
-    Next i
-    Me.taskWatches.Add watchCell
+    For i = 1 To taskWatches.Count
+        If taskWatches(i) = watchCell Then Exit Sub
+    Next
+    taskWatches.Add watchCell
 End Sub
 
 Public Sub RemoveWatch(watchCell As String)
     Dim i As Long
-    For i = Me.taskWatches.Count To 1 Step -1
-        If Me.taskWatches(i) = watchCell Then
-            Me.taskWatches.Remove i
+    For i = 1 To taskWatches.Count
+        If taskWatches(i) = watchCell Then
+            taskWatches.Remove i
             Exit Sub
         End If
-    Next i
+    Next
 End Sub
 
 Public Property Get ResumeSpecParsed() As Variant
@@ -77,7 +79,6 @@ End Property
 ' "$B1"           |  1   |   0   | 直接读取B1的值
 ' "$B1:C2"        |  1   |   0   | 直接读取B1:C2区域的值
 ' "$$B1"          |  1   |   1   | 读B1得到地址ptr1，再读ptr1的值
-' "$$$B1"         |  1   |   2   | 读B1得ptr1，读ptr1得ptr2，读ptr2的值
 ' 其他            |  0   |   -   | 字面量，直接传递
 Public Sub ParseResumeSpecs(specs As Variant, callerWb As Workbook, callerWs As Worksheet)
     On Error GoTo ErrorHandler
@@ -149,11 +150,8 @@ Private Function ParseSingleSpec(spec As Variant, defWb As String, defWs As Stri
         Case Else
             ' 其他类型作为字面量
             result("type") = PARAM_LITERAL
-            If IsObject(spec) Then
-                Set result("value") = spec
-            Else
-                result("value") = spec
-            End If
+            result("value") = spec  ' VBA 会自动处理值类型赋值
+
     End Select
 
     Set ParseSingleSpec = result
@@ -216,32 +214,22 @@ End Sub
 ' 获取 Resume 时的实际参数值
 Public Function GetResumeArgs() As Variant
     On Error GoTo ErrHandler
-
     Dim lb As Long, ub As Long
     If Not TryGetArrayBounds(m_ResumeSpecParsed, lb, ub) Then
         GetResumeArgs = Array()
         Exit Function
     End If
-
     Dim result() As Variant
     ReDim result(lb To ub)
-
     Dim i As Long
-    Dim spec As Object
-
     For i = lb To ub
-        ' 显式转换为 Object
         If IsObject(m_ResumeSpecParsed(i)) Then
-            Set spec = m_ResumeSpecParsed(i)
+            result(i) = ResolveSpecValue(m_ResumeSpecParsed(i))
         Else
-            ' 如果不是对象，跳过或处理错误
             result(i) = Empty
-            GoTo NextSpec
         End If
-
-        result(i) = ResolveSpecValue(spec)
-NextSpec:
     Next i
+
     GetResumeArgs = result
     Exit Function
 ErrHandler:
@@ -340,27 +328,40 @@ End Sub
 ' level=1: 读取 addr 得到新地址，再读取新地址的值（$$A1）
 Private Function ResolveRef(wb As String, ws As String, addr As String, level As Long) As Variant
     Const MAX_DEPTH As Long = 10
+
+    ' 合并所有前置检查
     If level < 0 Or level > MAX_DEPTH Or Len(wb) = 0 Or Len(ws) = 0 Or Len(addr) = 0 Then
         ResolveRef = CVErr(xlErrRef)
         Exit Function
     End If
 
     Dim curWb As String: curWb = wb
-    Dim curWs As String: curWs = ws  
+    Dim curWs As String: curWs = ws
     Dim curAddr As String: curAddr = addr
     Dim content As Variant
+    Dim ptr As String
 
     Dim lv As Long
     For lv = 1 To level
-        ' 读取当前单元格，获取下一层地址
         content = ReadCellValue(curWb, curWs, curAddr)
+
+        ' 合并错误检查
         If IsError(content) Or IsEmpty(content) Or IsNull(content) Then
-            ResolveRef = CVErr(xlErrRef): Exit Function
+            ResolveRef = CVErr(xlErrRef)
+            Exit Function
         End If
-        ' 去掉前导$符号（内容可能是 "$K1" 或 "$$K1" 等）
-        Dim ptr As String: ptr = Trim$(CStr(content))
-        Do While Len(ptr) > 0 And Left$(ptr, 1) = "$": ptr = Mid$(ptr, 2): Loop
-        If Len(ptr) = 0 Then ResolveRef = CVErr(xlErrRef): Exit Function
+
+        ptr = Trim$(CStr(content))
+
+        ' 内联去除前导$符号
+        Do While Len(ptr) > 0 And Left$(ptr, 1) = "$"
+            ptr = Mid$(ptr, 2)
+        Loop
+
+        If Len(ptr) = 0 Then
+            ResolveRef = CVErr(xlErrRef)
+            Exit Function
+        End If
 
         ParseRefString ptr, curWb, curWs, curAddr, curWb, curWs
     Next lv
@@ -371,26 +372,7 @@ End Function
 ' 读取单元格值
 Private Function ReadCellValue(wbName As String, wsName As String, cellAddr As String) As Variant
     On Error GoTo ErrH
-    Dim w As Workbook, s As Worksheet, r As Range
-    Set w = Application.Workbooks(wbName)
-    If w Is Nothing Then
-        ReadCellValue = CVErr(xlErrRef)
-        Exit Function
-    End If
-
-    Set s = w.Sheets(wsName)
-    If s Is Nothing Then
-        ReadCellValue = CVErr(xlErrRef)
-        Exit Function
-    End If
-
-    Set r = s.Range(cellAddr)
-    If r Is Nothing Then
-        ReadCellValue = CVErr(xlErrRef)
-        Exit Function
-    End If
-
-    ReadCellValue = r.Value
+    ReadCellValue = Application.Workbooks(wbName).Sheets(wsName).Range(cellAddr).Value
     Exit Function
 ErrH:
     ReadCellValue = CVErr(xlErrRef)
