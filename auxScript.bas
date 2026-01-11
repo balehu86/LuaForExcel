@@ -154,28 +154,14 @@ End Sub
 ' 辅助函数：清理特定任务的监视点
 Private Sub CleanupTaskWatches(task As TaskUnit)
     On Error Resume Next
-
     If task Is Nothing Then Exit Sub
-    If g_Watches Is Nothing Then Exit Sub
-
-    ' 使用任务的 taskWatches 集合进行清理
+    ' 直接遍历并删除，不需要中间 Collection
     Dim wc As Variant
-    Dim removeList As Collection
-    Set removeList = New Collection
-
-    ' 收集要移除的 watch
     For Each wc In task.taskWatches
-        removeList.Add CStr(wc)
-    Next
-
-    ' 从主索引移除
-    For Each wc In removeList
         If g_Watches.Exists(CStr(wc)) Then
             g_Watches.Remove CStr(wc)
         End If
     Next
-
-    ' 清空任务的 watch 集合
     Set task.taskWatches = New Collection
 End Sub
 

@@ -128,7 +128,7 @@ end
 -- 测试函数：全类型参数测试
 -- 启动参数测试：数值、字符串、布尔、数组
 -- Resume参数测试：字面量、单元格引用、动态字符串
-function test_all_types(taskCell, num_param, str_param, bool_param, arr_param)
+function test_all_types(num_param, str_param, bool_param, arr_param)
     -- 第一次 yield：报告启动参数
     local start_report = {
         status = "yield",
@@ -212,13 +212,12 @@ function test_all_types(taskCell, num_param, str_param, bool_param, arr_param)
             {"单元格引用", "通过"},
             {"动态字符串", "通过"},
             {"多参数混合", "通过"},
-            {"任务单元格", taskCell}
         }
     }
 end
 
 -- 测试函数：边界情况测试 OK
-function test_edge_cases(taskCell, empty_val, zero_val, negative_val, long_str)
+function test_edge_cases(empty_val, zero_val, negative_val, long_str)
     local results = {
         {"参数", "值", "类型", "判定"},
         {"空值", tostring(empty_val), type(empty_val), empty_val == nil and "正确:nil" or "有值"},
@@ -251,7 +250,7 @@ function test_edge_cases(taskCell, empty_val, zero_val, negative_val, long_str)
 end
 
 -- 测试函数：错误处理测试 OK
-function test_error_handling(taskCell, should_error)
+function test_error_handling(should_error)
     local report = {
         status = "yield",
         progress = 50,
@@ -274,7 +273,7 @@ function test_error_handling(taskCell, should_error)
 end
 
 -- 测试函数：返回值类型测试 OK
-function test_return_types(taskCell)
+function test_return_types()
     -- 测试不同返回类型
     -- 返回字符串
     coroutine.yield({
@@ -332,7 +331,6 @@ end
 
 --[[ 
 1. 函数签名规则：
-   - 第一个参数必须是 taskCell（任务单元格地址）
    - 后续参数对应 LuaTask 的启动参数（"|" 之前）
    - resume 参数通过 coroutine.yield() 的返回值接收
 
@@ -358,24 +356,15 @@ end
    - =LuaGet(taskId, "message")  -> 获取消息
    - =LuaGet(taskId, "value")    -> 获取结果值
    - =LuaGet(taskId, "error")    -> 获取错误信息
-
-5. 启动协程：
-   在 VBA 中调用：StartLuaCoroutine(taskId)
-   或使用宏按钮绑定
-
-6. 调度器配置：
-   - g_MaxIterationsPerTick: 每次调度执行的任务数
-   - g_SchedulerIntervalSec: 调度间隔（秒）
 ]]
 
 
 -- 去重累加函数：只有当值变化时才累加
 -- 参数：
---   taskCell: 任务单元格地址（自动传入）
 --   initialValue（可选）: 累加的起始值，默认为0
 -- Resume参数：
 --   要读取的数值（来自单元格引用）
-function accumulate(taskCell, initialValue)
+function accumulate(initialValue)
     local sum = initialValue or 0
     local count = 0
     local lastValue = nil  -- 记录上一次的值
@@ -420,4 +409,64 @@ function accumulate(taskCell, initialValue)
             })
         end
     end
+end
+
+function accumulate_once(lastValue, newValue)
+    return {
+        value = lastValue + newValue
+    }
+end
+
+-- functions.lua
+-- 两个相同大小的区域，对应位置相加，结果写回第二个区域
+-- 规则：
+--   - 两个都为空白 -> 结果为空白
+--   - 一个为空白一个有值 -> 空白视为0
+--   - 两个都有值 -> 正常相加
+function add_ranges(range1, range2)
+    -- 深度调试：查看第一行的实际内容
+    local function inspect_row(t, rowIdx)
+        local row = t[rowIdx]
+        if type(row) ~= "table" then
+            return "row[" .. rowIdx .. "] 不是table: " .. type(row)
+        end
+        
+        -- 检查 # 长度
+        local hashLen = #row
+        
+        -- 手动遍历计数
+        local count = 0
+        local keys = {}
+        for k, v in pairs(row) do
+            count = count + 1
+            table.insert(keys, tostring(k))
+        end
+        
+        -- 检查特定索引
+        local has0 = row[0] ~= nil
+        local has1 = row[1] ~= nil
+        
+        return string.format("#=%d, pairs_count=%d, has[0]=%s, has[1]=%s, keys={%s}", 
+                             hashLen, count, tostring(has0), tostring(has1), 
+                             table.concat(keys, ","))
+    end
+    
+    return {
+        status = "done",
+        value = 0,
+        message = inspect_row(range1, 1)
+    }
+end
+
+function test_array(range)
+    local str = ""
+    for i, row in pairs(range) do
+        if type(row) == "table" then
+            str = str .. table.concat(row, ",") .. ";"
+        end
+    end
+    return {
+        value = str,
+        message = str
+    }
 end

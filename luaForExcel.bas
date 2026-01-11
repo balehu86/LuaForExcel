@@ -1009,11 +1009,9 @@ Public Sub StartLuaCoroutine(taskId As String)
     ' 将函数移动到协程栈
     lua_xmove g_LuaState, coThread, 1
 
-    ' 压入第一个参数：任务单元格地址
-    PushUTF8ToState coThread, task.taskCell
-
+    ' 参数计数从 0 开始
     Dim nargs As Long
-    nargs = 1
+    nargs = 0
 
     ' 压入启动参数
     Dim startArgs As Variant
@@ -1966,7 +1964,7 @@ Private Sub SetTaskStatus(task As TaskUnit, newStatus As CoStatus, Optional opti
                     g_Tasks.Remove taskIdStr
                 End If
             End If
-            
+
         Case CO_TERMINATED
             ' 终止：释放协程，从队列移除，清理 Watch
             If Not keepCoroutine Then ReleaseTaskCoroutine task
