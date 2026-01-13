@@ -405,8 +405,26 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
 
     Dim result As Long
     result = lua_pcallk(g_LuaState, argCount, -1, 0, 0, 0)
+    
+    ' 检查是否为协程 yield 错误
+    If result = LUA_YIELD Then
+        LuaCall = "提示: 函数 '" & funcName & "' 是协程函数，请使用 LuaTask 调用而非 LuaCall"
+        lua_settop g_LuaState, stackTop  ' 统一恢复
+        Exit Function
+    End If
+    
     If result <> 0 Then
-        LuaCall = "运行错误: " & GetStringFromState(g_LuaState, -1)
+        Dim errMsg As String
+        errMsg = GetStringFromState(g_LuaState, -1)
+        
+        ' 检查错误信息是否包含 yield 相关内容
+        If InStr(1, errMsg, "yield", vbTextCompare) > 0 Or _
+           InStr(1, errMsg, "coroutine", vbTextCompare) > 0 Then
+            LuaCall = "提示: 函数 '" & funcName & "' 包含协程操作(yield)，请使用 LuaTask 调用" & vbCrLf & _
+                      "用法: =LuaTask(""" & funcName & """, 参数...)"
+        Else
+            LuaCall = "运行错误: " & errMsg
+        End If
         lua_settop g_LuaState, stackTop  ' 统一恢复
         Exit Function
     End If
