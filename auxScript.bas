@@ -519,7 +519,37 @@ Private Sub LuaTaskMenu_ShowDetail()
         If Err.Number = 0 Then
             On Error GoTo ErrorHandler
             For i = lb To ub
-                msg = msg & "   [" & i & "] " & CStr(startArgs(i)) & vbCrLf
+                ' 安全地格式化启动参数值
+                Dim argValue As Variant
+                Dim argStr As String
+                argValue = startArgs(i)
+
+                If IsArray(argValue) Then
+                    ' 参数是数组（例如 Range.Value 返回的多单元格值）
+                    argStr = "(数组，维度: " & GetArrayDimensions(argValue) & ")"
+                ElseIf IsObject(argValue) Then
+                    ' 参数是对象
+                    argStr = "(对象: " & TypeName(argValue) & ")"
+                ElseIf IsEmpty(argValue) Then
+                    argStr = "(空)"
+                ElseIf IsNull(argValue) Then
+                    argStr = "(Null)"
+                ElseIf IsError(argValue) Then
+                    argStr = "(错误值)"
+                Else
+                    ' 普通值，安全转换为字符串
+                    On Error Resume Next
+                    argStr = CStr(argValue)
+                    If Err.Number <> 0 Then
+                        Err.Clear
+                        argStr = "(无法显示: " & TypeName(argValue) & ")"
+                    End If
+                    On Error GoTo ErrorHandler
+                    ' 截断过长的字符串
+                    If Len(argStr) > 50 Then argStr = Left$(argStr, 47) & "..."
+                End If
+
+                msg = msg & "   [" & i & "] " & argStr & vbCrLf
             Next i
         Else
             Err.Clear
@@ -548,7 +578,13 @@ Private Sub LuaTaskMenu_ShowDetail()
         msg = msg & "   (空)" & vbCrLf
     Else
         Dim valueStr As String
+        On Error Resume Next
         valueStr = CStr(value)
+        If Err.Number <> 0 Then
+            Err.Clear
+            valueStr = "(无法显示: " & TypeName(value) & ")"
+        End If
+        On Error GoTo ErrorHandler
         If Len(valueStr) > 100 Then valueStr = Left(valueStr, 97) & "..."
         msg = msg & "   " & valueStr & vbCrLf
     End If
