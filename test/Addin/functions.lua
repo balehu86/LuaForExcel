@@ -339,7 +339,7 @@ end
        status = "yield",      -- 可选，应为yield、done、error，指挥VBA调度器接下来怎么处理此协程，yield：等待下一次resume；done：提前结束，被清理出协程队列；error：手动触发VBA调度错误，被清理出队列。如果省略此字段则默认视为yield
        progress = 50,           -- 可选，进度百分比
        message = "消息",        -- 可选，状态消息
-       value = result_data      -- 可选，当前结果，单值或列表
+       value = result_data      -- 可选，当前结果，单值、列表、无嵌套字典
    }
 
 3. return 返回格式（为一阶或二阶列表、字典。列表默认作为value）：
@@ -347,7 +347,7 @@ end
        status = "done",         -- 可选，此字段一般省略，字段会被自动设置为 "done"
        progress = 100,          -- 可选，最终进度
        message = "完成",        -- 可选，完成消息
-       value = final_result     -- 可选，最终结果，单值或列表
+       value = final_result     -- 可选，最终结果，单值、列表、无嵌套字典
    }
 
 4. Excel 中读取结果：
@@ -423,50 +423,226 @@ end
 --   - 两个都为空白 -> 结果为空白
 --   - 一个为空白一个有值 -> 空白视为0
 --   - 两个都有值 -> 正常相加
-function add_ranges(range1, range2)
-    -- 深度调试：查看第一行的实际内容
-    local function inspect_row(t, rowIdx)
-        local row = t[rowIdx]
-        if type(row) ~= "table" then
-            return "row[" .. rowIdx .. "] 不是table: " .. type(row)
+-- 两个相同大小的区域相加，空白值视为0
+-- 参数：range1, range2 - 二维数组（从VBA传入的Range.Value）
+-- 返回：二维数组，可直接溢出到Excel
+-- 区域相加函数
+-- 规则：
+--   1. 两个空白值 -> 空白（nil）
+--   2. 一个空白值 + 一个数值 -> 空白值当0，返回数值
+--   3. 两个数值 -> 返回相加结果
+-- 参数：
+--   range1: 第一个区域（二维数组）
+--   range2: 第二个区域（二维数组）
+-- 返回：
+--   相加后的二维数组
+function add_2d_lists(list1, list2)
+    -- 输入验证
+    if not list1 or not list2 then
+        return nil
+    end
+    
+    if #list1 ~= #list2 then
+        error("两个列表的行数不同")
+    end
+    
+    local result = {}
+    
+    -- 遍历每一行
+    for i = 1, #list1 do
+        local row1 = list1[i]
+        local row2 = list2[i]
+        
+        -- 检查每行的列数
+        if #row1 ~= #row2 then
+            error(string.format("第%d行的列数不同: %d vs %d", i, #row1, #row2))
         end
         
-        -- 检查 # 长度
-        local hashLen = #row
+        local result_row = {}
         
-        -- 手动遍历计数
-        local count = 0
-        local keys = {}
-        for k, v in pairs(row) do
-            count = count + 1
-            table.insert(keys, tostring(k))
+        -- 遍历每一列
+        for j = 1, #row1 do
+            local val1 = row1[j]
+            local val2 = row2[j]
+            
+            -- 处理相加逻辑
+            if val1 == nil and val2 == nil then
+                result_row[j] = nil
+            elseif val1 == nil then
+                result_row[j] = val2
+            elseif val2 == nil then
+                result_row[j] = val1
+            else
+                -- 两个都是数字，直接相加
+                if type(val1) == "number" and type(val2) == "number" then
+                    result_row[j] = val1 + val2
+                else
+                    -- 如果都是非nil但存在非数字类型，可以按需求处理
+                    -- 这里简单地尝试转换为数字相加
+                    local num1 = tonumber(val1) or 0
+                    local num2 = tonumber(val2) or 0
+                    result_row[j] = num1 + num2
+                end
+            end
         end
         
-        -- 检查特定索引
-        local has0 = row[0] ~= nil
-        local has1 = row[1] ~= nil
-        
-        return string.format("#=%d, pairs_count=%d, has[0]=%s, has[1]=%s, keys={%s}", 
-                             hashLen, count, tostring(has0), tostring(has1), 
-                             table.concat(keys, ","))
+        result[i] = result_row
+    end
+    
+    return result
+end
+
+
+
+
+-- ============================================
+-- 字典返回值测试函数集
+-- ============================================
+
+-- 1. 简单字典
+function test_simple_dict()
+    return {
+        name = "张三",
+        age = 25,
+        city = "北京"
+    }
+end
+
+-- 2. 混合类型值的字典
+function test_mixed_dict()
+    return {
+        str_val = "hello",
+        num_val = 3.14159,
+        bool_val = true,
+        nil_val = nil,  -- nil 会被忽略
+        int_val = 42
+    }
+end
+
+-- 3. 纯数组（对比用）
+function test_pure_array()
+    return {10, 20, 30, 40, 50}
+end
+
+-- 4. 混合 table（既有数组索引又有字符串键）
+function test_mixed_table()
+    return {
+        100, 200, 300,      -- 数组部分：索引 1, 2, 3
+        name = "混合表",     -- 字典部分
+        count = 3
+    }
+end
+
+-- 5. 嵌套字典
+function test_nested_dict()
+    return {
+        person = {
+            name = "李四",
+            age = 30
+        },
+        address = {
+            city = "上海",
+            street = "南京路"
+        },
+        score = 95.5
+    }
+end
+
+-- 6. 空字典
+function test_empty_dict()
+    return {}
+end
+
+-- 7. 单键字典
+function test_single_key()
+    return {
+        only_key = "only_value"
+    }
+end
+
+-- 8. 数字键字典（非连续）
+function test_sparse_dict()
+    return {
+        [1] = "一",
+        [5] = "五",
+        [10] = "十"
+    }
+end
+
+-- 9. 中文键字典
+function test_chinese_keys()
+    return {
+        ["姓名"] = "王五",
+        ["年龄"] = 28,
+        ["城市"] = "广州"
+    }
+end
+
+-- 10. 深层嵌套
+function test_deep_nested()
+    return {
+        level1 = {
+            level2 = {
+                level3 = {
+                    value = "最深层"
+                }
+            }
+        }
+    }
+end
+
+-- 测试复合返回值
+function test_compound_return()
+    local a_table = {1, 2, 3, 4, 5}
+    local a_str = "处理完成"
+    
+    return {
+        value = a_table,
+        message = a_str
+    }
+end
+
+-- 更复杂的嵌套
+function test_nested_compound()
+    return {
+        value = {
+            {name = "张三", score = 95},
+            {name = "李四", score = 88},
+            {name = "王五", score = 92}
+        },
+        message = "查询到3条记录",
+        status = "success",
+        count = 3
+    }
+end
+
+-- 协程中使用（yield）
+function test_coroutine_compound()
+    for i = 1, 5 do
+        coroutine.yield({
+            progress = i * 20,
+            message = "正在处理第 " .. i .. " 步",
+            value = {step = i, data = "step_" .. i}
+        })
     end
     
     return {
         status = "done",
-        value = 0,
-        message = inspect_row(range1, 1)
+        message = "全部完成",
+        value = {total = 5, result = "success"}
     }
 end
 
-function test_array(range)
-    local str = ""
-    for i, row in pairs(range) do
-        if type(row) == "table" then
-            str = str .. table.concat(row, ",") .. ";"
-        end
-    end
-    return {
-        value = str,
-        message = str
-    }
+function test_coroutine_return_nested_compound()
+    coroutine.yield({value = {name = "张六", score = 95}})
+    return {value = {name = "张六", score = 95}}
+end
+
+function test_input_array()
+    array = coroutine.yield()
+    return array
+end
+
+function test_array()
+    return {1,2,3}
 end

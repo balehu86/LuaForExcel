@@ -1658,8 +1658,8 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
             lua_settop L, topBefore  ' 恢复栈
             LuaTableToVariant = LuaTableToDictArray(L, idx)
         Else
-            ' 空表
-            LuaTableToVariant = Empty
+            ' 空表，返回空字符串，而不是Empty(会显示0，而不是空白)
+            LuaTableToVariant = vbNullString
         End If
         Exit Function
     End If

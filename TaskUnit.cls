@@ -379,10 +379,53 @@ Private Function ResolveRef(wb As String, ws As String, addr As String, level As
     ResolveRef = ReadCellValue(curWb, curWs, curAddr)
 End Function
 
-' 读取单元格值
+' 读取单元格值（支持溢出范围引用 #）
 Private Function ReadCellValue(wbName As String, wsName As String, cellAddr As String) As Variant
     On Error GoTo ErrH
-    ReadCellValue = Application.Workbooks(wbName).Sheets(wsName).Range(cellAddr).Value
+
+    Dim rng As Range
+    Dim ws As Worksheet
+    Dim actualAddr As String
+
+    Set ws = Application.Workbooks(wbName).Sheets(wsName)
+    actualAddr = cellAddr
+
+    ' 检查是否为溢出范围引用（以#结尾）
+    If Right$(actualAddr, 1) = "#" Then
+        ' 移除#符号获取基础地址
+        Dim baseAddr As String
+        baseAddr = Left$(actualAddr, Len(actualAddr) - 1)
+
+        ' 获取基础单元格
+        Set rng = ws.Range(baseAddr)
+
+        ' 尝试获取溢出范围（SpillRange）
+        On Error Resume Next
+        Dim spillRng As Range
+        Set spillRng = rng.SpillingToRange
+
+        If Err.Number <> 0 Or spillRng Is Nothing Then
+            Err.Clear
+            ' 如果没有溢出范围，尝试使用 SpillRange 属性（Excel 365/2021+）
+            Set spillRng = rng.SpillRange
+        End If
+
+        If Err.Number <> 0 Or spillRng Is Nothing Then
+            Err.Clear
+            On Error GoTo ErrH
+            ' 没有溢出范围，返回单个单元格的值
+            ReadCellValue = rng.Value
+            Exit Function
+        End If
+        On Error GoTo ErrH
+
+        ' 返回整个溢出范围的值
+        ReadCellValue = spillRng.Value
+    Else
+        ' 普通引用
+        ReadCellValue = ws.Range(actualAddr).Value
+    End If
+
     Exit Function
 ErrH:
     ReadCellValue = CVErr(xlErrRef)
