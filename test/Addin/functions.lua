@@ -436,59 +436,30 @@ end
 --   range2: 第二个区域（二维数组）
 -- 返回：
 --   相加后的二维数组
-function add_2d_lists(list1, list2)
-    -- 输入验证
-    if not list1 or not list2 then
-        return nil
-    end
-
-    if #list1 ~= #list2 then
-        error("两个列表的行数不同")
-    end
-
+function matrixAdd(matrix1, matrix2, rows, cols)
     local result = {}
-
-    -- 遍历每一行
-    for i = 1, #list1 do
-        local row1 = list1[i]
-        local row2 = list2[i]
-
-        -- 检查每行的列数
-        if #row1 ~= #row2 then
-            error(string.format("第%d行的列数不同: %d vs %d", i, #row1, #row2))
-        end
-
-        local result_row = {}
-
-        -- 遍历每一列
-        for j = 1, #row1 do
-            local val1 = row1[j]
-            local val2 = row2[j]
-
-            -- 处理相加逻辑
-            if val1 == nil and val2 == nil then
-                result_row[j] = nil
-            elseif val1 == nil then
-                result_row[j] = val2
-            elseif val2 == nil then
-                result_row[j] = val1
-            else
-                -- 两个都是数字，直接相加
-                if type(val1) == "number" and type(val2) == "number" then
-                    result_row[j] = val1 + val2
-                else
-                    -- 如果都是非nil但存在非数字类型，可以按需求处理
-                    -- 这里简单地尝试转换为数字相加
-                    local num1 = tonumber(val1) or 0
-                    local num2 = tonumber(val2) or 0
-                    result_row[j] = num1 + num2
-                end
+    
+    for i = 1, rows do
+        result[i] = {}
+        for j = 1, cols do
+            -- 获取值，nil 当作 0
+            local val1 = 0
+            local val2 = 0
+            
+            -- 检查 matrix1[i] 是否存在
+            if matrix1[i] then
+                val1 = matrix1[i][j] or 0
             end
+            
+            -- 检查 matrix2[i] 是否存在
+            if matrix2[i] then
+                val2 = matrix2[i][j] or 0
+            end
+            
+            result[i][j] = val1 + val2
         end
-
-        result[i] = result_row
     end
-
+    
     return result
 end
 

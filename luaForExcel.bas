@@ -716,7 +716,22 @@ Public Function LuaWatch(taskIdOrCell As Variant, field As String, _
     Dim targetAddr As String
     Dim targetRange As Range
 
-    If IsMissing(targetCell) Or IsEmpty(targetCell) Then
+    ' 修复：使用 TypeName 判断是否为 Range，而不是 IsEmpty
+    ' IsEmpty 对空单元格的 Range 会返回 True（检查的是 .Value）
+    Dim hasTargetCell As Boolean
+    hasTargetCell = False
+
+    If Not IsMissing(targetCell) Then
+        ' 检查是否为 Range 对象（即使是空单元格也算传入了目标）
+        If TypeName(targetCell) = "Range" Then
+            hasTargetCell = True
+        ElseIf Not IsEmpty(targetCell) Then
+            ' 非 Range 且非空（可能是字符串地址）
+            hasTargetCell = True
+        End If
+    End If
+
+    If Not hasTargetCell Then
         Select Case direction
             Case 0: Set targetRange = callerCell.Offset(0, 1)  ' 右
             Case 1: Set targetRange = callerCell.Offset(-1, 0) ' 上
