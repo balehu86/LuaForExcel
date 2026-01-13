@@ -342,7 +342,7 @@ end
        value = result_data      -- 可选，当前结果，单值、列表、无嵌套字典
    }
 
-3. return 返回格式（为一阶或二阶列表、字典。列表默认作为value）：
+3. return 协程的return格式（单值、一阶或二阶列表、字典（会尝试按以下格式解析几种值）；普通函数return格式（单值、一阶或二阶列表、字典（不支持嵌套，将作为二阶列表返回excel））
    {
        status = "done",         -- 可选，此字段一般省略，字段会被自动设置为 "done"
        progress = 100,          -- 可选，最终进度
@@ -441,30 +441,30 @@ function add_2d_lists(list1, list2)
     if not list1 or not list2 then
         return nil
     end
-    
+
     if #list1 ~= #list2 then
         error("两个列表的行数不同")
     end
-    
+
     local result = {}
-    
+
     -- 遍历每一行
     for i = 1, #list1 do
         local row1 = list1[i]
         local row2 = list2[i]
-        
+
         -- 检查每行的列数
         if #row1 ~= #row2 then
             error(string.format("第%d行的列数不同: %d vs %d", i, #row1, #row2))
         end
-        
+
         local result_row = {}
-        
+
         -- 遍历每一列
         for j = 1, #row1 do
             local val1 = row1[j]
             local val2 = row2[j]
-            
+
             -- 处理相加逻辑
             if val1 == nil and val2 == nil then
                 result_row[j] = nil
@@ -485,15 +485,12 @@ function add_2d_lists(list1, list2)
                 end
             end
         end
-        
+
         result[i] = result_row
     end
-    
+
     return result
 end
-
-
-
 
 -- ============================================
 -- 字典返回值测试函数集
@@ -636,13 +633,4 @@ end
 function test_coroutine_return_nested_compound()
     coroutine.yield({value = {name = "张六", score = 95}})
     return {value = {name = "张六", score = 95}}
-end
-
-function test_input_array()
-    array = coroutine.yield()
-    return array
-end
-
-function test_array()
-    return {1,2,3}
 end

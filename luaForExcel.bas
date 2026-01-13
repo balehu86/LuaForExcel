@@ -405,18 +405,18 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
 
     Dim result As Long
     result = lua_pcallk(g_LuaState, argCount, -1, 0, 0, 0)
-    
+
     ' 检查是否为协程 yield 错误
     If result = LUA_YIELD Then
         LuaCall = "提示: 函数 '" & funcName & "' 是协程函数，请使用 LuaTask 调用而非 LuaCall"
         lua_settop g_LuaState, stackTop  ' 统一恢复
         Exit Function
     End If
-    
+
     If result <> 0 Then
         Dim errMsg As String
         errMsg = GetStringFromState(g_LuaState, -1)
-        
+
         ' 检查错误信息是否包含 yield 相关内容
         If InStr(1, errMsg, "yield", vbTextCompare) > 0 Or _
            InStr(1, errMsg, "coroutine", vbTextCompare) > 0 Then
@@ -1429,15 +1429,42 @@ Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As 
         Exit Function
     End If
 
+    ' 已知的字典键名（小写）
+    Const KNOWN_KEYS As String = "|progress|message|value|error|status|"
+
+    Dim hasKnownKey As Boolean
+    hasKnownKey = False
+
+    Dim i As Long
+    Dim testKey As String
+
+    ' 遍历所有行，检查是否至少有一个已知键
+    For i = LBound(data, 1) To UBound(data, 1)
+        testKey = LCase(Trim(CStr(data(i, 1))))
+        If InStr(1, KNOWN_KEYS, "|" & testKey & "|", vbTextCompare) > 0 Then
+            hasKnownKey = True
+            Exit For
+        End If
+    Next
+
+    ' 如果没有任何已知键，作为普通数据处理
+    If Not hasKnownKey Then
+        task.taskValue = data
+        Exit Function
+    End If
+
     ' 解析字典键值对
-    Dim i As Long, key As String, value As Variant
+    Dim key As String, value As Variant
     For i = LBound(data, 1) To UBound(data, 1)
         key = LCase(Trim(CStr(data(i, 1))))
         value = data(i, 2)
 
         Select Case key
             Case "progress"
+                On Error Resume Next
                 task.taskProgress = CDbl(value)
+                If Err.Number <> 0 Then Err.Clear
+                On Error Resume Next
             Case "message"
                 task.taskMessage = CStr(value)
             Case "value"
@@ -1464,8 +1491,9 @@ Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As 
                         If Not isFinal Then SetTaskStatus task, CO_YIELD
                         ParseYieldReturn = False
                 End Select
+            ' Case Else: 忽略未知键（允许用户添加自定义键）
         End Select
-    Next
+    Next i
 End Function
 
 ' 统一压栈函数 - 简化版
