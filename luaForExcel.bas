@@ -1688,7 +1688,6 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
 End Function
 
 ' 将 Lua table 转换为 VBA Variant (字典或数组)
-' 支持 __size 元字段指定稀疏表尺寸: __size = {rows, cols}
 Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Variant
     On Error GoTo ErrorHandler
 
@@ -1708,7 +1707,6 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
 
     ' 如果长度为0，尝试判断是否为字典
     If length = 0 Then
-        ' 尝试获取第一个键值对
         Dim topBefore As Long
         topBefore = lua_gettop(L)
 
@@ -1724,29 +1722,43 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
         Exit Function
     End If
 
-    ' 检查是否为纯数组
+    ' 检查是否为纯数组（只有连续数字索引 1 到 length，没有其他键）
     Dim isPureArray As Boolean, testTop As Long
+    Dim totalKeyCount As Long
     isPureArray = True
+    totalKeyCount = 0
     testTop = lua_gettop(L)
 
     lua_pushnil L
     Do While lua_next(L, idx) <> 0
+        totalKeyCount = totalKeyCount + 1
+
         Dim keyType As Long
         keyType = lua_type(L, -2)
 
         If keyType = LUA_TNUMBER Then
             Dim keyNum As Double
             keyNum = lua_tonumberx(L, -2, 0)
+            ' 检查是否为有效的数组索引
             If keyNum <> CLng(keyNum) Or keyNum < 1 Or keyNum > length Then
                 isPureArray = False
+                lua_settop L, testTop
                 Exit Do
             End If
-        ElseIf keyType <> LUA_TSTRING Then
+        Else
+            ' 有非数字键（字符串键等），不是纯数组
             isPureArray = False
+            lua_settop L, testTop
             Exit Do
         End If
-        lua_settop L, -2
+        lua_settop L, -2  ' 弹出 value，保留 key
     Loop
+
+    ' 额外检查：键的数量必须等于 length（确保是连续的 1 到 length）
+    If isPureArray And totalKeyCount <> CLng(length) Then
+        isPureArray = False
+    End If
+
     lua_settop L, testTop
 
     ' 如果不是纯数组，按字典处理
