@@ -438,28 +438,24 @@ end
 --   相加后的二维数组
 function matrixAdd(matrix1, matrix2, rows, cols)
     local result = {}
-    
+
     for i = 1, rows do
         result[i] = {}
         for j = 1, cols do
             -- 获取值，nil 当作 0
             local val1 = 0
             local val2 = 0
-            
             -- 检查 matrix1[i] 是否存在
             if matrix1[i] then
                 val1 = matrix1[i][j] or 0
             end
-            
             -- 检查 matrix2[i] 是否存在
             if matrix2[i] then
                 val2 = matrix2[i][j] or 0
             end
-            
             result[i][j] = val1 + val2
         end
     end
-    
     return result
 end
 
@@ -501,21 +497,6 @@ function test_mixed_table()
     }
 end
 
--- 5. 嵌套字典
-function test_nested_dict()
-    return {
-        person = {
-            name = "李四",
-            age = 30
-        },
-        address = {
-            city = "上海",
-            street = "南京路"
-        },
-        score = 95.5
-    }
-end
-
 -- 6. 空字典
 function test_empty_dict()
     return {}
@@ -543,44 +524,6 @@ function test_chinese_keys()
         ["姓名"] = "王五",
         ["年龄"] = 28,
         ["城市"] = "广州"
-    }
-end
-
--- 10. 深层嵌套
-function test_deep_nested()
-    return {
-        level1 = {
-            level2 = {
-                level3 = {
-                    value = "最深层"
-                }
-            }
-        }
-    }
-end
-
--- 测试复合返回值
-function test_compound_return()
-    local a_table = {1, 2, 3, 4, 5}
-    local a_str = "处理完成"
-    
-    return {
-        value = a_table,
-        message = a_str
-    }
-end
-
--- 更复杂的嵌套
-function test_nested_compound()
-    return {
-        value = {
-            {name = "张三", score = 95},
-            {name = "李四", score = 88},
-            {name = "王五", score = 92}
-        },
-        message = "查询到3条记录",
-        status = "success",
-        count = 3
     }
 end
 

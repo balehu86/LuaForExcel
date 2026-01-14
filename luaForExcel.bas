@@ -1695,6 +1695,7 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
 End Function
 
 ' 将 Lua table 转换为 VBA Variant (字典或数组)
+' 支持 __size 元字段指定稀疏表尺寸: __size = {rows, cols}
 Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Variant
     On Error GoTo ErrorHandler
 
@@ -1703,7 +1704,15 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
         idx = lua_gettop(L) + idx + 1
     End If
 
-    ' 检查数组长度
+    ' ===== 检查 __size 字段 =====
+    Dim sizeRows As Long, sizeCols As Long
+    If TryGetTableSize(L, idx, sizeRows, sizeCols) Then
+        ' 有 __size，按指定尺寸构建数组
+        LuaTableToVariant = BuildArrayWithSize(L, idx, sizeRows, sizeCols)
+        Exit Function
+    End If
+
+    ' ===== 原有逻辑：无 __size 时自动检测 =====
     Dim length As LongPtr
     length = lua_rawlen(L, idx)
 
@@ -1727,36 +1736,7 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
 
     ' 检查是否为纯数组（所有键都是1到length的连续整数）
     Dim isPureArray As Boolean
-    isPureArray = True
-
-    Dim testTop As Long
-    testTop = lua_gettop(L)
-
-    lua_pushnil L
-    Do While lua_next(L, idx) <> 0
-        Dim keyType As Long
-        keyType = lua_type(L, -2)
-
-        If keyType <> LUA_TNUMBER Then
-            isPureArray = False
-            lua_settop L, testTop  ' 立即恢复栈
-            Exit Do
-        End If
-
-        Dim keyNum As Double
-        keyNum = lua_tonumberx(L, -2, 0)
-
-        ' 检查是否为整数且在范围内
-        If keyNum <> CLng(keyNum) Or keyNum < 1 Or keyNum > length Then
-            isPureArray = False
-            lua_settop L, testTop
-            Exit Do
-        End If
-
-        lua_settop L, -2  ' 只弹出value，保留key
-    Loop
-
-    lua_settop L, testTop  ' 确保栈恢复
+    isPureArray = CheckPureArray(L, idx, length)
 
     ' 如果不是纯数组，按字典处理
     If Not isPureArray Then
@@ -1765,7 +1745,6 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
     End If
 
     ' 纯数组处理
-    ' 检查第一个元素
     lua_rawgeti L, idx, 1
     Dim firstIsTable As Boolean
     firstIsTable = (lua_type(L, -1) = LUA_TTABLE)
@@ -1777,8 +1756,7 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
         Dim cols As LongPtr
         cols = lua_rawlen(L, -1)
         lua_settop L, -2
-
-        If cols = 0 Then cols = 1  ' 防止空子表
+        If cols = 0 Then cols = 1
 
         Dim arr2D() As Variant
         ReDim arr2D(1 To CLng(length), 1 To CLng(cols))
@@ -1786,11 +1764,9 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
         Dim i As Long, j As Long
         For i = 1 To CLng(length)
             lua_rawgeti L, idx, CLng(i)
-
             If lua_type(L, -1) = LUA_TTABLE Then
                 Dim subLen As LongPtr
                 subLen = lua_rawlen(L, -1)
-
                 For j = 1 To CLng(cols)
                     If j <= subLen Then
                         lua_rawgeti L, -1, CLng(j)
@@ -1803,29 +1779,115 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
             Else
                 arr2D(i, 1) = GetValue(L, -1)
             End If
-
             lua_settop L, -2
         Next i
-
         LuaTableToVariant = arr2D
     Else
-        ' 一维数组（转为单行二维）
+        ' 一维数组
         Dim arr1D() As Variant
         ReDim arr1D(1 To 1, 1 To CLng(length))
-
         For i = 1 To CLng(length)
             lua_rawgeti L, idx, CLng(i)
             arr1D(1, i) = GetValue(L, -1)
             lua_settop L, -2
         Next i
-
         LuaTableToVariant = arr1D
     End If
-
     Exit Function
 
 ErrorHandler:
     LuaTableToVariant = "#TABLE_ERROR: " & Err.Description
+End Function
+
+' 尝试从表中获取 __size 字段
+Private Function TryGetTableSize(ByVal L As LongPtr, ByVal idx As Long, ByRef rows As Long, ByRef cols As Long) As Boolean
+    TryGetTableSize = False
+    rows = 0: cols = 0
+
+    lua_getfield L, idx, "__size"
+    If lua_type(L, -1) <> LUA_TTABLE Then
+        lua_settop L, -2
+        Exit Function
+    End If
+
+    ' 读取 rows
+    lua_rawgeti L, -1, 1
+    If lua_type(L, -1) <> LUA_TNUMBER Then
+        lua_settop L, -3  ' 弹出 rows 和 __size
+        Exit Function
+    End If
+    rows = CLng(lua_tonumberx(L, -1, 0))
+    lua_settop L, -2
+
+    ' 读取 cols
+    lua_rawgeti L, -1, 2
+    If lua_type(L, -1) <> LUA_TNUMBER Then
+        lua_settop L, -3
+        Exit Function
+    End If
+    cols = CLng(lua_tonumberx(L, -1, 0))
+    lua_settop L, -3  ' 弹出 cols 和 __size
+
+    TryGetTableSize = (rows > 0 And cols > 0)
+End Function
+
+' 按指定尺寸构建数组
+Private Function BuildArrayWithSize(ByVal L As LongPtr, ByVal idx As Long, ByVal rows As Long, ByVal cols As Long) As Variant
+    Dim arr() As Variant
+    ReDim arr(1 To rows, 1 To cols)
+
+    Dim r As Long, c As Long
+    For r = 1 To rows
+        lua_rawgeti L, idx, CLng(r)
+        If lua_type(L, -1) = LUA_TTABLE Then
+            For c = 1 To cols
+                lua_rawgeti L, -1, CLng(c)
+                arr(r, c) = GetValue(L, -1)
+                lua_settop L, -2
+            Next c
+        End If
+        lua_settop L, -2
+    Next r
+
+    BuildArrayWithSize = arr
+End Function
+
+' 检查是否为纯数组（跳过 __size 键）
+Private Function CheckPureArray(ByVal L As LongPtr, ByVal idx As Long, ByVal length As LongPtr) As Boolean
+    Dim testTop As Long
+    testTop = lua_gettop(L)
+    CheckPureArray = True
+
+    lua_pushnil L
+    Do While lua_next(L, idx) <> 0
+        Dim keyType As Long
+        keyType = lua_type(L, -2)
+
+        ' 字符串键：只允许 __size
+        If keyType = LUA_TSTRING Then
+            If GetStringFromState(L, -2) <> "__size" Then
+                CheckPureArray = False
+                lua_settop L, testTop
+                Exit Function
+            End If
+        ElseIf keyType = LUA_TNUMBER Then
+            Dim keyNum As Double
+            keyNum = lua_tonumberx(L, -2, 0)
+            If keyNum <> CLng(keyNum) Or keyNum < 1 Or keyNum > length Then
+                CheckPureArray = False
+                lua_settop L, testTop
+                Exit Function
+            End If
+        Else
+            CheckPureArray = False
+            lua_settop L, testTop
+            Exit Function
+        End If
+
+        lua_settop L, -2  ' 弹出 value，保留 key
+    Loop
+
+    lua_settop L, testTop
 End Function
 
 ' 将 Lua table 转换为字典数组
