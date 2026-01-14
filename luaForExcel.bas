@@ -434,15 +434,8 @@ Public Function LuaCall(funcName As String, ParamArray args() As Variant) As Var
 
     If nResults = 0 Then
         LuaCall = Empty
-    ElseIf nResults = 1 Then
-        LuaCall = GetValue(g_LuaState, -1)
     Else
-        Dim results() As Variant
-        ReDim results(1 To 1, 1 To nResults)
-        For i = 1 To nResults
-            results(1, i) = GetValue(g_LuaState, stackTop + i)
-        Next i
-        LuaCall = results
+        LuaCall = GetValue(g_LuaState, -nResults)
     End If
 
     lua_settop g_LuaState, stackTop  ' 统一恢复
