@@ -421,6 +421,7 @@ end
 -- 两个相同大小的区域，对应位置相加，结果写回第二个区域
 function matrixAdd(matrix1, matrix2, rows, cols)
     local result = {}
+    coroutine.yield()
 
     for i = 1, rows do
         result[i] = {}
@@ -440,7 +441,12 @@ function matrixAdd(matrix1, matrix2, rows, cols)
         end
     end
     result.__size = {rows,cols}
-    return {value = result}
+    -- return {value = result}
+    return {
+        100, 200, 300,      -- 数组部分：索引 1, 2, 3
+        name = "混合表",     -- 字典部分
+        count = 3
+    }
 end
 
 function matrixAddNil(matrix1, matrix2, rows, cols)
