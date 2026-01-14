@@ -419,23 +419,6 @@ end
 
 -- functions.lua
 -- 两个相同大小的区域，对应位置相加，结果写回第二个区域
--- 规则：
---   - 两个都为空白 -> 结果为空白
---   - 一个为空白一个有值 -> 空白视为0
---   - 两个都有值 -> 正常相加
--- 两个相同大小的区域相加，空白值视为0
--- 参数：range1, range2 - 二维数组（从VBA传入的Range.Value）
--- 返回：二维数组，可直接溢出到Excel
--- 区域相加函数
--- 规则：
---   1. 两个空白值 -> 空白（nil）
---   2. 一个空白值 + 一个数值 -> 空白值当0，返回数值
---   3. 两个数值 -> 返回相加结果
--- 参数：
---   range1: 第一个区域（二维数组）
---   range2: 第二个区域（二维数组）
--- 返回：
---   相加后的二维数组
 function matrixAdd(matrix1, matrix2, rows, cols)
     local result = {}
 
@@ -456,9 +439,34 @@ function matrixAdd(matrix1, matrix2, rows, cols)
             result[i][j] = val1 + val2
         end
     end
-    return result
+    result.__size = {rows,cols}
+    return {value = result}
 end
 
+function matrixAddNil(matrix1, matrix2, rows, cols)
+    local result = {}
+
+    for i = 1, rows do
+        result[i] = {}
+        for j = 1, cols do
+            -- 获取值，nil 当作 0
+            local val1 = matrix1[i][j]
+            local val2 = matrix2[i][j]
+            -- 检查 matrix1[i] 是否存在
+            if val1 == nil and val2 == nil then
+                result[i][j] = nil
+            elseif val1 == nil then
+                result[i][j] = val2
+            elseif val2 == nil then
+                result[i][j] = val1
+            else
+                result[i][j] = val1+val2
+            end
+        end
+    end
+    result.__size = {rows,cols}
+    return result
+end
 -- ============================================
 -- 字典返回值测试函数集
 -- ============================================
