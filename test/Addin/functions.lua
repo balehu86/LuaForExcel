@@ -441,12 +441,12 @@ function matrixAdd(matrix1, matrix2, rows, cols)
         end
     end
     result.__size = {rows,cols}
-    -- return {value = result}
-    return {
-        100, 200, 300,      -- 数组部分：索引 1, 2, 3
-        name = "混合表",     -- 字典部分
-        count = 3
-    }
+    return {value = result}
+    -- return {
+    --     100, 200, 300,      -- 数组部分：索引 1, 2, 3
+    --     name = "混合表",     -- 字典部分
+    --     count = 3
+    -- }
 end
 
 function matrixAddNil(matrix1, matrix2, rows, cols)
@@ -471,7 +471,9 @@ function matrixAddNil(matrix1, matrix2, rows, cols)
         end
     end
     result.__size = {rows,cols}
-    return result
+    return {100, 200, 300,
+        name = "混合表",
+        count = 3,__size={5,5}}
 end
 -- ============================================
 -- 字典返回值测试函数集
@@ -507,7 +509,7 @@ function test_mixed_table()
     return {
         100, 200, 300,      -- 数组部分：索引 1, 2, 3
         name = "混合表",     -- 字典部分
-        count = 3
+        count = 3,__size={5,5}
     }
 end
 
