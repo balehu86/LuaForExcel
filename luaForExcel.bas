@@ -1399,7 +1399,10 @@ Private Sub HandleCoroutineResult(task As TaskUnit, result As Long, nres As Long
     If result = LUA_OK Or result = LUA_YIELD Then
         If hasResult Then
             Dim statusSet As Boolean
-            statusSet = ParseYieldReturn(task, GetValue(coThread, -1), (result = LUA_OK))
+            ' 先检查是否为控制表，再决定如何获取值
+            Dim rawValue As Variant
+            rawValue = GetValueForYieldReturn(coThread, -1)
+            statusSet = ParseYieldReturn(task, rawValue, (result = LUA_OK))
         End If
         If Not statusSet Then
             SetTaskStatus task, IIf(result = LUA_OK, CO_DONE, CO_YIELD)
@@ -1476,6 +1479,9 @@ Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As 
             Case "message"
                 task.taskMessage = CStr(value)
             Case "value"
+                ' value 字段的值直接赋给 taskValue
+                ' 注意：此时 value 已经通过 GetValue 处理过了
+                ' 如果 value 是带 __size 的表，已经被正确转换
                 task.taskValue = value
             Case "error"
                 task.taskError = CStr(value)
@@ -1502,6 +1508,27 @@ Private Function ParseYieldReturn(task As TaskUnit, data As Variant, isFinal As 
             ' Case Else: 忽略未知键（允许用户添加自定义键）
         End Select
     Next i
+End Function
+
+' 专门用于 yield/return 的值获取（智能判断是否为控制表）
+Private Function GetValueForYieldReturn(ByVal L As LongPtr, ByVal idx As Long) As Variant
+    ' 如果不是表，直接返回
+    If lua_type(L, idx) <> LUA_TTABLE Then
+        GetValueForYieldReturn = GetValue(L, idx, False)
+        Exit Function
+    End If
+    ' 标准化索引
+    Dim absIdx As Long
+    If idx < 0 Then
+        absIdx = lua_gettop(L) + idx + 1
+    Else
+        absIdx = idx
+    End If
+    ' 检查是否为控制表（包含已知控制键）
+    Dim isControlTable As Boolean
+    isControlTable = IsLuaControlTable(L, absIdx)
+    ' 根据判断结果获取值
+    GetValueForYieldReturn = GetValue(L, idx, isControlTable)
 End Function
 
 ' 统一压栈函数 - 简化版
@@ -1574,7 +1601,7 @@ Private Sub PushArray(ByVal L As LongPtr, arr As Variant)
 End Sub
 
 ' 从 Lua 栈获取值
-Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
+Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long, Optional ByVal isControlTable As Boolean = False) As Variant
     Select Case lua_type(L, idx)
         Case LUA_TNIL
             GetValue = Empty
@@ -1586,7 +1613,7 @@ Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long) As Variant
             ' 使用 UTF-8 安全的字符串获取
             GetValue = GetStringFromState(L, idx)
         Case LUA_TTABLE
-            GetValue = LuaTableToVariant(L, idx)
+            GetValue = LuaTableToVariant(L, idx, isControlTable)
         Case Else
             GetValue = "#LUA_TYPE_" & lua_type(L, idx)
     End Select
@@ -1688,17 +1715,19 @@ Private Function GetStringFromState(ByVal L As LongPtr, ByVal idx As Long) As St
 End Function
 
 ' 将 Lua table 转换为 VBA Variant (字典或数组)
-Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Variant
+' 参数 isControlTable: 标记是否为协程控制表的顶层（控制表不处理 __size）
+Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long, Optional ByVal isControlTable As Boolean = False) As Variant
     On Error GoTo ErrorHandler
-
     ' 标准化索引为正数
     If idx < 0 Then idx = lua_gettop(L) + idx + 1
-
     Dim sizeRows As Long, sizeCols As Long
-    ' 有 __size，按指定尺寸构建数组
-    If GetTableSizeField(L, idx, sizeRows, sizeCols) Then
-        LuaTableToVariant = BuildSparseArray(L, idx, sizeRows, sizeCols)
-        Exit Function
+
+    ' 只有非控制表才检查 __size
+    If Not isControlTable Then
+        If GetTableSizeField(L, idx, sizeRows, sizeCols) Then
+            LuaTableToVariant = BuildSparseArray(L, idx, sizeRows, sizeCols)
+            Exit Function
+        End If
     End If
 
     ' 无 __size 时自动检测
@@ -1816,6 +1845,67 @@ Private Function LuaTableToVariant(ByVal L As LongPtr, ByVal idx As Long) As Var
 
 ErrorHandler:
     LuaTableToVariant = "#TABLE_ERROR: " & Err.Description
+End Function
+
+' 检查 Lua 表是否为协程控制表
+Private Function IsLuaControlTable(ByVal L As LongPtr, ByVal idx As Long) As Boolean
+    On Error Resume Next
+    IsLuaControlTable = False
+
+    ' 已知的控制表键名
+    Const CONTROL_KEYS As String = "|progress|message|value|error|status|"
+
+    ' 检查表中是否存在任何控制键
+    Dim testTop As Long
+    testTop = lua_gettop(L)
+
+    ' 检查 progress
+    lua_getfield L, idx, "progress"
+    If lua_type(L, -1) <> LUA_TNIL Then
+        lua_settop L, testTop
+        IsLuaControlTable = True
+        Exit Function
+    End If
+    lua_settop L, testTop
+
+    ' 检查 message
+    lua_getfield L, idx, "message"
+    If lua_type(L, -1) <> LUA_TNIL Then
+        lua_settop L, testTop
+        IsLuaControlTable = True
+        Exit Function
+    End If
+    lua_settop L, testTop
+
+    ' 检查 value
+    lua_getfield L, idx, "value"
+    If lua_type(L, -1) <> LUA_TNIL Then
+        lua_settop L, testTop
+        IsLuaControlTable = True
+        Exit Function
+    End If
+    lua_settop L, testTop
+
+    ' 检查 error
+    lua_getfield L, idx, "error"
+    If lua_type(L, -1) <> LUA_TNIL Then
+        lua_settop L, testTop
+        IsLuaControlTable = True
+        Exit Function
+    End If
+    lua_settop L, testTop
+
+    ' 检查 status
+    lua_getfield L, idx, "status"
+    If lua_type(L, -1) <> LUA_TNIL Then
+        lua_settop L, testTop
+        IsLuaControlTable = True
+        Exit Function
+    End If
+    lua_settop L, testTop
+
+    ' 没有找到任何控制键，不是控制表
+    IsLuaControlTable = False
 End Function
 
 ' 获取 __size 字段并按尺寸构建数组
