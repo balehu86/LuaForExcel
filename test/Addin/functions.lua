@@ -421,7 +421,6 @@ end
 -- 两个相同大小的区域，对应位置相加，结果写回第二个区域
 function matrixAdd(matrix1, matrix2, rows, cols)
     local result = {}
-    coroutine.yield()
 
     for i = 1, rows do
         result[i] = {}
