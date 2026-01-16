@@ -826,24 +826,20 @@ ErrorHandler:
     LuaWatch = "#ERROR: " & Err.Description
 End Function
 Private Sub RefreshWatches()
-    On Error Resume Next
+    On Error GoTo ErrorHandler
     If g_Watches Is Nothing Then Exit Sub
     If g_Watches.Count = 0 Then Exit Sub
     ' 缓存已查找的工作簿
     Dim wbCache As Object
     Set wbCache = CreateObject("Scripting.Dictionary")
-
     Dim watchCell As Variant
     Dim watchInfo As WatchInfo
     Dim task As TaskUnit
     Dim currentValue As Variant
     For Each watchCell In g_Watches.Keys
         Set watchInfo = g_Watches(watchCell)
-        ' 只处理脏的监控
-        If Not watchInfo.watchDirty Then GoTo NextWatch
         ' 验证任务引用有效性
         If Not g_Tasks.Exists(watchInfo.watchTaskId) Then
-            watchInfo.watchDirty = False
             GoTo NextWatch
         End If
         ' 验证对象引用一致性
@@ -868,95 +864,163 @@ Private Sub RefreshWatches()
             Case Else
                 currentValue = "#未知字段"
         End Select
-        ' 检查值是否真的变化了
+        ' 检查值是否真的变化了（或者是脏的）
         Dim needWrite As Boolean
         needWrite = False
-        If IsEmpty(watchInfo.watchLastValue) Then
+        If watchInfo.watchDirty Then
+            needWrite = True
+        ElseIf IsEmpty(watchInfo.watchLastValue) Then
             needWrite = True
         ElseIf IsArray(currentValue) Or IsArray(watchInfo.watchLastValue) Then
             needWrite = True
-        ElseIf currentValue <> watchInfo.watchLastValue Then
+        ElseIf IsNull(currentValue) And IsNull(watchInfo.watchLastValue) Then
+            needWrite = False
+        ElseIf IsNull(currentValue) Or IsNull(watchInfo.watchLastValue) Then
             needWrite = True
+        Else
+            On Error Resume Next
+            Dim valuesEqual As Boolean
+            valuesEqual = (currentValue = watchInfo.watchLastValue)
+            If Err.Number <> 0 Then
+                Err.Clear
+                needWrite = True
+            Else
+                needWrite = Not valuesEqual
+            End If
+            On Error GoTo ErrorHandler
         End If
         ' 写入目标单元格
         If needWrite Then
-            ' 使用缓存的工作簿引用
             WriteToTargetCellCached watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook, wbCache
             watchInfo.watchLastValue = currentValue
         End If
-
         ' 清除脏标记
         watchInfo.watchDirty = False
-
 NextWatch:
     Next watchCell
     ' 清理缓存
     Set wbCache = Nothing
+    Exit Sub
+ErrorHandler:
+    Debug.Print "RefreshWatches Error: " & Err.Description & " at " & Erl
+    Set wbCache = Nothing
 End Sub
-' 带缓存的写入函数
 Private Sub WriteToTargetCellCached(targetAddr As String, value As Variant, wbName As String, wbCache As Object)
-    On Error Resume Next
+    On Error GoTo WriteError
+
     Dim targetRange As Range
     Dim wb As Workbook
+    Dim sheetName As String
+    Dim cellAddr As String
+    Dim workAddr As String
+    
     ' 先从缓存查找工作簿
     If wbCache.Exists(wbName) Then
         Set wb = wbCache(wbName)
     Else
+        On Error Resume Next
         Set wb = Application.Workbooks(wbName)
-        If Not wb Is Nothing Then
-            wbCache.Add wbName, wb
+        On Error GoTo WriteError
+        
+        If wb Is Nothing Then
+            Debug.Print "WriteToTargetCellCached: 工作簿不存在 - " & wbName
+            Exit Sub
         End If
+        wbCache.Add wbName, wb
     End If
-
-    If wb Is Nothing Then Exit Sub
-    ' 解析地址
-    Dim sheetName As String
-    Dim cellAddr As String
-    Dim exclamPos As Long
-    Dim bracketEnd As Long
-    ' 处理外部引用格式 [Book1.xlsx]Sheet1!$A$1
-    If Left(targetAddr, 1) = "[" Then
-        bracketEnd = InStr(targetAddr, "]")
-        exclamPos = InStr(targetAddr, "!")
-        If exclamPos > 0 Then
-            sheetName = Mid(targetAddr, bracketEnd + 1, exclamPos - bracketEnd - 1)
-            cellAddr = Mid(targetAddr, exclamPos + 1)
+    
+    workAddr = targetAddr
+    sheetName = ""
+    cellAddr = ""
+    
+    ' 处理外层单引号: '[Book.xlsx]Sheet-Name'!$A$1 -> [Book.xlsx]Sheet-Name!$A$1
+    ' 查找 '! 模式（单引号后紧跟感叹号）
+    Dim quoteExclamPos As Long
+    quoteExclamPos = InStr(workAddr, "'!")
+    
+    If quoteExclamPos > 0 And Left(workAddr, 1) = "'" Then
+        ' 格式: '[...]SheetName'!CellAddr
+        ' 提取工作表部分（去掉首尾引号）
+        Dim sheetPart As String
+        sheetPart = Mid(workAddr, 2, quoteExclamPos - 2)  ' 去掉开头的 ' 和结尾的 '
+        cellAddr = Mid(workAddr, quoteExclamPos + 2)       ' '! 之后的部分
+        
+        ' 从 sheetPart 中提取工作表名（可能包含 [Book.xlsx]）
+        Dim bracketEnd As Long
+        bracketEnd = InStr(sheetPart, "]")
+        If bracketEnd > 0 Then
+            sheetName = Mid(sheetPart, bracketEnd + 1)
         Else
-            cellAddr = Mid(targetAddr, bracketEnd + 1)
+            sheetName = sheetPart
         End If
-    ElseIf InStr(targetAddr, "!") > 0 Then
-        exclamPos = InStr(targetAddr, "!")
-        sheetName = Left(targetAddr, exclamPos - 1)
-        cellAddr = Mid(targetAddr, exclamPos + 1)
-        sheetName = Replace(sheetName, "'", "")
+    ElseIf Left(workAddr, 1) = "[" Then
+        ' 格式: [Book.xlsx]SheetName!CellAddr（无外层引号）
+        Dim bracketEnd2 As Long
+        bracketEnd2 = InStr(workAddr, "]")
+        If bracketEnd2 > 0 Then
+            Dim exclamPos As Long
+            exclamPos = InStr(bracketEnd2, workAddr, "!")
+            If exclamPos > 0 Then
+                sheetName = Mid(workAddr, bracketEnd2 + 1, exclamPos - bracketEnd2 - 1)
+                cellAddr = Mid(workAddr, exclamPos + 1)
+            Else
+                cellAddr = Mid(workAddr, bracketEnd2 + 1)
+            End If
+        End If
+    ElseIf InStr(workAddr, "!") > 0 Then
+        ' 格式: SheetName!CellAddr 或 'Sheet-Name'!CellAddr
+        Dim exclamPos2 As Long
+        exclamPos2 = InStr(workAddr, "!")
+        sheetName = Left(workAddr, exclamPos2 - 1)
+        cellAddr = Mid(workAddr, exclamPos2 + 1)
+        ' 去掉工作表名的引号
+        If Len(sheetName) >= 2 Then
+            If Left(sheetName, 1) = "'" And Right(sheetName, 1) = "'" Then
+                sheetName = Mid(sheetName, 2, Len(sheetName) - 2)
+            End If
+        End If
     Else
-        cellAddr = targetAddr
+        cellAddr = workAddr
     End If
+    
     ' 获取目标范围
+    On Error Resume Next
     If sheetName <> "" Then
         Set targetRange = wb.Sheets(sheetName).Range(cellAddr)
     Else
         Set targetRange = wb.ActiveSheet.Range(cellAddr)
     End If
-    If targetRange Is Nothing Then Exit Sub
+    
+    If Err.Number <> 0 Or targetRange Is Nothing Then
+        Debug.Print "WriteToTargetCellCached: 无法获取范围 - Sheet:[" & sheetName & "] Cell:[" & cellAddr & "] Err:" & Err.Description
+        Err.Clear
+        Exit Sub
+    End If
+    On Error GoTo WriteError
+    
     ' 直接写值
     If IsArray(value) Then
-        On Error Resume Next
         Dim rows As Long, cols As Long
+        On Error Resume Next
         rows = UBound(value, 1) - LBound(value, 1) + 1
         cols = UBound(value, 2) - LBound(value, 2) + 1
         If Err.Number = 0 Then
             targetRange.Resize(rows, cols).value = value
         Else
             Err.Clear
-            ' 一维数组
             rows = UBound(value) - LBound(value) + 1
             targetRange.Resize(1, rows).value = value
         End If
-        On Error Resume Next
+        On Error GoTo WriteError
     Else
         targetRange.value = value
     End If
+    
+    Debug.Print "WriteToTargetCellCached: 成功写入 " & targetAddr & " = " & IIf(IsArray(value), "(数组)", CStr(value))
+    Exit Sub
+    
+WriteError:
+    Debug.Print "WriteToTargetCellCached Error: " & Err.Description & " - 目标: " & targetAddr
 End Sub
 ' 优化后的 MarkWatchesDirty - O(m) 复杂度
 Private Sub MarkWatchesDirty(task As TaskUnit)
@@ -1138,6 +1202,8 @@ Public Sub SchedulerTick()
     Application.Calculation = xlCalculationManual
     Dim schedulerStart As Double
     schedulerStart = GetTickCount()
+    ' 重置脏标记（确保每次调度都能检测到变化）
+    g_StateDirty = False
     ' 使用 CFS 调度算法 
     Call ScheduleByCFS
     ' 性能计时统计
@@ -1146,11 +1212,8 @@ Public Sub SchedulerTick()
     g_SchedulerStats.LastTime = schedulerElapsed
     g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
     g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
-    ' 刷新监控
-    If g_StateDirty Then
-        RefreshWatches
-        g_StateDirty = False
-    End If
+    ' 强制刷新监控
+    RefreshWatches
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True

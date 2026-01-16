@@ -441,12 +441,7 @@ function matrixAdd(matrix1, matrix2, rows, cols)
         end
     end
     result.__size = {rows,cols}
-    return {value = result}
-    -- return {
-    --     100, 200, 300,      -- 数组部分：索引 1, 2, 3
-    --     name = "混合表",     -- 字典部分
-    --     count = 3
-    -- }
+    return {value = result,message="ok"}
 end
 
 function matrixAddNil(matrix1, matrix2, rows, cols)
@@ -565,12 +560,14 @@ function test_coroutine_return_nested_compound()
     return {value = {name = "张六", score = 95}}
 end
 
-function coroutine_sim()
-    local t = 0
-    while (True)
-    do
-        t=t+1
-        coroutine.yield(t)
+function coroutine_loop()
+    local i = 7
+    while true do
+        coroutine.yield({
+            progress = i,
+            message = "当前值: " .. i,
+            value = i
+        })
+        i = (i + 1) % 100  -- 取模，0-99 循环
     end
-    return nil
 end
