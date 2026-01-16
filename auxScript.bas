@@ -759,7 +759,7 @@ End Sub
 
 ' 启动本工作簿的所有defined任务
 Private Sub LuaSchedulerMenu_StartAllWorkbookTasks()
-    On Error Resume Next
+    On Error GoTo ErrorHandler
 
     ' 获取当前工作簿名称
     Dim wbName As String

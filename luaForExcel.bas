@@ -827,19 +827,17 @@ ErrorHandler:
 End Function
 Private Sub RefreshWatches()
     On Error GoTo ErrorHandler
+    ' 快速路径：无脏数据时直接返回
+    If Not g_StateDirty Then Exit Sub
     If g_Watches Is Nothing Then Exit Sub
     If g_Watches.Count = 0 Then Exit Sub
     ' 缓存已查找的工作簿
     Dim wbCache As Object
     Set wbCache = CreateObject("Scripting.Dictionary")
-
     Dim watchCell As Variant
     Dim watchInfo As WatchInfo
     Dim task As TaskUnit
     Dim currentValue As Variant
-    Dim refreshCount As Long
-    refreshCount = 0
-
     For Each watchCell In g_Watches.Keys
         Set watchInfo = g_Watches(watchCell)
         ' 跳过非脏的监控（优化：减少不必要的处理）
@@ -880,8 +878,10 @@ Private Sub RefreshWatches()
             On Error Resume Next
             If Not IsArray(currentValue) And Not IsArray(watchInfo.watchLastValue) Then
                 If Not IsNull(currentValue) And Not IsNull(watchInfo.watchLastValue) Then
-                    If currentValue = watchInfo.watchLastValue Then
-                        needWrite = False  ' 值未变化，跳过写入
+                    If Not IsObject(currentValue) And Not IsObject(watchInfo.watchLastValue) Then
+                        If currentValue = watchInfo.watchLastValue Then
+                            needWrite = False
+                        End If
                     End If
                 End If
             End If
@@ -891,16 +891,11 @@ Private Sub RefreshWatches()
         If needWrite Then
             WriteToTargetCellCached watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook, wbCache
             watchInfo.watchLastValue = currentValue
-            refreshCount = refreshCount + 1
         End If
         ' 清除脏标记
         watchInfo.watchDirty = False
 NextWatch:
     Next watchCell
-    ' 调试日志（可选）
-    If refreshCount > 0 Then
-        LogDebug "RefreshWatches: 刷新了 " & refreshCount & " 个监控"
-    End If
     ' 清理缓存
     Set wbCache = Nothing
     Exit Sub
@@ -1033,6 +1028,7 @@ Private Sub MarkWatchesDirty(task As TaskUnit)
     For Each wc In task.taskWatches
         If g_Watches.Exists(CStr(wc)) Then
             g_Watches(CStr(wc)).watchDirty = True
+            g_StateDirty = True
         End If
     Next
 End Sub
@@ -1186,8 +1182,10 @@ Public Sub SchedulerTick()
 
     Dim schedulerStart As Double
     schedulerStart = GetTickCount()
+    
     ' 使用 CFS 调度算法
     Call ScheduleByCFS
+    
     ' 性能计时统计
     Dim schedulerElapsed As Double
     schedulerElapsed = GetTickCount() - schedulerStart
@@ -1201,6 +1199,7 @@ Public Sub SchedulerTick()
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
     Application.ScreenUpdating = True
+    
     ' 重新安排下一次调度
     If g_TaskQueue.Count > 0 Then
         g_NextScheduleTime = Now + g_SchedulerIntervalMilliSec / 86400000#
@@ -1208,6 +1207,7 @@ Public Sub SchedulerTick()
     Else
         g_SchedulerRunning = False
     End If
+    
     Exit Sub
 ErrorHandler:
     Application.Calculation = xlCalculationAutomatic
@@ -1403,6 +1403,7 @@ Private Sub ResumeCoroutine(task As TaskUnit)
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
+    
     ' 处理结果
     HandleCoroutineResult task, result, CLng(nres)
     ' 在调度器循环中，每个任务执行后只标记脏
