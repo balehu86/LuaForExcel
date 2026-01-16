@@ -832,14 +832,21 @@ Private Sub RefreshWatches()
     ' 缓存已查找的工作簿
     Dim wbCache As Object
     Set wbCache = CreateObject("Scripting.Dictionary")
+
     Dim watchCell As Variant
     Dim watchInfo As WatchInfo
     Dim task As TaskUnit
     Dim currentValue As Variant
+    Dim refreshCount As Long
+    refreshCount = 0
+
     For Each watchCell In g_Watches.Keys
         Set watchInfo = g_Watches(watchCell)
+        ' 跳过非脏的监控（优化：减少不必要的处理）
+        If Not watchInfo.watchDirty Then GoTo NextWatch
         ' 验证任务引用有效性
         If Not g_Tasks.Exists(watchInfo.watchTaskId) Then
+            watchInfo.watchDirty = False  ' 清除脏标记，避免重复检查
             GoTo NextWatch
         End If
         ' 验证对象引用一致性
@@ -864,28 +871,19 @@ Private Sub RefreshWatches()
             Case Else
                 currentValue = "#未知字段"
         End Select
-        ' 检查值是否真的变化了（或者是脏的）
+        ' 因为已经通过 watchDirty 标记过滤，这里可以简化
+        ' 只有被标记为脏的监控才会到达这里
         Dim needWrite As Boolean
-        needWrite = False
-        If watchInfo.watchDirty Then
-            needWrite = True
-        ElseIf IsEmpty(watchInfo.watchLastValue) Then
-            needWrite = True
-        ElseIf IsArray(currentValue) Or IsArray(watchInfo.watchLastValue) Then
-            needWrite = True
-        ElseIf IsNull(currentValue) And IsNull(watchInfo.watchLastValue) Then
-            needWrite = False
-        ElseIf IsNull(currentValue) Or IsNull(watchInfo.watchLastValue) Then
-            needWrite = True
-        Else
+        needWrite = True  ' 脏监控默认需要写入
+        ' 可选：额外检查值是否真的变化（进一步优化）
+        If Not IsEmpty(watchInfo.watchLastValue) Then
             On Error Resume Next
-            Dim valuesEqual As Boolean
-            valuesEqual = (currentValue = watchInfo.watchLastValue)
-            If Err.Number <> 0 Then
-                Err.Clear
-                needWrite = True
-            Else
-                needWrite = Not valuesEqual
+            If Not IsArray(currentValue) And Not IsArray(watchInfo.watchLastValue) Then
+                If Not IsNull(currentValue) And Not IsNull(watchInfo.watchLastValue) Then
+                    If currentValue = watchInfo.watchLastValue Then
+                        needWrite = False  ' 值未变化，跳过写入
+                    End If
+                End If
             End If
             On Error GoTo ErrorHandler
         End If
@@ -893,11 +891,16 @@ Private Sub RefreshWatches()
         If needWrite Then
             WriteToTargetCellCached watchInfo.watchTargetCell, currentValue, watchInfo.watchWorkbook, wbCache
             watchInfo.watchLastValue = currentValue
+            refreshCount = refreshCount + 1
         End If
         ' 清除脏标记
         watchInfo.watchDirty = False
 NextWatch:
     Next watchCell
+    ' 调试日志（可选）
+    If refreshCount > 0 Then
+        LogDebug "RefreshWatches: 刷新了 " & refreshCount & " 个监控"
+    End If
     ' 清理缓存
     Set wbCache = Nothing
     Exit Sub
@@ -1039,29 +1042,23 @@ End Sub
 ' 启动协程
 Public Sub StartLuaCoroutine(taskId As String)
     On Error GoTo ErrorHandler
-
     If Not InitLuaState() Then
         MsgBox "Lua状态初始化失败", vbCritical
         Exit Sub
     End If
-
     If Not g_Tasks.Exists(taskId) Then
         MsgBox "错误：任务 " & taskId & " 不存在", vbCritical
         Exit Sub
     End If
-
     Dim task As TaskUnit
     Set task = g_Tasks(taskId)
-
     If task.taskStatus <> CO_DEFINED Then
         MsgBox "错误：任务已启动或已完成，当前状态: " & StatusToString(task.taskStatus), vbExclamation
         Exit Sub
     End If
-
     ' 保存主状态机栈顶
     Dim mainStackTop As Long
     mainStackTop = lua_gettop(g_LuaState)
-
     ' 创建协程线程（压入主栈）
     Dim coThread As LongPtr
     coThread = lua_newthread(g_LuaState)
@@ -1071,11 +1068,9 @@ Public Sub StartLuaCoroutine(taskId As String)
         lua_settop g_LuaState, mainStackTop
         Exit Sub
     End If
-
     ' luaL_ref 会弹出栈顶的 thread 并返回引用号
     Dim refResult As Long
     refResult = luaL_ref(g_LuaState, LUA_REGISTRYINDEX)
-
     ' 检查引用是否成功
     If refResult = LUA_REFNIL Or refResult = LUA_NOREF Then
         task.taskError = "无法创建协程引用 (ref=" & refResult & ")"
@@ -1083,10 +1078,8 @@ Public Sub StartLuaCoroutine(taskId As String)
         lua_settop g_LuaState, mainStackTop
         Exit Sub
     End If
-
     task.taskCoRef = refResult
     task.taskCoThread = coThread
-
     ' 获取函数并检查
     lua_getglobal g_LuaState, task.taskFunc
     If lua_type(g_LuaState, -1) <> LUA_TFUNCTION Then
@@ -1095,14 +1088,11 @@ Public Sub StartLuaCoroutine(taskId As String)
         lua_settop g_LuaState, mainStackTop
         Exit Sub
     End If
-
     ' 将函数移动到协程栈
     lua_xmove g_LuaState, coThread, 1
-
     ' 参数计数从 0 开始
     Dim nargs As Long
     nargs = 0
-
     ' 压入启动参数
     Dim startArgs As Variant
     startArgs = task.taskStartArgs
@@ -1123,49 +1113,42 @@ Public Sub StartLuaCoroutine(taskId As String)
             On Error GoTo ErrorHandler
         End If
     End If
-
     ' 执行协程
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
-
-    ' 处理结果
+    ' 处理结果（这里会设置任务状态和值）
     HandleCoroutineResult task, result, CLng(nres)
-
-    ' 启动时也要刷新监控
+    ' 关键：首次启动必须立即刷新，确保第一个返回值被写入
+    ' 无论任务状态如何，只要有监控就标记为脏并刷新
     MarkWatchesDirty task
-    g_StateDirty = True
-
-    ' 首次启动时立即刷新监控（确保第一个 yield/return 的值能被写入）
-    If task.taskStatus = CO_YIELD Or task.taskStatus = CO_DONE Or task.taskStatus = CO_ERROR Then
-        RefreshWatches
-        g_StateDirty = False
-    End If
-
+    ' 立即刷新（不等待调度器）
+    ' 这确保了：
+    ' 1. 第一个 yield 的值能立即显示
+    ' 2. 如果任务直接完成(CO_DONE)，结果也能显示
+    ' 3. 如果任务出错(CO_ERROR)，错误信息也能显示
+    RefreshWatches
     ' 如果是 yield 状态，启动调度器
     If task.taskStatus = CO_YIELD Then
         StartSchedulerIfNeeded
     End If
-
     Exit Sub
-
 ErrorHandler:
     Dim errMsg As String
     errMsg = "VBA错误: " & Err.Description
-
     ' 安全地设置错误状态
     If Not task Is Nothing Then
         task.taskError = errMsg
         SetTaskStatus task, CO_ERROR
+        MarkWatchesDirty task
+        RefreshWatches  ' 确保错误状态也被刷新
     End If
-
     ' 安全地恢复主栈
     If g_LuaState <> 0 And g_Initialized Then
         On Error Resume Next
         lua_settop g_LuaState, mainStackTop
         On Error GoTo 0
     End If
-
     MsgBox "启动协程失败: " & Err.Description, vbCritical
 End Sub
 
@@ -1189,7 +1172,7 @@ Public Sub StopScheduler()
     End If
 End Sub
 
-' 调度器心跳 - 主入口 （添加定期清理）
+' 调度器心跳 - 主入口
 Public Sub SchedulerTick()
     On Error GoTo ErrorHandler
     If Not g_SchedulerRunning Then Exit Sub
@@ -1200,11 +1183,10 @@ Public Sub SchedulerTick()
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.Calculation = xlCalculationManual
+
     Dim schedulerStart As Double
     schedulerStart = GetTickCount()
-    ' 重置脏标记（确保每次调度都能检测到变化）
-    g_StateDirty = False
-    ' 使用 CFS 调度算法 
+    ' 使用 CFS 调度算法
     Call ScheduleByCFS
     ' 性能计时统计
     Dim schedulerElapsed As Double
@@ -1212,7 +1194,9 @@ Public Sub SchedulerTick()
     g_SchedulerStats.LastTime = schedulerElapsed
     g_SchedulerStats.TotalTime = g_SchedulerStats.TotalTime + schedulerElapsed
     g_SchedulerStats.TotalCount = g_SchedulerStats.TotalCount + 1
-    ' 强制刷新监控
+
+    ' 每个 tick 结束时统一刷新所有脏监控
+    ' RefreshWatches 内部会检查每个监控的 watchDirty 标记
     RefreshWatches
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
@@ -1375,36 +1359,30 @@ End Sub
 ' Resume 协程
 Private Sub ResumeCoroutine(task As TaskUnit)
     On Error GoTo ErrorHandler
-
     Dim taskStart As Long
     taskStart = GetTickCount()
-
     Dim coThread As LongPtr
     coThread = task.taskCoThread
-
     ' 检查工作簿是否仍然打开
     If Len(task.taskWorkbook) > 0 Then
         Dim wb As Workbook
         On Error Resume Next
         Set wb = Application.Workbooks(task.taskWorkbook)
         On Error GoTo ErrorHandler
-
         If wb Is Nothing Then
             task.taskError = "工作簿已关闭: " & task.taskWorkbook
             SetTaskStatus task, CO_ERROR
+            MarkWatchesDirty task  ' 确保错误状态被标记
             Exit Sub
         End If
     End If
-
     ' 清空协程栈
     lua_settop coThread, 0
-
     ' 使用新的参数解析机制获取动态参数
     Dim resumeArgs As Variant
     resumeArgs = task.GetResumeArgs()
     Dim nargs As Long
     nargs = 0
-
     ' 压入参数
     If IsArray(resumeArgs) Then
         Dim lb As Long, ub As Long
@@ -1421,16 +1399,15 @@ Private Sub ResumeCoroutine(task As TaskUnit)
         End If
         On Error GoTo ErrorHandler
     End If
-
     ' 执行 resume
     Dim nres As LongPtr
     Dim result As Long
     result = lua_resume(coThread, g_LuaState, nargs, VarPtr(nres))
     ' 处理结果
     HandleCoroutineResult task, result, CLng(nres)
-    ' 标记监控为脏
+    ' 在调度器循环中，每个任务执行后只标记脏
+    ' 统一在 SchedulerTick 结束时刷新
     MarkWatchesDirty task
-    g_StateDirty = True
     ' 性能统计
     Dim taskElapsed As Double
     taskElapsed = GetTickCount() - taskStart
@@ -1439,15 +1416,13 @@ Private Sub ResumeCoroutine(task As TaskUnit)
         .taskTotalTime = .taskTotalTime + taskElapsed
         .taskTickCount = .taskTickCount + 1
     End With
-
     Exit Sub
 ErrorHandler:
     Dim errorDetails As String
     errorDetails = "Resume错误: " & Err.Description
-
     SetTaskStatus task, CO_ERROR
     task.taskError = errorDetails
-
+    MarkWatchesDirty task  ' 确保错误状态被标记
     Debug.Print "ResumeCoroutine Error: " & errorDetails
 End Sub
 ' ============================================

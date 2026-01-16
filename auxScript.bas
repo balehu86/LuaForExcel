@@ -422,16 +422,11 @@ End Sub
 Private Sub LuaTaskMenu_StartTask()
     Dim task As TaskUnit, taskId As String
     If Not GetTaskFromSelection(task, taskId) Then Exit Sub
-
     If task.taskStatus <> CO_DEFINED Then
         MsgBox "任务状态为 " & StatusToString(task.taskStatus) & "，无法启动。", vbExclamation
         Exit Sub
     End If
     StartLuaCoroutine taskId
-    If g_StateDirty Then
-        RefreshWatches
-        g_StateDirty = False
-    End If
     MsgBox "任务已启动: " & taskId, vbInformation
 End Sub
 
@@ -757,9 +752,7 @@ Private Sub LuaSchedulerMenu_RefreshWatches()
         MsgBox "没有需要刷新的监控。" & vbCrLf & _
                "（可能所有监控的任务都已不存在）", vbInformation, "刷新监控"
     End If
-
     Exit Sub
-
 ErrorHandler:
     MsgBox "刷新监控时出错: " & Err.Description, vbCritical, "错误"
 End Sub
@@ -810,11 +803,6 @@ Private Sub LuaSchedulerMenu_StartAllWorkbookTasks()
         StartSchedulerIfNeeded
         MsgBox "已启动工作簿 [" & wbName & "] 的 " & count & " 个任务。", vbInformation, "启动完成"
     End If
-    If g_StateDirty Then
-        RefreshWatches
-        g_StateDirty = False
-    End If
-
     Exit Sub
 ErrorHandler:
     MsgBox "启动任务时出错: " & Err.Description, vbCritical, "错误"
@@ -841,11 +829,6 @@ Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
             count = count + 1
         End If
     Next
-    If g_StateDirty Then
-        RefreshWatches
-        g_StateDirty = False
-    End If
-
     MsgBox "已启动 " & count & " 个任务", vbInformation
 End Sub
 
