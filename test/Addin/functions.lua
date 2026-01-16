@@ -509,7 +509,7 @@ function test_mixed_table()
     return {
         100, 200, 300,      -- 数组部分：索引 1, 2, 3
         name = "混合表",     -- 字典部分
-        count = 3,__size={5,5}
+        count = 3,__size={4,1}
     }
 end
 

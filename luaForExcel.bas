@@ -1928,20 +1928,115 @@ End Function
 
 ' 按指定尺寸构建数组
 Private Function BuildSparseArray(ByVal L As LongPtr, ByVal idx As Long, ByVal rows As Long, ByVal cols As Long) As Variant
-    Dim arr() As Variant, r As Long, c As Long
+    On Error GoTo ErrorHandler
+
+    Dim arr() As Variant
     ReDim arr(1 To rows, 1 To cols)
 
+    ' 初始化为 Empty（Excel 显示为空白）
+    Dim r As Long, c As Long
     For r = 1 To rows
-        lua_rawgeti L, idx, CLng(r)
-        If lua_type(L, -1) = LUA_TTABLE Then
-            For c = 1 To cols
-                lua_rawgeti L, -1, CLng(c)
-                arr(r, c) = GetValue(L, -1)
-                lua_settop L, -2
-            Next c
-        End If
-        lua_settop L, -2
+        For c = 1 To cols
+            arr(r, c) = Empty
+        Next c
     Next r
+
+    ' 检查表的结构类型
+    Dim length As LongPtr
+    length = lua_rawlen(L, idx)
+
+    ' 判断是否为纯二维数组结构（第一个元素是表）
+    Dim isNestedArray As Boolean
+    isNestedArray = False
+
+    If length > 0 Then
+        lua_rawgeti L, idx, 1
+        isNestedArray = (lua_type(L, -1) = LUA_TTABLE)
+        lua_settop L, -2
+    End If
+
+    If isNestedArray Then
+        ' 二维数组结构：{{1,2,3}, {4,5,6}, ...}
+        For r = 1 To rows
+            If r > length Then Exit For
+            lua_rawgeti L, idx, CLng(r)
+            If lua_type(L, -1) = LUA_TTABLE Then
+                Dim subLen As LongPtr
+                subLen = lua_rawlen(L, -1)
+                For c = 1 To cols
+                    If c > subLen Then Exit For
+                    lua_rawgeti L, -1, CLng(c)
+                    arr(r, c) = GetValue(L, -1)
+                    lua_settop L, -2
+                Next c
+            End If
+            lua_settop L, -2
+        Next r
+    Else
+        ' 混合表/字典结构：按键值对填充为两列
+        Dim topBefore As Long
+        topBefore = lua_gettop(L)
+
+        Dim rowIdx As Long
+        rowIdx = 1
+
+        Dim skipThisKey As Boolean
+        Dim keyStr As String
+
+        lua_pushnil L
+        Do While lua_next(L, idx) <> 0
+            skipThisKey = False
+
+            ' 检查是否为 __size 键（需要跳过）
+            If lua_type(L, -2) = LUA_TSTRING Then
+                keyStr = GetStringFromState(L, -2)
+                If keyStr = "__size" Then
+                    skipThisKey = True
+                End If
+            End If
+
+            If Not skipThisKey Then
+                ' 检查是否超出行数限制
+                If rowIdx > rows Then
+                    ' 超出限制，清理栈并退出循环
+                    lua_settop L, topBefore
+                    Exit Do
+                End If
+
+                ' 填充键（第一列）
+                If cols >= 1 Then
+                    Select Case lua_type(L, -2)
+                        Case LUA_TSTRING
+                            arr(rowIdx, 1) = GetStringFromState(L, -2)
+                        Case LUA_TNUMBER
+                            arr(rowIdx, 1) = lua_tonumberx(L, -2, 0)
+                        Case LUA_TBOOLEAN
+                            arr(rowIdx, 1) = (lua_toboolean(L, -2) <> 0)
+                        Case Else
+                            arr(rowIdx, 1) = "#KEY"
+                    End Select
+                End If
+
+                ' 填充值（第二列）
+                If cols >= 2 Then
+                    arr(rowIdx, 2) = GetValue(L, -1)
+                End If
+
+                rowIdx = rowIdx + 1
+            End If
+
+            ' 弹出 value，保留 key 用于下次迭代
+            lua_settop L, -2
+        Loop
+
+        lua_settop L, topBefore
+    End If
+
+    BuildSparseArray = arr
+    Exit Function
+
+ErrorHandler:
+    ReDim arr(1 To rows, 1 To cols)
     BuildSparseArray = arr
 End Function
 
