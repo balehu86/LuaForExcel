@@ -564,3 +564,13 @@ function test_coroutine_return_nested_compound()
     coroutine.yield({value = {name = "张六", score = 95}})
     return {value = {name = "张六", score = 95}}
 end
+
+function coroutine_sim()
+    local t = 0
+    while (True)
+    do
+        t=t+1
+        coroutine.yield(t)
+    end
+    return nil
+end

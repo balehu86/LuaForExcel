@@ -346,6 +346,7 @@ Public Sub EnableLuaTaskMenu()
     ' 添加调度的子菜单
     AddLuaMenuItem luaSchedulerMenu, "启动调度器", "LuaSchedulerMenu_StartScheduler"
     AddLuaMenuItem luaSchedulerMenu, "停止调度器", "LuaSchedulerMenu_StopScheduler"
+    AddLuaMenuItem luaSchedulerMenu, "刷新所有监控", "LuaSchedulerMenu_RefreshWatches"
     AddLuaMenuItem luaSchedulerMenu, "启动本簿所有任务", "LuaSchedulerMenu_StartAllWorkbookTasks"
     AddLuaMenuItem luaSchedulerMenu, "启动所有 defined 任务", "LuaSchedulerMenu_StartAllDefinedTasks"
     AddLuaMenuItem luaSchedulerMenu, "清理所有完成、错误任务", "LuaSchedulerMenu_CleanupFinishedTasks"
@@ -427,6 +428,10 @@ Private Sub LuaTaskMenu_StartTask()
         Exit Sub
     End If
     StartLuaCoroutine taskId
+    If g_StateDirty Then
+        RefreshWatches
+        g_StateDirty = False
+    End If
     MsgBox "任务已启动: " & taskId, vbInformation
 End Sub
 
@@ -714,6 +719,51 @@ Private Sub LuaSchedulerMenu_StopScheduler()
     StopScheduler
 End Sub
 
+' 手动刷新所有监控
+Private Sub LuaSchedulerMenu_RefreshWatches()
+    On Error GoTo ErrorHandler
+
+    If g_Watches Is Nothing Then
+        MsgBox "当前没有任何监控。", vbInformation, "刷新监控"
+        Exit Sub
+    End If
+
+    If g_Watches.Count = 0 Then
+        MsgBox "当前没有任何监控。", vbInformation, "刷新监控"
+        Exit Sub
+    End If
+
+    ' 标记所有监控为脏，强制刷新
+    Dim watchCell As Variant
+    Dim wi As WatchInfo
+    Dim dirtyCount As Long
+    dirtyCount = 0
+
+    For Each watchCell In g_Watches.Keys
+        Set wi = g_Watches(watchCell)
+        ' 只标记有效任务的监控
+        If g_Tasks.Exists(wi.watchTaskId) Then
+            wi.watchDirty = True
+            dirtyCount = dirtyCount + 1
+        End If
+    Next
+
+    ' 执行刷新
+    If dirtyCount > 0 Then
+        RefreshWatches
+        g_StateDirty = False
+        MsgBox "已刷新 " & dirtyCount & " 个监控。", vbInformation, "刷新完成"
+    Else
+        MsgBox "没有需要刷新的监控。" & vbCrLf & _
+               "（可能所有监控的任务都已不存在）", vbInformation, "刷新监控"
+    End If
+
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "刷新监控时出错: " & Err.Description, vbCritical, "错误"
+End Sub
+
 ' 启动本工作簿的所有defined任务
 Private Sub LuaSchedulerMenu_StartAllWorkbookTasks()
     On Error Resume Next
@@ -760,6 +810,10 @@ Private Sub LuaSchedulerMenu_StartAllWorkbookTasks()
         StartSchedulerIfNeeded
         MsgBox "已启动工作簿 [" & wbName & "] 的 " & count & " 个任务。", vbInformation, "启动完成"
     End If
+    If g_StateDirty Then
+        RefreshWatches
+        g_StateDirty = False
+    End If
 
     Exit Sub
 ErrorHandler:
@@ -787,6 +841,10 @@ Private Sub LuaSchedulerMenu_StartAllDefinedTasks()
             count = count + 1
         End If
     Next
+    If g_StateDirty Then
+        RefreshWatches
+        g_StateDirty = False
+    End If
 
     MsgBox "已启动 " & count & " 个任务", vbInformation
 End Sub
