@@ -1014,11 +1014,31 @@ Private Sub WriteToTargetCellCached(targetAddr As String, value As Variant, wbNa
         targetRange.value = value
     End If
     
-    Debug.Print "WriteToTargetCellCached: 成功写入 " & targetAddr & " = " & IIf(IsArray(value), "(数组)", CStr(value))
+    ' ===== 修复：安全的日志输出 =====
+    Dim logValue As String
+    On Error Resume Next
+    If IsArray(value) Then
+        logValue = "(数组)"
+    ElseIf IsObject(value) Then
+        logValue = "(对象)"
+    ElseIf IsNull(value) Then
+        logValue = "(Null)"
+    ElseIf IsEmpty(value) Then
+        logValue = "(Empty)"
+    Else
+        logValue = CStr(value)
+        If Err.Number <> 0 Then
+            Err.Clear
+            logValue = "(无法转换: " & TypeName(value) & ")"
+        End If
+    End If
+    On Error GoTo WriteError
+    
+    Debug.Print "WriteToTargetCellCached: 成功写入 " & targetAddr & " = " & logValue
     Exit Sub
     
 WriteError:
-    Debug.Print "WriteToTargetCellCached Error: " & Err.Description & " - 目标: " & targetAddr
+    Debug.Print "WriteToTargetCellCached Error: " & Err.Description & " - 目标: " & targetAddr & ", 值类型: " & TypeName(value)
 End Sub
 ' 优化后的 MarkWatchesDirty - O(m) 复杂度
 Private Sub MarkWatchesDirty(task As TaskUnit)
