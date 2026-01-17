@@ -135,15 +135,13 @@ Private Sub CleanupWorkbookWatches(wbName As String)
     ' 移除收集到的 watch
     Dim removeKey As Variant
     For Each removeKey In toRemove
-        If g_Watches.Exists(CStr(removeKey)) Then
-            Set watchInfo = g_Watches(CStr(removeKey))
-            ' 从任务的 taskWatches 集合中移除
-            If Not watchInfo.watchTask Is Nothing Then
-                watchInfo.watchTask.RemoveWatch CStr(removeKey)
-            End If
-            ' 从主索引移除
-            g_Watches.Remove CStr(removeKey)
+        Set watchInfo = g_Watches(CStr(removeKey))
+        ' 从任务的 taskWatches 集合中移除
+        If Not watchInfo.watchTask Is Nothing Then
+            watchInfo.watchTask.RemoveWatch watchInfo
         End If
+        ' 从主索引移除
+        g_Watches.Remove CStr(removeKey)
     Next
 
     If toRemove.Count > 0 Then
@@ -155,11 +153,10 @@ End Sub
 Private Sub CleanupTaskWatches(task As TaskUnit)
     On Error Resume Next
     If task Is Nothing Then Exit Sub
-    ' 直接遍历并删除，不需要中间 Collection
-    Dim wc As Variant
+    Dim wc As WatchInfo
     For Each wc In task.taskWatches
-        If g_Watches.Exists(CStr(wc)) Then
-            g_Watches.Remove CStr(wc)
+        If g_Watches.Exists(wc.watchCell) Then
+            g_Watches.Remove wc.watchCell
         End If
     Next
     Set task.taskWatches = New Collection

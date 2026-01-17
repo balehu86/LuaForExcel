@@ -46,24 +46,28 @@ Public Sub ClearCoroutineRef()
     taskCoThread = 0
 End Sub
 
-Public Sub AddWatch(watchCell As String)
+Public Sub AddWatch(watch As WatchInfo)
     On Error Resume Next
     ' 尝试直接添加，如果重复会静默失败
     Dim i As Long
     For i = 1 To taskWatches.Count
-        If taskWatches(i) = watchCell Then Exit Sub
+        If taskWatches(i) = watch Then Exit Sub
     Next
-    taskWatches.Add watchCell
+    taskWatches.Add watch
 End Sub
 
-Public Sub RemoveWatch(watchCell As String)
+Public Sub RemoveWatch(watch As WatchInfo)
     Dim i As Long
     For i = 1 To taskWatches.Count
-        If taskWatches(i) = watchCell Then
+        If taskWatches(i) = watch Then
             taskWatches.Remove i
             Exit Sub
         End If
     Next
+End Sub
+
+Public Sub CleanupWatch()
+    Set taskWatches = New Collection
 End Sub
 
 Public Property Get ResumeSpecParsed() As Variant
