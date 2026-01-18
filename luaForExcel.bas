@@ -1652,7 +1652,7 @@ End Sub
 Private Function GetValue(ByVal L As LongPtr, ByVal idx As Long, Optional ByVal isControlTable As Boolean = False) As Variant
     Select Case lua_type(L, idx)
         Case LUA_TNIL
-            GetValue = Empty
+            GetValue = vbNullString
         Case LUA_TBOOLEAN
             GetValue = (lua_toboolean(L, idx) <> 0)
         Case LUA_TNUMBER

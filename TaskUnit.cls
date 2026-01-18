@@ -51,7 +51,7 @@ Public Sub AddWatch(watch As WatchInfo)
     ' 尝试直接添加，如果重复会静默失败
     Dim i As Long
     For i = 1 To taskWatches.Count
-        If taskWatches(i) = watch Then Exit Sub
+        If taskWatches(i) Is watch Then Exit Sub
     Next
     taskWatches.Add watch
 End Sub
@@ -59,7 +59,7 @@ End Sub
 Public Sub RemoveWatch(watch As WatchInfo)
     Dim i As Long
     For i = 1 To taskWatches.Count
-        If taskWatches(i) = watch Then
+        If taskWatches(i) Is watch Then
             taskWatches.Remove i
             Exit Sub
         End If

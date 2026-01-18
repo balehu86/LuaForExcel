@@ -465,9 +465,7 @@ function matrixAddNil(matrix1, matrix2, rows, cols)
         end
     end
     result.__size = {rows,cols}
-    return {100, 200, 300,
-        name = "混合表",
-        count = 3,__size={5,5}}
+    return result
 end
 -- ============================================
 -- 字典返回值测试函数集

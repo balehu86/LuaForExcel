@@ -123,11 +123,11 @@ Private Sub CleanupWorkbookWatches(wbName As String)
     Set toRemove = New Collection
 
     Dim watchCell As Variant
-    Dim watchInfo As WatchInfo
+    Dim wi As WatchInfo
 
     For Each watchCell In g_Watches.Keys
-        Set watchInfo = g_Watches(watchCell)
-        If watchInfo.watchWorkbook = wbName Then
+        Set wi = g_Watches(watchCell)
+        If wi.watchWorkbook = wbName Then
             toRemove.Add CStr(watchCell)
         End If
     Next
@@ -135,10 +135,10 @@ Private Sub CleanupWorkbookWatches(wbName As String)
     ' 移除收集到的 watch
     Dim removeKey As Variant
     For Each removeKey In toRemove
-        Set watchInfo = g_Watches(CStr(removeKey))
+        Set wi = g_Watches(CStr(removeKey))
         ' 从任务的 taskWatches 集合中移除
-        If Not watchInfo.watchTask Is Nothing Then
-            watchInfo.watchTask.RemoveWatch watchInfo
+        If Not wi.watchTask Is Nothing Then
+            wi.watchTask.RemoveWatch wi
         End If
         ' 从主索引移除
         g_Watches.Remove CStr(removeKey)
@@ -153,12 +153,19 @@ End Sub
 Private Sub CleanupTaskWatches(task As TaskUnit)
     On Error Resume Next
     If task Is Nothing Then Exit Sub
-    Dim wc As WatchInfo
-    For Each wc In task.taskWatches
-        If g_Watches.Exists(wc.watchCell) Then
-            g_Watches.Remove wc.watchCell
+    ' 先从 g_Watches 主索引中移除
+    Dim wi As WatchInfo
+    Dim toRemove As New Collection
+    For Each wi In task.taskWatches
+        If g_Watches.Exists(wi.watchCell) Then
+            toRemove.Add wi.watchCell
         End If
     Next
+    Dim addr As Variant
+    For Each addr In toRemove
+        g_Watches.Remove CStr(addr)
+    Next
+    ' 清空二级索引
     Set task.taskWatches = New Collection
 End Sub
 
